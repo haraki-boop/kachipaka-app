@@ -115,21 +115,35 @@ def generate_prediction(race_id_target):
         return
 
     # ==================================================
-    # 🚨 重要変更1：人気・単勝オッズを計算から完全除外
+    # 🚨 スコア計算用データ作成（人気・単勝オッズをダミー化して無効化）
     # ==================================================
     features = ['枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 'horse_weight', 'weight_change']
     
+    # モデルの計算エラーを防ぐため列は追加する
+    if '単勝' in df.columns:
+        features.append('単勝')
+    if '人気' in df.columns:
+        features.append('人気')
+
     for f in features:
         if f not in race_df.columns:
             race_df[f] = 0
 
-    X_race = race_df[features].apply(pd.to_numeric, errors='coerce').fillna(0)
+    X_race = race_df[features].copy()
+
+    # ★計算用のデータだけ全頭同じ値に上書きし、人気を度外視させる★
+    if '単勝' in X_race.columns:
+        X_race['単勝'] = 10.0
+    if '人気' in X_race.columns:
+        X_race['人気'] = 5
+
+    X_race = X_race.apply(pd.to_numeric, errors='coerce').fillna(0)
     
-    # 確率を算出
+    # 確率を算出（これでオッズの影響を受けない純粋な能力スコアが出る）
     raw_prob = model.predict_proba(X_race)[:, 1]
 
     # ==================================================
-    # 🚨 重要変更2：勝率の100%正規化（合計を1.0にする）
+    # 🚨 勝率の100%正規化（合計を1.0にする）
     # ==================================================
     prob_sum = raw_prob.sum()
     if prob_sum > 0:
@@ -148,25 +162,24 @@ def generate_prediction(race_id_target):
     race_df = race_df.sort_values(by='win_prob', ascending=False).reset_index(drop=True)
 
     # ==================================================
-    # AIへ渡すデータリスト作成
+    # AIへ渡すデータリスト作成（表示用には実際のオッズ・人気を渡す）
     # ==================================================
     table_summary = []
     for idx, row in race_df.iterrows():
         horse_name = row.get('馬名', f"馬番{int(row.get('馬番', 0))}")
         jockey_name = row.get('騎手', "不明")
         
-        # オッズは出力に乗せるが、AIの「スコア計算」には影響していない
         horse_info = (
             f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{horse_name} | 騎手:{jockey_name} | "
             f"score:{row['score']:3d} | AI勝率予想:{row['win_prob']*100:.1f}% | "
-            f"斤量:{row.get('斤量', 0)}kg | 単勝:{row.get('単勝', '---')}倍"
+            f"斤量:{row.get('斤量', 0)}kg | 人気:{row.get('人気', '---')} | 単勝:{row.get('単勝', '---')}倍"
         )
         table_summary.append(horse_info)
 
     prompt_data = "\n".join(table_summary)
 
     # ==================================================
-    # 🚨 重要変更3＆4：検索の指示・言い訳禁止・買い目ルール
+    # 🚨 AIへのプロンプト指示
     # ==================================================
     system_instruction = f"""
 あなたは競馬分析AI「勝ちぱかくん」であり、データと現場情報を冷静に分析する凄腕のプロ馬券師です。
@@ -182,9 +195,9 @@ def generate_prediction(race_id_target):
 1. 【レース概況と展開予想】
 2. 【全頭 データ一覧】
 （※途中で文章を挟まず、提供された全頭分を以下のMarkdown形式で出力すること）
-| 馬番 | 馬名 | 騎手 | score | AI勝率予想 | 単勝オッズ |
-|---|---|---|---|---|---|
-| 01 | 〇〇 | 〇〇 | 100 | 12.5% | 4.5倍 |
+| 馬番 | 馬名 | 騎手 | score | AI勝率予想 | 人気 | 単勝オッズ |
+|---|---|---|---|---|---|---|
+| 01 | 〇〇 | 〇〇 | 100 | 12.5% | 2 | 4.5倍 |
 
 3. 【勝ちぱかくんのジャッジ・見解（印と推奨馬）】
 （各馬の評価や検索で得た情報はここで語ること）
