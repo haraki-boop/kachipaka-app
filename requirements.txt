@@ -2,5 +2,7 @@ pandas
 numpy
 joblib
 lightgbm
+scikit-learn
+optuna
 streamlit
 google-genai
