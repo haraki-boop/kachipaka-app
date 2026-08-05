@@ -61,7 +61,7 @@ def update_keiba_data():
             st.error(f"【データ更新エラー】: {e}")
 
 # --------------------------------------------------
-# 🎯 サイドバー（操作エリア）
+# 🎯 サイドバー（操作エリア：奇跡のバグ修正版）
 # --------------------------------------------------
 st.sidebar.header("⚙️ データ更新・管理")
 if st.sidebar.button("🔄 最新出馬表・オッズを自動更新", use_container_width=True):
@@ -71,27 +71,48 @@ st.sidebar.markdown("---")
 st.sidebar.header("🎯 レース選択")
 
 if df is not None and not df.empty:
-    PLACE_MAP = {
-        "札幌": "01", "函館": "02", "福島": "03", "新潟": "04", "東京": "05",
-        "中山": "06", "中京": "07", "京都": "08", "阪神": "09", "小倉": "10"
+    PLACE_MAP_REV = {
+        "01": "札幌", "02": "函館", "03": "福島", "04": "新潟", "05": "東京",
+        "06": "中山", "07": "中京", "08": "京都", "09": "阪神", "10": "小倉"
     }
 
     if 'race_id' in df.columns:
-        df['date_str'] = df['race_id'].astype(str).str[:8]
-        available_dates = sorted(df['date_str'].unique(), reverse=True)
+        # CSVの中にあるIDをそのまま読み込む
+        df['race_id_str'] = df['race_id'].astype(str).str.replace(r'\.0$', '', regex=True)
+        unique_race_ids = df['race_id_str'].unique()
+        
+        race_options = {}
+        # 12桁のIDを「〇年 〇回 〇〇競馬 〇日目 〇R」の日本語に翻訳する
+        for rid in unique_race_ids:
+            if len(rid) == 12:
+                y = rid[:4]
+                p_code = rid[4:6]
+                p_name = PLACE_MAP_REV.get(p_code, "不明")
+                k = int(rid[6:8])
+                d = int(rid[8:10])
+                r = int(rid[10:12])
+                label = f"{y}年 第{k}回 {p_name} {d}日目 {r}R (ID: {rid})"
+                race_options[label] = rid
+            else:
+                race_options[f"未対応フォーマット (ID: {rid})"] = rid
+
+        selected_label = st.sidebar.selectbox("🎯 予想するレースを選択", list(race_options.keys()))
+        target_race_id = race_options[selected_label]
+        
+        # 選択されたレースの情報をAIへ渡す用に抽出
+        if len(target_race_id) == 12:
+            target_year = target_race_id[:4]
+            target_place_name = PLACE_MAP_REV.get(target_race_id[4:6], "不明")
+            target_race_num = f"{int(target_race_id[10:12])}R"
+        else:
+            target_year = "今年"
+            target_place_name = "指定"
+            target_race_num = "のレース"
+
+        btn_predict = st.sidebar.button("🚀 勝ちぱかくんに予想させる！", type="primary", use_container_width=True)
     else:
         st.error("【エラー】CSV内に 'race_id' 列が見つかりません。")
         st.stop()
-
-    selected_date = st.sidebar.selectbox("📅 開催日を選択", available_dates)
-    selected_place_name = st.sidebar.selectbox("🏇 競馬場を選択", list(PLACE_MAP.keys()))
-    selected_place_code = PLACE_MAP[selected_place_name]
-    selected_race_num = st.sidebar.selectbox("🏁 レース（R）を選択", [f"{i}R" for i in range(1, 13)])
-    race_num_int = int(selected_race_num.replace("R", ""))
-
-    target_race_id = f"{selected_date}{selected_place_code}{race_num_int:02d}"
-
-    btn_predict = st.sidebar.button("🚀 勝ちぱかくんに予想させる！", type="primary", use_container_width=True)
 else:
     st.error("【エラー】'cleaned_keiba_data.csv' が読み込めません。")
     st.stop()
@@ -108,7 +129,8 @@ def generate_prediction(race_id_target):
         st.error("【モデルエラー】AIモデル（keiba_ai_model.pkl）が読み込めません。")
         return
 
-    race_df = df[df['race_id'].astype(str).str.contains(str(race_id_target))].copy()
+    # 選択されたIDと完全一致する行だけを抽出！もう誤爆しません！
+    race_df = df[df['race_id_str'] == str(race_id_target)].copy()
 
     if race_df.empty:
         st.warning(f"選択されたレース（ID: {race_id_target}）の出走馬データが見つかりません。")
@@ -119,7 +141,6 @@ def generate_prediction(race_id_target):
     # ==================================================
     features = ['枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 'horse_weight', 'weight_change']
     
-    # モデルの計算エラーを防ぐため列は追加する
     if '単勝' in df.columns:
         features.append('単勝')
     if '人気' in df.columns:
@@ -131,19 +152,17 @@ def generate_prediction(race_id_target):
 
     X_race = race_df[features].copy()
 
-    # ★計算用のデータだけ全頭同じ値に上書きし、人気を度外視させる★
+    # 計算用のデータだけ全頭同じ値に強制上書きし、人気を完全に度外視させる
     if '単勝' in X_race.columns:
         X_race['単勝'] = 10.0
     if '人気' in X_race.columns:
         X_race['人気'] = 5
 
     X_race = X_race.apply(pd.to_numeric, errors='coerce').fillna(0)
-    
-    # 確率を算出（これでオッズの影響を受けない純粋な能力スコアが出る）
     raw_prob = model.predict_proba(X_race)[:, 1]
 
     # ==================================================
-    # 🚨 勝率の100%正規化（合計を1.0にする）
+    # 🚨 勝率の100%正規化
     # ==================================================
     prob_sum = raw_prob.sum()
     if prob_sum > 0:
@@ -151,7 +170,6 @@ def generate_prediction(race_id_target):
     else:
         race_df['win_prob'] = 0
 
-    # 独自スコアの算出（100を基準に上下させる）
     mean_prob = race_df['win_prob'].mean()
     if mean_prob > 0:
         raw_score = 100 + ((race_df['win_prob'] - mean_prob) / mean_prob) * 30
@@ -185,8 +203,8 @@ def generate_prediction(race_id_target):
 あなたは競馬分析AI「勝ちぱかくん」であり、データと現場情報を冷静に分析する凄腕のプロ馬券師です。
 
 【厳守事項】
-1. Web検索ツールを使用する際は、必ず「{selected_date[:4]}年{selected_date[4:6]}月{selected_date[6:8]}日 {selected_place_name}競馬 {selected_race_num} 出馬表」のようにレースを特定して検索するか、個別の「馬名」を検索して正確な情報を拾ってください。
-2. 今回分析するレースは【{selected_place_name}競馬場 {selected_race_num}】です。提供されたCSVの出走馬データ（馬名など）を『絶対の正解』として扱ってください。万が一、検索結果と提供データに齟齬があっても、データへの言い訳や不一致の指摘は【1文字たりとも】出力してはいけません。
+1. Web検索ツールを使用する際は、必ず「{target_year}年 {target_place_name}競馬 {target_race_num} 出馬表」のようにレースを特定して検索するか、提供された出馬表の「馬名」を検索して正確な情報を拾ってください。
+2. 今回分析するレースは【{target_year}年 {target_place_name}競馬 {target_race_num}】です。提供されたCSVの出走馬データ（馬名など）を『絶対の正解』として扱ってください。万が一、検索結果と提供データに齟齬があっても、データへの言い訳や不一致の指摘は【1文字たりとも】出力してはいけません。
 3. 提供された「score」と「AI勝率予想」は、世間の人気やオッズを一切排除し、純粋な能力値から算出した独自の数値です。これを絶対の評価軸として、オッズに惑わされずに本質的な予想を行ってください。
 4. 印（◎◯▲△☆）を打つ推奨馬は、原則【最大5頭まで】に絞ること。スコアが大混戦の場合のみ増やして構いません。
 
@@ -207,7 +225,7 @@ def generate_prediction(race_id_target):
 """
 
     prompt = f"""
-以下のレース（ID: {race_id_target}、{selected_place_name} {selected_race_num}）の出走馬データをベースに、最新情報をWeb検索してプロ予想記事を作成してください。
+以下のレース（ID: {race_id_target}、{target_place_name} {target_race_num}）の出走馬データをベースに、最新情報をWeb検索してプロ予想記事を作成してください。
 --- 出走馬ベースデータ ---
 {prompt_data}
 ---
@@ -247,7 +265,7 @@ def generate_prediction(race_id_target):
 
         if response and response.text:
             st.markdown("---")
-            st.subheader(f"📰 {selected_date[:4]}年{selected_date[4:6]}月{selected_date[6:8]}日 {selected_place_name} {selected_race_num} 勝ちぱかくんの予想")
+            st.subheader(f"📰 {selected_label} 勝ちぱかくんの予想")
             st.markdown(response.text)
         else:
             st.error("【エラー】Google APIからの応答を取得できませんでした。")
@@ -255,7 +273,7 @@ def generate_prediction(race_id_target):
 # --------------------------------------------------
 # メイン画面描画
 # --------------------------------------------------
-st.info(f"選択中: **{selected_date[:4]}年{selected_date[4:6]}月{selected_date[6:8]}日** の **{selected_place_name} {selected_race_num}** (レースID: `{target_race_id}`)")
+st.info(f"選択中: **{selected_label}**")
 
 if btn_predict:
     generate_prediction(target_race_id)
