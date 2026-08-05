@@ -187,11 +187,11 @@ def generate_prediction(race_id_target):
     with st.spinner("🦙 勝ちぱかがWeb検索で馬場適性・調教・騎手・オッズ妙味を徹底調査中..."):
         client = genai.Client(api_key=GEMINI_API_KEY)
         
-        # 混雑エラー（503）対策：2.5-flash失敗時は2.0-flashへ自動切り替え
-        models_to_try = ['gemini-2.5-flash', 'gemini-2.0-flash']
+        # 混雑（503）対策：同じモデルで再試行後、proへフォールバック
+        models_to_try = ['gemini-2.5-flash', 'gemini-2.5-flash', 'gemini-2.5-pro']
         response = None
         
-        for model_name in models_to_try:
+        for i, model_name in enumerate(models_to_try):
             try:
                 response = client.models.generate_content(
                     model=model_name,
@@ -206,9 +206,13 @@ def generate_prediction(race_id_target):
                     break
             except Exception as e:
                 if "503" in str(e) or "UNAVAILABLE" in str(e):
-                    st.warning(f"⚠️ {model_name} が混雑中のため、バックアップエンジン（2.0-flash）で再試行します...")
-                    time.sleep(1)
-                    continue
+                    if i < len(models_to_try) - 1:
+                        st.warning(f"⚠️ サーバー混雑中のため、3秒待機して再試行します...（{i+1}/{len(models_to_try)}回目）")
+                        time.sleep(3)
+                        continue
+                    else:
+                        st.error("【APIエラー】サーバーが大変混雑しています。数分時間をおいてから再度お試しください。")
+                        return
                 else:
                     st.error(f"【APIエラー】: {e}")
                     return
