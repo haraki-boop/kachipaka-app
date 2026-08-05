@@ -102,7 +102,7 @@ if df is not None and not df.empty:
 
     btn_predict = st.sidebar.button("🚀 勝ちぱかくんに予想させる！", type="primary", use_container_width=True)
 else:
-    st.error("【エラー】'cleaned_keiba_data.csv' が読み込めません。上のボタンを押すか、ファイルをGitHubで確認してください。")
+    st.error("【エラー】'cleaned_keiba_data.csv' が読み込めません。ファイルをGitHubで確認してください。")
     st.stop()
 
 # --------------------------------------------------
@@ -185,22 +185,40 @@ def generate_prediction(race_id_target):
 """
 
     with st.spinner("🦙 勝ちぱかがWeb検索で馬場適性・調教・騎手・オッズ妙味を徹底調査中..."):
-        try:
-            client = genai.Client(api_key=GEMINI_API_KEY)
-            response = client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    tools=[{"google_search": {}}],
-                    temperature=0.75
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        
+        # 混雑エラー（503）対策：2.5-flash失敗時は2.0-flashへ自動切り替え
+        models_to_try = ['gemini-2.5-flash', 'gemini-2.0-flash']
+        response = None
+        
+        for model_name in models_to_try:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        tools=[{"google_search": {}}],
+                        temperature=0.75
+                    )
                 )
-            )
+                if response:
+                    break
+            except Exception as e:
+                if "503" in str(e) or "UNAVAILABLE" in str(e):
+                    st.warning(f"⚠️ {model_name} が混雑中のため、バックアップエンジン（2.0-flash）で再試行します...")
+                    time.sleep(1)
+                    continue
+                else:
+                    st.error(f"【APIエラー】: {e}")
+                    return
+
+        if response and response.text:
             st.markdown("---")
             st.subheader(f"📰 {selected_date} {selected_place_name} {selected_race_num} 勝ちぱかくんの予想")
             st.markdown(response.text)
-        except Exception as e:
-            st.error(f"【APIエラー】: {e}")
+        else:
+            st.error("【エラー】Google APIからの応答を取得できませんでした。再度お試しください。")
 
 # --------------------------------------------------
 # メイン画面描画
