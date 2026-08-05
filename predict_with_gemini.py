@@ -54,12 +54,7 @@ def update_keiba_data():
     """今週末の最新出馬表・オッズ等を自動取得してCSVを更新する処理"""
     with st.spinner("🔄 JRA/netkeiba等から最新の出馬表・直前オッズデータを取得中..."):
         try:
-            # ---------------------------------------------------------
-            # ここにお持ちのスクレイピング・データ更新ロジックが入ります
-            # ---------------------------------------------------------
             time.sleep(2)  # 擬似処理待機
-            
-            # キャッシュをクリアして最新CSVをリロード
             st.cache_data.clear()
             st.success("✅ 最新の出馬表・直前オッズデータの更新が完了しました！")
             st.rerun()
@@ -86,18 +81,12 @@ if df is not None and not df.empty:
     df['date_str'] = df['race_id'].astype(str).str[:8]
     available_dates = sorted(df['date_str'].unique(), reverse=True)
 
-    # 1. 日付選択
     selected_date = st.sidebar.selectbox("📅 開催日を選択", available_dates)
-
-    # 2. 競馬場選択
     selected_place_name = st.sidebar.selectbox("🏇 競馬場を選択", list(PLACE_MAP.keys()))
     selected_place_code = PLACE_MAP[selected_place_name]
-
-    # 3. レース番号選択
     selected_race_num = st.sidebar.selectbox("🏁 レース（R）を選択", [f"{i}R" for i in range(1, 13)])
     race_num_int = int(selected_race_num.replace("R", ""))
 
-    # レースIDを自動生成
     target_race_id = f"{selected_date}{selected_place_code}{race_num_int:02d}"
 
     btn_predict = st.sidebar.button("🚀 勝ちぱかくんに予想させる！", type="primary", use_container_width=True)
@@ -133,7 +122,6 @@ def generate_prediction(race_id_target):
     X_race = race_df[features].fillna(0)
     race_df['win_prob'] = model.predict_proba(X_race)[:, 1]
 
-    # score (50-120) 算出
     mean_prob = race_df['win_prob'].mean()
     raw_score = 100 + (race_df['win_prob'] - mean_prob) / (mean_prob if mean_prob != 0 else 1) * 30
     race_df['score'] = np.clip(raw_score, 50, 120).round().astype(int)
@@ -146,39 +134,44 @@ def generate_prediction(race_id_target):
         jockey_name = row['騎手'] if '騎手' in row and pd.notna(row['騎手']) else "不明"
         
         horse_info = (
-            f"【ベースscore: {row['score']:3d}】| 馬番:{int(row['馬番']):02d} | 馬名:{horse_name} | 騎手:{jockey_name} | "
-            f"性齢:{row.get('sex', '')}{int(row.get('age', 0))} | 斤量:{row.get('斤量', 0)}kg | "
-            f"単勝:{row.get('単勝', '---')}倍({int(row.get('人気', 0))}人気) | "
-            f"AI勝率:{row['win_prob']*100:.1f}%"
+            f"馬番:{int(row['馬番']):02d} | 馬名:{horse_name} | 騎手:{jockey_name} | "
+            f"score:{row['score']:3d} | AI勝率予想:{row['win_prob']*100:.1f}% | "
+            f"性齢:{row.get('sex', '')}{int(row.get('age', 0))} | 斤量:{row.get('斤量', 0)}kg | 単勝:{row.get('単勝', '---')}倍"
         )
         table_summary.append(horse_info)
 
     prompt_data = "\n".join(table_summary)
 
-    # 3. Gemini呼び出し設定
-    system_instruction = """
-あなたは競馬分析AI「勝ちぱかくん」であり、人気や表面的なスコアに決して流されない「適性・現場情報・オッズ妙味重視の凄腕馬券師」です。
-提供された出走馬のベースscoreデータに加え、Google検索ツールを用いて以下の【4つの超重要ファクター】を徹底的に調査してください。
+    # 3. Gemini呼び出し設定（プロンプト修正版）
+    system_instruction = f"""
+あなたは競馬分析AI「勝ちぱかくん」であり、データと現場情報を冷静に分析する凄腕のプロ馬券師です。
+提供された出走馬のベースscoreデータと、Google検索ツールを用いた最新情報（適性・調教・陣営コメントなど）を融合して予想を作成してください。
 
-【検索・分析すべき超重要ファクター】
-1. 【適性】各馬の前走実績、今回の「距離」および「コース（競馬場）」に対する得意・不得意。
-2. 【調教・状態】最新の追い切り評価、陣営のコメント、直前の気配。
-3. 【騎手相性】騎乗するジョッキーの「その競馬場における戦績・相性」や、今回のコースにおける騎手心理。
-4. 【過去の人気と着順（オッズ妙味）】前走や近走において「人気だったのに敗れた馬の巻き返し（過小評価）」や「人気薄で好走した馬のフロック判定（過大評価）」など、過去の人気と着順から見える馬券的妙味。
+【厳守事項】
+・検索時の内部ログ（SPOILER ALERT等）やシステムメッセージは絶対に文章に出力しないでください。
+・今回のレースは【{selected_place_name}競馬場】です。他の競馬場と勘違いしないこと。
+・基本はLightGBMが算出した「score」と「AI勝率予想」を素直に評価の軸とすること。無理に穴を狙う必要はありません。ただし、スコアが拮抗している場合や、検索結果から明確な激走サイン（条件替わりなど）を見つけた場合のみ妙味を考慮してください。
+・印（◎◯▲△☆など）を打つ推奨馬は原則【5頭まで】に絞ること。ただし、スコアが大混戦の場合のみ例外として超えても構いません。
 
-【予想のスタンス（超重要）】
-単勝人気やベースscoreの順位をそのまま鵜呑みにした「硬い予想」は絶対に避けてください。
-ベースscoreが低くても、「前走は1番人気で負けたが今回は得意コース」「調教が抜群に良く騎手相性も完璧」といった隠れた激走サインやオッズ妙味を見つけ出し、積極的に重い印（◎や◯）を打つなど、独自の視点で予想を展開してください。
+【構成案と出力フォーマット】
+以下の1〜4の構成で出力してください。
 
-構成案：
-1. 【波乱の可能性とレース概況】（天候・馬場状態、展開予想、馬券的な旨味について）
-2. 【全頭 ジャッジ一覧】（表形式で馬番・馬名・騎手・ベースscoreに加え、検索で調べた「適性」「調教」「騎手相性」「過去の人気と着順の妙味」を加味した一言メモを全頭分添える）
-3. 【激アツ予想印（◎◯▲△☆）と見解】（人気やscore順位に逆らった、現場情報とオッズ妙味重視の鋭い見解）
-4. 【勝ちぱかくんの推奨買い目】
+1. 【レース概況と展開予想】
+2. 【全頭 データ一覧】
+必ず以下のマークダウン形式の表で、提供された全頭分を出力してください。途中で文章を挟んだり、余計なコメント列を追加したりしないでください。
+| 馬番 | 馬名 | 騎手 | score | AI勝率予想 | 単勝オッズ |
+|---|---|---|---|---|---|
+| 01 | 〇〇 | 〇〇 | 100 | 12.5% | 4.5倍 |
+（※全頭分リストアップすること）
+
+3. 【勝ちぱかくんのジャッジ・見解（印と推奨馬）】
+（※各馬の評価や検索で得た情報は、表の中ではなくこちらの文章でしっかりと語ってください）
+4. 【推奨買い目】
+（※単勝、馬連などに加え、必ず【三連複】の買い目を含めて提示してください）
 """
 
     prompt = f"""
-以下のレース（ID: {race_id_target}）の出走馬データをベースに、最新情報をWeb検索してプロ予想記事を作成してください。
+以下のレース（ID: {race_id_target}、{selected_place_name} {selected_race_num}）の出走馬データをベースに、最新情報をWeb検索してプロ予想記事を作成してください。
 --- 出走馬ベースデータ ---
 {prompt_data}
 ---
@@ -187,7 +180,6 @@ def generate_prediction(race_id_target):
     with st.spinner("🦙 勝ちぱかがWeb検索で馬場適性・調教・騎手・オッズ妙味を徹底調査中..."):
         client = genai.Client(api_key=GEMINI_API_KEY)
         
-        # 混雑（503）対策：同じモデルで再試行後、proへフォールバック
         models_to_try = ['gemini-2.5-flash', 'gemini-2.5-flash', 'gemini-2.5-pro']
         response = None
         
