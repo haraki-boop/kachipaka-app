@@ -38,7 +38,8 @@ def load_data():
     data_path = "cleaned_keiba_data.csv"
     if os.path.exists(data_path):
         try:
-            return pd.read_csv(data_path)
+            # 念のため、エラーが出にくいように読み込み
+            return pd.read_csv(data_path, low_memory=False)
         except Exception as e:
             st.error(f"【CSV読み込みエラー】: {e}")
             return None
@@ -77,9 +78,13 @@ if df is not None and not df.empty:
         "中山": "06", "中京": "07", "京都": "08", "阪神": "09", "小倉": "10"
     }
 
-    # CSV内の最新日付を取得
-    df['date_str'] = df['race_id'].astype(str).str[:8]
-    available_dates = sorted(df['date_str'].unique(), reverse=True)
+    # CSV内の最新日付を取得（エラー回避のため文字列変換）
+    if 'race_id' in df.columns:
+        df['date_str'] = df['race_id'].astype(str).str[:8]
+        available_dates = sorted(df['date_str'].unique(), reverse=True)
+    else:
+        st.error("【エラー】CSV内に 'race_id' 列が見つかりません。ヘッダー（1行目）が正しく設定されているか確認してください。")
+        st.stop()
 
     selected_date = st.sidebar.selectbox("📅 開催日を選択", available_dates)
     selected_place_name = st.sidebar.selectbox("🏇 競馬場を選択", list(PLACE_MAP.keys()))
@@ -99,27 +104,34 @@ else:
 # --------------------------------------------------
 def generate_prediction(race_id_target):
     if not GEMINI_API_KEY:
-        st.error("【設定エラー】GEMINI_API_KEY が見つかりません。Streamlit Community Cloudの Advanced settings > Secrets に APIキーを設定してください。")
+        st.error("【設定エラー】GEMINI_API_KEY が見つかりません。")
         return
 
     if model is None:
-        st.error("【モデルエラー】AIモデル（keiba_ai_model.pkl）が正しく読み込めていないため、予想を実行できません。")
+        st.error("【モデルエラー】AIモデル（keiba_ai_model.pkl）が正しく読み込めていません。")
         return
 
-    race_df = df[df['race_id'].astype(str) == str(race_id_target)].copy()
+    race_df = df[df['race_id'].astype(str).str.contains(str(race_id_target))].copy()
 
     if race_df.empty:
-        st.warning(f"選択されたレース（{selected_date} {selected_place_name} {selected_race_num} / ID: {race_id_target}）の出走馬データがCSV内に存在しません。左上の「最新出馬表・オッズを自動更新」を押すか、別のレースをお試しください。")
+        st.warning(f"選択されたレース（{selected_date} {selected_place_name} {selected_race_num} / ID: {race_id_target}）の出走馬データが見つかりません。")
         return
 
     # 1. LightGBMによる基礎スコア計算
     features = ['枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 'horse_weight', 'weight_change']
+    
+    # 欠損列の補完
+    for f in features:
+        if f not in race_df.columns:
+            race_df[f] = 0
+
     if '単勝' in race_df.columns:
         features.append('単勝')
     if '人気' in race_df.columns:
         features.append('人気')
 
-    X_race = race_df[features].fillna(0)
+    # 数値変換と推論
+    X_race = race_df[features].apply(pd.to_numeric, errors='coerce').fillna(0)
     race_df['win_prob'] = model.predict_proba(X_race)[:, 1]
 
     mean_prob = race_df['win_prob'].mean()
@@ -130,44 +142,44 @@ def generate_prediction(race_id_target):
     # 2. AI へ渡す基本出走データ作成
     table_summary = []
     for idx, row in race_df.iterrows():
-        horse_name = row['馬名'] if '馬名' in row and pd.notna(row['馬名']) else f"馬番{int(row['馬番'])}"
-        jockey_name = row['騎手'] if '騎手' in row and pd.notna(row['騎手']) else "不明"
+        horse_name = row.get('馬名', f"馬番{int(row.get('馬番', 0))}")
+        jockey_name = row.get('騎手', "不明")
         
         horse_info = (
-            f"馬番:{int(row['馬番']):02d} | 馬名:{horse_name} | 騎手:{jockey_name} | "
+            f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{horse_name} | 騎手:{jockey_name} | "
             f"score:{row['score']:3d} | AI勝率予想:{row['win_prob']*100:.1f}% | "
-            f"性齢:{row.get('sex', '')}{int(row.get('age', 0))} | 斤量:{row.get('斤量', 0)}kg | 単勝:{row.get('単勝', '---')}倍"
+            f"斤量:{row.get('斤量', 0)}kg | 単勝:{row.get('単勝', '---')}倍"
         )
         table_summary.append(horse_info)
 
     prompt_data = "\n".join(table_summary)
 
-    # 3. Gemini呼び出し設定（プロンプト修正版）
+    # 3. Gemini呼び出し設定（超厳格ルール版）
     system_instruction = f"""
 あなたは競馬分析AI「勝ちぱかくん」であり、データと現場情報を冷静に分析する凄腕のプロ馬券師です。
-提供された出走馬のベースscoreデータと、Google検索ツールを用いた最新情報（適性・調教・陣営コメントなど）を融合して予想を作成してください。
+提供された出走馬のベースscoreデータと、Google検索ツールを用いた最新情報を融合して予想を作成してください。
 
 【厳守事項】
 ・検索時の内部ログ（SPOILER ALERT等）やシステムメッセージは絶対に文章に出力しないでください。
 ・今回のレースは【{selected_place_name}競馬場】です。他の競馬場と勘違いしないこと。
-・基本はLightGBMが算出した「score」と「AI勝率予想」を素直に評価の軸とすること。無理に穴を狙う必要はありません。ただし、スコアが拮抗している場合や、検索結果から明確な激走サイン（条件替わりなど）を見つけた場合のみ妙味を考慮してください。
-・印（◎◯▲△☆など）を打つ推奨馬は原則【5頭まで】に絞ること。ただし、スコアが大混戦の場合のみ例外として超えても構いません。
+・基本は提供された「score」と「AI勝率予想」に忠実に評価すること。無理に穴を狙う必要はありません。スコアが拮抗している場合や、明確な激走サイン（条件替わり・調教抜群など）がある場合のみ妙味を考慮してください。
+・印（◎◯▲△☆）を打つ推奨馬は、原則【最大5頭まで】に絞ること。スコアが横並びの大混戦レースと判断した場合のみ、例外として増やしても構いません。
 
 【構成案と出力フォーマット】
 以下の1〜4の構成で出力してください。
 
 1. 【レース概況と展開予想】
 2. 【全頭 データ一覧】
-必ず以下のマークダウン形式の表で、提供された全頭分を出力してください。途中で文章を挟んだり、余計なコメント列を追加したりしないでください。
+必ず以下のマークダウン形式の表で、提供された「全頭分」を出力してください。途中で文章を挟まないこと。
 | 馬番 | 馬名 | 騎手 | score | AI勝率予想 | 単勝オッズ |
 |---|---|---|---|---|---|
 | 01 | 〇〇 | 〇〇 | 100 | 12.5% | 4.5倍 |
-（※全頭分リストアップすること）
 
 3. 【勝ちぱかくんのジャッジ・見解（印と推奨馬）】
-（※各馬の評価や検索で得た情報は、表の中ではなくこちらの文章でしっかりと語ってください）
+各馬の評価や検索で得た情報は、こちらの文章でしっかりと語ってください。
 4. 【推奨買い目】
-（※単勝、馬連などに加え、必ず【三連複】の買い目を含めて提示してください）
+必ず【三連複】と【三連単】の買い目を含めて提示してください。
+※三連単は点数が非現実的にならないよう、必ず「フォーメーション」または「1着2着軸マルチ」のどちらかで組み立ててください。
 """
 
     prompt = f"""
