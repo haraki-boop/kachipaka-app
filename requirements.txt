@@ -1,5 +1,6 @@
 pandas
 numpy
 joblib
+lightgbm
 streamlit
 google-genai
