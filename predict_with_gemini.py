@@ -61,7 +61,7 @@ def update_keiba_data():
             st.error(f"【データ更新エラー】: {e}")
 
 # --------------------------------------------------
-# 🎯 サイドバー（3段階スッキリ選択UI）
+# 🎯 サイドバー（日付表示対応UI）
 # --------------------------------------------------
 st.sidebar.header("⚙️ データ更新・管理")
 if st.sidebar.button("🔄 最新出馬表・オッズを自動更新", use_container_width=True):
@@ -79,8 +79,19 @@ if df is not None and not df.empty:
     if 'race_id' in df.columns:
         df['race_id_str'] = df['race_id'].astype(str).str.replace(r'\.0$', '', regex=True)
         
-        # 12桁IDの分解関数
-        def parse_race_id(rid):
+        # CSV内に日付列があるか自動探索
+        date_col = None
+        for col in ['date', '日付', '開催日', '年月日', 'Date']:
+            if col in df.columns:
+                date_col = col
+                break
+
+        # 12桁IDの分解＆日付整形処理
+        def parse_race_info(row):
+            rid = str(row['race_id_str'])
+            # CSV内に日付列があれば優先的に利用
+            raw_date = str(row[date_col]) if date_col and pd.notna(row[date_col]) else ""
+            
             if len(rid) == 12:
                 year = rid[:4]
                 p_code = rid[4:6]
@@ -88,34 +99,45 @@ if df is not None and not df.empty:
                 kai = int(rid[6:8])
                 day = int(rid[8:10])
                 r_num = int(rid[10:12])
-                return year, p_code, p_name, f"{year}年 第{kai}回 {day}日目", f"{r_num}R"
+                
+                # 日付表示の組み立て
+                if raw_date and len(raw_date) >= 8:
+                    # YYYYMMDD または YYYY/MM/DD フォーマットの整形
+                    clean_date = raw_date.replace('-', '').replace('/', '')
+                    if len(clean_date) >= 8:
+                        date_label = f"{clean_date[:4]}年{int(clean_date[4:6])}月{int(clean_date[6:8])}日"
+                    else:
+                        date_label = f"{year}年 第{kai}回{day}日目"
+                else:
+                    date_label = f"{year}年 第{kai}回{day}日目"
+                    
+                return year, p_code, p_name, date_label, f"{r_num}R"
             return "不明", "00", "不明", "不明", "不明"
 
-        # 分解情報をデータフレームに追加
-        parsed = df['race_id_str'].apply(parse_race_id)
+        parsed = df.apply(parse_race_info, axis=1)
         df['place_name'] = [p[2] for p in parsed]
-        df['kai_day_label'] = [p[3] for p in parsed]
+        df['date_label'] = [p[3] for p in parsed]
         df['race_num_label'] = [p[4] for p in parsed]
 
         # STEP 1: 競馬場を選択
         all_places = [p for p in PLACE_MAP_REV.values() if p in df['place_name'].unique()]
         selected_place = st.sidebar.selectbox("🏇 競馬場を選択", all_places if all_places else sorted(df['place_name'].unique()))
 
-        # STEP 2: 選択された競馬場の開催（年・回・日）を選択
+        # STEP 2: 開催日を選択（具体的に「〇年〇月〇日」で表示）
         df_place = df[df['place_name'] == selected_place]
-        all_kai_days = sorted(df_place['kai_day_label'].unique(), reverse=True)
-        selected_kai_day = st.sidebar.selectbox("📅 開催を選択", all_kai_days)
+        all_dates = sorted(df_place['date_label'].unique(), reverse=True)
+        selected_date_label = st.sidebar.selectbox("📅 開催日を選択", all_dates)
 
         # STEP 3: レース（R）を選択
-        df_kai = df_place[df_place['kai_day_label'] == selected_kai_day]
-        all_races = sorted(df_kai['race_num_label'].unique(), key=lambda x: int(x.replace('R', '')) if 'R' in x else 0)
+        df_date = df_place[df_place['date_label'] == selected_date_label]
+        all_races = sorted(df_date['race_num_label'].unique(), key=lambda x: int(x.replace('R', '')) if 'R' in x else 0)
         selected_race_num = st.sidebar.selectbox("🏁 レース（R）を選択", all_races)
 
         # ターゲットレースIDの特定
-        matched_rows = df_kai[df_kai['race_num_label'] == selected_race_num]
+        matched_rows = df_date[df_date['race_num_label'] == selected_race_num]
         if not matched_rows.empty:
             target_race_id = matched_rows['race_id_str'].iloc[0]
-            selected_label = f"{selected_kai_day} {selected_place} {selected_race_num}"
+            selected_label = f"{selected_date_label} {selected_place} {selected_race_num}"
         else:
             st.error("【エラー】一致するレースIDが見つかりません。")
             st.stop()
@@ -162,7 +184,6 @@ def generate_prediction(race_id_target, race_display_name):
 
     X_race = race_df[features].copy()
 
-    # 計算用データのみ全頭同じ値に上書きし、オッズ・人気を完全無視
     if '単勝' in X_race.columns:
         X_race['単勝'] = 10.0
     if '人気' in X_race.columns:
