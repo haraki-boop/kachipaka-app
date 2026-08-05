@@ -21,19 +21,27 @@ st.caption("LightGBM基礎スコア × GeminiリアルタイムWeb検索（適�
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
 
 # --------------------------------------------------
-# データ＆モデル読み込み（キャッシュ機能付き）
+# データ＆モデル読み込み（安全読み込み・キャッシュ機能付き）
 # --------------------------------------------------
 @st.cache_resource
 def load_model():
     model_path = "keiba_ai_model.pkl"
     if os.path.exists(model_path):
-        return joblib.load(model_path)
+        try:
+            return joblib.load(model_path)
+        except Exception as e:
+            st.error(f"【モデル読み込みエラー】: {e}")
+            return None
     return None
 
 def load_data():
     data_path = "cleaned_keiba_data.csv"
     if os.path.exists(data_path):
-        return pd.read_csv(data_path)
+        try:
+            return pd.read_csv(data_path)
+        except Exception as e:
+            st.error(f"【CSV読み込みエラー】: {e}")
+            return None
     return None
 
 model = load_model()
@@ -94,7 +102,7 @@ if df is not None and not df.empty:
 
     btn_predict = st.sidebar.button("🚀 勝ちぱかくんに予想させる！", type="primary", use_container_width=True)
 else:
-    st.error("【エラー】'cleaned_keiba_data.csv' が見つかりません。上のボタンからデータを更新するか、CSVをアプイロードしてください。")
+    st.error("【エラー】'cleaned_keiba_data.csv' が読み込めません。上のボタンを押すか、ファイルをGitHubで確認してください。")
     st.stop()
 
 # --------------------------------------------------
@@ -103,6 +111,10 @@ else:
 def generate_prediction(race_id_target):
     if not GEMINI_API_KEY:
         st.error("【設定エラー】GEMINI_API_KEY が見つかりません。Streamlit Community Cloudの Advanced settings > Secrets に APIキーを設定してください。")
+        return
+
+    if model is None:
+        st.error("【モデルエラー】AIモデル（keiba_ai_model.pkl）が正しく読み込めていないため、予想を実行できません。")
         return
 
     race_df = df[df['race_id'].astype(str) == str(race_id_target)].copy()
