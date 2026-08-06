@@ -13,7 +13,7 @@ from google.genai import types
 st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="🦙", layout="wide")
 
 st.title("🦙 AI予想 勝ちぱかくん")
-st.caption("LightGBM基礎スコア（全過去走自動集計・人気度外視） × GeminiリアルタイムWeb検索")
+st.caption("LightGBM基礎スコア（全過去走自動集計） × GeminiリアルタイムWeb検索（回収率特化型）")
 
 # --------------------------------------------------
 # 🔑 Gemini APIキーの設定
@@ -59,7 +59,6 @@ def load_data():
     if os.path.exists(data_path):
         try:
             loaded_df = pd.read_csv(data_path, low_memory=False, dtype={'race_id': str})
-            # time_seconds 列が存在しない場合は タイム 列から自動補完
             if 'time_seconds' not in loaded_df.columns:
                 if 'タイム' in loaded_df.columns:
                     loaded_df['time_seconds'] = loaded_df['タイム'].apply(time_to_seconds)
@@ -174,7 +173,7 @@ else:
     st.stop()
 
 # --------------------------------------------------
-# 🤖 予想生成ロジック（エラー回避ガード付き）
+# 🤖 予想生成ロジック
 # --------------------------------------------------
 def generate_prediction(race_id_target, race_display_name):
     if not GEMINI_API_KEY:
@@ -204,6 +203,7 @@ def generate_prediction(race_id_target, race_display_name):
 
     X_race = race_df[features].copy()
 
+    # 人気と単勝をダミー化してオッズ依存を排除
     if '単勝' in X_race.columns: X_race['単勝'] = 10.0
     if '人気' in X_race.columns: X_race['人気'] = 5.0
 
@@ -217,6 +217,7 @@ def generate_prediction(race_id_target, race_display_name):
     past_top3_rates = []
     filled_times = []
 
+    # 過去走の集計ループ
     for idx, row in race_df.iterrows():
         hname = row.get('馬名', '')
         h_past = past_df[past_df['馬名'] == hname] if ('馬名' in past_df.columns and hname) else pd.DataFrame()
@@ -245,11 +246,10 @@ def generate_prediction(race_id_target, race_display_name):
     X_race['time_seconds'] = filled_times
     X_race = X_race.apply(pd.to_numeric, errors='coerce').fillna(0)
 
+    # 予測＆補正
     raw_prob = model.predict_proba(X_race)[:, 1]
-
     rank_weights = np.array([1.0 / (r + 1.0) for r in past_avg_ranks])
     top3_weights = np.array(past_top3_rates) + 0.1
-    
     combined_prob = raw_prob * rank_weights * top3_weights
 
     prob_sum = combined_prob.sum()
@@ -281,30 +281,41 @@ def generate_prediction(race_id_target, race_display_name):
 
     prompt_data = "\n".join(table_summary)
 
+    # ==================================================
+    # 🚨 AIへのプロンプト指示（回収率特化型）
+    # ==================================================
     system_instruction = f"""
-あなたは競馬分析AI「勝ちぱかくん」であり、データと現場情報を冷静に分析する凄腕のプロ馬券師です。
+あなたは競馬分析AI「勝ちぱかくん」であり、的中率ではなく「長期的な回収率の最大化」に特化した冷酷で正確なプロ馬券師です。
+オッズや人間の感情的バイアスを完全に排除し、純粋なデータ（score）とリアルタイムの物理的要因（馬場・展開）のみで期待値を算出します。
 
 【厳守事項・最優先ルール】
-1. Web検索ツールを使用する際は、必ず「{race_display_name} 出馬表」のようにレースを特定して検索するか、提供された出馬表の「馬名」を検索して正確な情報を拾ってください。
-2. 今回分析するレースは【{race_display_name}】です。提供されたCSVの出走馬データ（馬名など）を『絶対の正解』として扱ってください。
-3. **印（◎、◯、▲、△、☆）の打刻ルール**:
-   必ず提供された「score」の最高値の馬に【◎】、2位に【◯】、3位に【▲】...と、**スコアの上位順に厳格に印を打ってください**。AIスコアを無視して別の馬を本命(◎)に指定することは【絶対厳禁】です。見解や買い目もすべてこの印（スコア順位）に基づいて構成してください。
-4. 提供された「score」は過去の全走タイム・着順実績を多角的に解析した純粋能力値です。オッズや世間の人気に左右されず、このスコアを絶対の軸として分析を行ってください。
+1. Web検索の必須化：必ず「{race_display_name} 出馬表」「今日の〇〇競馬場 馬場傾向」「展開予想」を検索し、当日のトラックバイアスと展開の有利不利を把握すること。
+2. データ至上主義：提供された出走馬データと「score」を絶対の正解として扱うこと。
+3. 印（◎◯▲△☆）の打刻ルール（※回収率特化）：
+   ・【◎（本命）】：必ず「score」の1位または2位から、当日の馬場・展開に最もフィットする馬を選ぶこと。
+   ・【◯（対抗）】：◎を負かすポテンシャルがある、score上位馬。
+   ・【▲（単穴）】：展開次第で一発がある馬。
+   ・【☆（特注穴馬）】：scoreは中位以下だが、Web検索で「距離短縮」「極端な馬場傾向の恩恵」「展開のドハマり」など、明確な【期待値の跳ね上がり】が確認できる馬を1頭だけ抜擢すること。
+4. 思考の透明化：なぜその馬を選んだのか、「scoreの裏付け」と「Web検索で得た物理的根拠（馬場・展開・調教）」を論理的に説明すること。
 
-【構成案と出力フォーマット】（以下の1〜4の構成で出力）
+【構成案と出力フォーマット】
 
-1. 【レース概況と展開予想】
+1. 【レース概況とトラックバイアス（展開予想）】
+（Web検索から得た当日の馬場状態と、ハナを主張する馬から想定されるペースを簡潔に記載）
+
 2. 【全頭 データ一覧】
 （※途中で文章を挟まず、提供された全頭分を以下のMarkdown形式で出力すること）
 | 馬番 | 馬名 | 騎手 | score | AI勝率予想 | 人気 | 単勝オッズ |
 |---|---|---|---|---|---|---|
 | 01 | 〇〇 | 〇〇 | 115 | 22.5% | 2 | 4.5倍 |
 
-3. 【勝ちぱかくんのジャッジ・見解（印と推奨馬）】
-（スコア上位順に評価を行い、検索で得た直前情報や解説を添えること）
-4. 【推奨買い目】
-必ず【三連複】と【三連単】の2つの買い目を提示すること。
-※三連単はフォーメーション形式で、1着軸にはスコア1位（◎）を固定すること。
+3. 【勝ちぱかくんの冷酷なるジャッジ（印と根拠）】
+（◎◯▲△☆の印とともに、scoreと環境要因を掛け合わせた期待値の根拠を記載）
+
+4. 【回収率追求型・推奨買い目】
+※点数を無駄に広げず、期待値の高い組み合わせに資金を集中させること。
+・【三連複フォーメーション】：◎を1列目、◯▲☆を2列目に置いた、点数を絞りつつ高配当を逃さないフォーメーション（10〜15点以内）。
+・【三連単フォーメーション】：◎の1着固定、または◎と◯の1・2着折り返しなど、勝率の高い馬をアタマに固定したフォーメーション（20点以内）。
 """
 
     prompt = f"""
@@ -314,7 +325,7 @@ def generate_prediction(race_id_target, race_display_name):
 ---
 """
 
-    with st.spinner("🦙 勝ちぱかが過去走の全データを一括解析し、Web検索で最新情報を調査中..."):
+    with st.spinner("🦙 勝ちぱかが過去成績を集計し、当日の馬場・展開と掛け合わせて期待値を算定中..."):
         client = genai.Client(api_key=GEMINI_API_KEY)
         
         models_to_try = ['gemini-2.5-flash', 'gemini-2.5-flash', 'gemini-2.5-pro']
@@ -328,7 +339,7 @@ def generate_prediction(race_id_target, race_display_name):
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
                         tools=[{"google_search": {}}],
-                        temperature=0.7
+                        temperature=0.75
                     )
                 )
                 if response:
