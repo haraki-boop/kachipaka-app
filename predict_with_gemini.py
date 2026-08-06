@@ -61,7 +61,7 @@ def update_keiba_data():
             st.error(f"【データ更新エラー】: {e}")
 
 # --------------------------------------------------
-# 🎯 サイドバー（日付表示対応UI）
+# 🎯 サイドバー（日付表示対応UI・最終版）
 # --------------------------------------------------
 st.sidebar.header("⚙️ データ更新・管理")
 if st.sidebar.button("🔄 最新出馬表・オッズを自動更新", use_container_width=True):
@@ -89,7 +89,6 @@ if df is not None and not df.empty:
         # 12桁IDの分解＆日付整形処理
         def parse_race_info(row):
             rid = str(row['race_id_str'])
-            # CSV内に日付列があれば優先的に利用
             raw_date = str(row[date_col]) if date_col and pd.notna(row[date_col]) else ""
             
             if len(rid) == 12:
@@ -100,14 +99,15 @@ if df is not None and not df.empty:
                 day = int(rid[8:10])
                 r_num = int(rid[10:12])
                 
-                # 日付表示の組み立て
-                if raw_date and len(raw_date) >= 8:
-                    # YYYYMMDD または YYYY/MM/DD フォーマットの整形
+                # ★修正ポイント：取得した日付が「〇年〇月〇日」形式の場合そのまま表示
+                if raw_date and "年" in raw_date:
+                    date_label = raw_date
+                elif raw_date and len(raw_date) >= 8:
                     clean_date = raw_date.replace('-', '').replace('/', '')
-                    if len(clean_date) >= 8:
+                    try:
                         date_label = f"{clean_date[:4]}年{int(clean_date[4:6])}月{int(clean_date[6:8])}日"
-                    else:
-                        date_label = f"{year}年 第{kai}回{day}日目"
+                    except ValueError:
+                        date_label = raw_date
                 else:
                     date_label = f"{year}年 第{kai}回{day}日目"
                     
