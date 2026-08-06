@@ -21,6 +21,26 @@ st.caption("LightGBM基礎スコア（全過去走自動集計・人気度外視
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
 
 # --------------------------------------------------
+# タイム（文字列）を秒数に変換する補助関数
+# --------------------------------------------------
+def time_to_seconds(t_str):
+    if pd.isna(t_str):
+        return None
+    t_str = str(t_str).strip()
+    parts = t_str.split(':')
+    if len(parts) == 2:
+        try:
+            return float(parts[0]) * 60 + float(parts[1])
+        except ValueError:
+            return None
+    elif len(parts) == 1:
+        try:
+            return float(parts[0])
+        except ValueError:
+            return None
+    return None
+
+# --------------------------------------------------
 # データ＆モデル読み込み
 # --------------------------------------------------
 @st.cache_resource
@@ -38,7 +58,14 @@ def load_data():
     data_path = "cleaned_keiba_data.csv"
     if os.path.exists(data_path):
         try:
-            return pd.read_csv(data_path, low_memory=False, dtype={'race_id': str})
+            loaded_df = pd.read_csv(data_path, low_memory=False, dtype={'race_id': str})
+            # time_seconds 列が存在しない場合は タイム 列から自動補完
+            if 'time_seconds' not in loaded_df.columns:
+                if 'タイム' in loaded_df.columns:
+                    loaded_df['time_seconds'] = loaded_df['タイム'].apply(time_to_seconds)
+                else:
+                    loaded_df['time_seconds'] = np.nan
+            return loaded_df
         except Exception as e:
             st.error(f"【CSV読み込みエラー】: {e}")
             return None
@@ -147,7 +174,7 @@ else:
     st.stop()
 
 # --------------------------------------------------
-# 🤖 予想生成ロジック（過去成績自動集計版）
+# 🤖 予想生成ロジック（エラー回避ガード付き）
 # --------------------------------------------------
 def generate_prediction(race_id_target, race_display_name):
     if not GEMINI_API_KEY:
@@ -158,19 +185,15 @@ def generate_prediction(race_id_target, race_display_name):
         st.error("【モデルエラー】AIモデル（keiba_ai_model.pkl）が読み込めません。")
         return
 
-    # 対象レースのデータ
     race_df = df[df['race_id_str'] == str(race_id_target)].copy()
 
     if race_df.empty:
         st.warning(f"選択されたレース（ID: {race_id_target}）の出走馬データが見つかりません。")
         return
 
-    # 過去全データの抽出（対象レース以外）
     past_df = df[df['race_id_str'] != str(race_id_target)].copy()
 
-    # ==================================================
-    # 🚨 過去データの一括分析＆特徴量への注入
-    # ==================================================
+    # 特徴量の準備
     features = ['枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 'horse_weight', 'weight_change']
     if '単勝' in df.columns: features.append('単勝')
     if '人気' in df.columns: features.append('人気')
@@ -181,12 +204,14 @@ def generate_prediction(race_id_target, race_display_name):
 
     X_race = race_df[features].copy()
 
-    # オッズと人気はダミー化してオッズ依存を排除
     if '単勝' in X_race.columns: X_race['単勝'] = 10.0
     if '人気' in X_race.columns: X_race['人気'] = 5.0
 
-    # 全体平均タイム（過去データの基準値）
-    overall_mean_time = past_df['time_seconds'].dropna().mean() if 'time_seconds' in past_df.columns and not past_df['time_seconds'].dropna().empty else 90.0
+    # 過去タイムの平均値
+    if 'time_seconds' in past_df.columns and not past_df['time_seconds'].dropna().empty:
+        overall_mean_time = past_df['time_seconds'].dropna().mean()
+    else:
+        overall_mean_time = 90.0
 
     past_avg_ranks = []
     past_top3_rates = []
@@ -194,18 +219,20 @@ def generate_prediction(race_id_target, race_display_name):
 
     for idx, row in race_df.iterrows():
         hname = row.get('馬名', '')
-        # 対象馬の過去走を取得
-        h_past = past_df[past_df['馬名'] == hname] if '馬名' in past_df.columns and hname else pd.DataFrame()
+        h_past = past_df[past_df['馬名'] == hname] if ('馬名' in past_df.columns and hname) else pd.DataFrame()
         
         if not h_past.empty:
-            avg_r = pd.to_numeric(h_past['着順'], errors='coerce').mean()
+            avg_r = pd.to_numeric(h_past['着順'], errors='coerce').mean() if '着順' in h_past.columns else 8.0
             avg_r = avg_r if pd.notna(avg_r) else 8.0
             
-            top3_r = (pd.to_numeric(h_past['着順'], errors='coerce') <= 3).mean()
+            top3_r = (pd.to_numeric(h_past['着順'], errors='coerce') <= 3).mean() if '着順' in h_past.columns else 0.1
             top3_r = top3_r if pd.notna(top3_r) else 0.1
             
-            v_times = pd.to_numeric(h_past['time_seconds'], errors='coerce').dropna()
-            avg_t = v_times.mean() if not v_times.empty else overall_mean_time
+            if 'time_seconds' in h_past.columns:
+                v_times = pd.to_numeric(h_past['time_seconds'], errors='coerce').dropna()
+                avg_t = v_times.mean() if not v_times.empty else overall_mean_time
+            else:
+                avg_t = overall_mean_time
         else:
             avg_r = 8.0
             top3_r = 0.1
@@ -215,22 +242,16 @@ def generate_prediction(race_id_target, race_display_name):
         past_top3_rates.append(top3_r)
         filled_times.append(avg_t)
 
-    # 0埋めされていた time_seconds に「過去平均走破タイム」を代入
     X_race['time_seconds'] = filled_times
     X_race = X_race.apply(pd.to_numeric, errors='coerce').fillna(0)
 
-    # LightGBMモデルによる予測勝率
     raw_prob = model.predict_proba(X_race)[:, 1]
 
-    # 過去着順・複勝率による能力感応度の強化（実力差をくっきり広げる補正）
     rank_weights = np.array([1.0 / (r + 1.0) for r in past_avg_ranks])
     top3_weights = np.array(past_top3_rates) + 0.1
     
     combined_prob = raw_prob * rank_weights * top3_weights
 
-    # ==================================================
-    # 🚨 勝率の100%正規化と明確なスコア化
-    # ==================================================
     prob_sum = combined_prob.sum()
     if prob_sum > 0:
         race_df['win_prob'] = combined_prob / prob_sum
@@ -239,7 +260,6 @@ def generate_prediction(race_id_target, race_display_name):
 
     mean_prob = race_df['win_prob'].mean()
     if mean_prob > 0:
-        # スコアの開きを広げて1位〜最下位までの強弱をくっきり表現
         raw_score = 100 + ((race_df['win_prob'] - mean_prob) / mean_prob) * 35
     else:
         raw_score = 100
@@ -247,9 +267,6 @@ def generate_prediction(race_id_target, race_display_name):
     race_df['score'] = np.clip(raw_score, 50, 120).round().astype(int)
     race_df = race_df.sort_values(by='win_prob', ascending=False).reset_index(drop=True)
 
-    # ==================================================
-    # AIへ渡すデータリスト作成
-    # ==================================================
     table_summary = []
     for idx, row in race_df.iterrows():
         horse_name = row.get('馬名', f"馬番{int(row.get('馬番', 0))}")
@@ -264,9 +281,6 @@ def generate_prediction(race_id_target, race_display_name):
 
     prompt_data = "\n".join(table_summary)
 
-    # ==================================================
-    # 🚨 AIへのプロンプト指示（スコア遵守ルールを徹底強化）
-    # ==================================================
     system_instruction = f"""
 あなたは競馬分析AI「勝ちぱかくん」であり、データと現場情報を冷静に分析する凄腕のプロ馬券師です。
 
