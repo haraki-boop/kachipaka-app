@@ -13,7 +13,7 @@ from google.genai import types
 st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="🦙", layout="wide")
 
 st.title("🦙 AI予想 勝ちぱかくん")
-st.caption("LightGBM基礎スコア（人気度外視） × GeminiリアルタイムWeb検索")
+st.caption("LightGBM基礎スコア（全過去走自動集計・人気度外視） × GeminiリアルタイムWeb検索")
 
 # --------------------------------------------------
 # 🔑 Gemini APIキーの設定
@@ -61,7 +61,7 @@ def update_keiba_data():
             st.error(f"【データ更新エラー】: {e}")
 
 # --------------------------------------------------
-# 🎯 サイドバー（日付表示対応UI・最終版）
+# 🎯 サイドバー（日付表示対応UI）
 # --------------------------------------------------
 st.sidebar.header("⚙️ データ更新・管理")
 if st.sidebar.button("🔄 最新出馬表・オッズを自動更新", use_container_width=True):
@@ -79,14 +79,12 @@ if df is not None and not df.empty:
     if 'race_id' in df.columns:
         df['race_id_str'] = df['race_id'].astype(str).str.replace(r'\.0$', '', regex=True)
         
-        # CSV内に日付列があるか自動探索
         date_col = None
         for col in ['date', '日付', '開催日', '年月日', 'Date']:
             if col in df.columns:
                 date_col = col
                 break
 
-        # 12桁IDの分解＆日付整形処理
         def parse_race_info(row):
             rid = str(row['race_id_str'])
             raw_date = str(row[date_col]) if date_col and pd.notna(row[date_col]) else ""
@@ -99,7 +97,6 @@ if df is not None and not df.empty:
                 day = int(rid[8:10])
                 r_num = int(rid[10:12])
                 
-                # ★修正ポイント：取得した日付が「〇年〇月〇日」形式の場合そのまま表示
                 if raw_date and "年" in raw_date:
                     date_label = raw_date
                 elif raw_date and len(raw_date) >= 8:
@@ -119,21 +116,20 @@ if df is not None and not df.empty:
         df['date_label'] = [p[3] for p in parsed]
         df['race_num_label'] = [p[4] for p in parsed]
 
-        # STEP 1: 競馬場を選択
+        # 1. 競馬場選択
         all_places = [p for p in PLACE_MAP_REV.values() if p in df['place_name'].unique()]
         selected_place = st.sidebar.selectbox("🏇 競馬場を選択", all_places if all_places else sorted(df['place_name'].unique()))
 
-        # STEP 2: 開催日を選択（具体的に「〇年〇月〇日」で表示）
+        # 2. 開催日選択
         df_place = df[df['place_name'] == selected_place]
         all_dates = sorted(df_place['date_label'].unique(), reverse=True)
         selected_date_label = st.sidebar.selectbox("📅 開催日を選択", all_dates)
 
-        # STEP 3: レース（R）を選択
+        # 3. レース選択
         df_date = df_place[df_place['date_label'] == selected_date_label]
         all_races = sorted(df_date['race_num_label'].unique(), key=lambda x: int(x.replace('R', '')) if 'R' in x else 0)
         selected_race_num = st.sidebar.selectbox("🏁 レース（R）を選択", all_races)
 
-        # ターゲットレースIDの特定
         matched_rows = df_date[df_date['race_num_label'] == selected_race_num]
         if not matched_rows.empty:
             target_race_id = matched_rows['race_id_str'].iloc[0]
@@ -151,7 +147,7 @@ else:
     st.stop()
 
 # --------------------------------------------------
-# 🤖 予想生成ロジック
+# 🤖 予想生成ロジック（過去成績自動集計版）
 # --------------------------------------------------
 def generate_prediction(race_id_target, race_display_name):
     if not GEMINI_API_KEY:
@@ -162,21 +158,22 @@ def generate_prediction(race_id_target, race_display_name):
         st.error("【モデルエラー】AIモデル（keiba_ai_model.pkl）が読み込めません。")
         return
 
+    # 対象レースのデータ
     race_df = df[df['race_id_str'] == str(race_id_target)].copy()
 
     if race_df.empty:
         st.warning(f"選択されたレース（ID: {race_id_target}）の出走馬データが見つかりません。")
         return
 
+    # 過去全データの抽出（対象レース以外）
+    past_df = df[df['race_id_str'] != str(race_id_target)].copy()
+
     # ==================================================
-    # 🚨 スコア計算用データ作成（人気・単勝オッズをダミー化して無効化）
+    # 🚨 過去データの一括分析＆特徴量への注入
     # ==================================================
     features = ['枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 'horse_weight', 'weight_change']
-    
-    if '単勝' in df.columns:
-        features.append('単勝')
-    if '人気' in df.columns:
-        features.append('人気')
+    if '単勝' in df.columns: features.append('単勝')
+    if '人気' in df.columns: features.append('人気')
 
     for f in features:
         if f not in race_df.columns:
@@ -184,26 +181,66 @@ def generate_prediction(race_id_target, race_display_name):
 
     X_race = race_df[features].copy()
 
-    if '単勝' in X_race.columns:
-        X_race['単勝'] = 10.0
-    if '人気' in X_race.columns:
-        X_race['人気'] = 5
+    # オッズと人気はダミー化してオッズ依存を排除
+    if '単勝' in X_race.columns: X_race['単勝'] = 10.0
+    if '人気' in X_race.columns: X_race['人気'] = 5.0
 
+    # 全体平均タイム（過去データの基準値）
+    overall_mean_time = past_df['time_seconds'].dropna().mean() if 'time_seconds' in past_df.columns and not past_df['time_seconds'].dropna().empty else 90.0
+
+    past_avg_ranks = []
+    past_top3_rates = []
+    filled_times = []
+
+    for idx, row in race_df.iterrows():
+        hname = row.get('馬名', '')
+        # 対象馬の過去走を取得
+        h_past = past_df[past_df['馬名'] == hname] if '馬名' in past_df.columns and hname else pd.DataFrame()
+        
+        if not h_past.empty:
+            avg_r = pd.to_numeric(h_past['着順'], errors='coerce').mean()
+            avg_r = avg_r if pd.notna(avg_r) else 8.0
+            
+            top3_r = (pd.to_numeric(h_past['着順'], errors='coerce') <= 3).mean()
+            top3_r = top3_r if pd.notna(top3_r) else 0.1
+            
+            v_times = pd.to_numeric(h_past['time_seconds'], errors='coerce').dropna()
+            avg_t = v_times.mean() if not v_times.empty else overall_mean_time
+        else:
+            avg_r = 8.0
+            top3_r = 0.1
+            avg_t = overall_mean_time
+
+        past_avg_ranks.append(avg_r)
+        past_top3_rates.append(top3_r)
+        filled_times.append(avg_t)
+
+    # 0埋めされていた time_seconds に「過去平均走破タイム」を代入
+    X_race['time_seconds'] = filled_times
     X_race = X_race.apply(pd.to_numeric, errors='coerce').fillna(0)
+
+    # LightGBMモデルによる予測勝率
     raw_prob = model.predict_proba(X_race)[:, 1]
 
+    # 過去着順・複勝率による能力感応度の強化（実力差をくっきり広げる補正）
+    rank_weights = np.array([1.0 / (r + 1.0) for r in past_avg_ranks])
+    top3_weights = np.array(past_top3_rates) + 0.1
+    
+    combined_prob = raw_prob * rank_weights * top3_weights
+
     # ==================================================
-    # 🚨 勝率の100%正規化
+    # 🚨 勝率の100%正規化と明確なスコア化
     # ==================================================
-    prob_sum = raw_prob.sum()
+    prob_sum = combined_prob.sum()
     if prob_sum > 0:
-        race_df['win_prob'] = raw_prob / prob_sum
+        race_df['win_prob'] = combined_prob / prob_sum
     else:
-        race_df['win_prob'] = 0
+        race_df['win_prob'] = 1.0 / len(race_df)
 
     mean_prob = race_df['win_prob'].mean()
     if mean_prob > 0:
-        raw_score = 100 + ((race_df['win_prob'] - mean_prob) / mean_prob) * 30
+        # スコアの開きを広げて1位〜最下位までの強弱をくっきり表現
+        raw_score = 100 + ((race_df['win_prob'] - mean_prob) / mean_prob) * 35
     else:
         raw_score = 100
 
@@ -228,16 +265,17 @@ def generate_prediction(race_id_target, race_display_name):
     prompt_data = "\n".join(table_summary)
 
     # ==================================================
-    # 🚨 AIへのプロンプト指示
+    # 🚨 AIへのプロンプト指示（スコア遵守ルールを徹底強化）
     # ==================================================
     system_instruction = f"""
 あなたは競馬分析AI「勝ちぱかくん」であり、データと現場情報を冷静に分析する凄腕のプロ馬券師です。
 
-【厳守事項】
+【厳守事項・最優先ルール】
 1. Web検索ツールを使用する際は、必ず「{race_display_name} 出馬表」のようにレースを特定して検索するか、提供された出馬表の「馬名」を検索して正確な情報を拾ってください。
-2. 今回分析するレースは【{race_display_name}】です。提供されたCSVの出走馬データ（馬名など）を『絶対の正解』として扱ってください。万が一、検索結果と提供データに齟齬があっても、データへの言い訳や不一致の指摘は【1文字たりとも】出力してはいけません。
-3. 提供された「score」と「AI勝率予想」は、世間の人気やオッズを一切排除し、純粋な能力値から算出した独自の数値です。これを絶対の評価軸として、オッズに惑わされずに本質的な予想を行ってください。
-4. 印（◎◯▲△☆）を打つ推奨馬は、原則【最大5頭まで】に絞ること。スコアが大混戦の場合のみ増やして構いません。
+2. 今回分析するレースは【{race_display_name}】です。提供されたCSVの出走馬データ（馬名など）を『絶対の正解』として扱ってください。
+3. **印（◎、◯、▲、△、☆）の打刻ルール**:
+   必ず提供された「score」の最高値の馬に【◎】、2位に【◯】、3位に【▲】...と、**スコアの上位順に厳格に印を打ってください**。AIスコアを無視して別の馬を本命(◎)に指定することは【絶対厳禁】です。見解や買い目もすべてこの印（スコア順位）に基づいて構成してください。
+4. 提供された「score」は過去の全走タイム・着順実績を多角的に解析した純粋能力値です。オッズや世間の人気に左右されず、このスコアを絶対の軸として分析を行ってください。
 
 【構成案と出力フォーマット】（以下の1〜4の構成で出力）
 
@@ -246,13 +284,13 @@ def generate_prediction(race_id_target, race_display_name):
 （※途中で文章を挟まず、提供された全頭分を以下のMarkdown形式で出力すること）
 | 馬番 | 馬名 | 騎手 | score | AI勝率予想 | 人気 | 単勝オッズ |
 |---|---|---|---|---|---|---|
-| 01 | 〇〇 | 〇〇 | 100 | 12.5% | 2 | 4.5倍 |
+| 01 | 〇〇 | 〇〇 | 115 | 22.5% | 2 | 4.5倍 |
 
 3. 【勝ちぱかくんのジャッジ・見解（印と推奨馬）】
-（各馬の評価や検索で得た情報はここで語ること）
+（スコア上位順に評価を行い、検索で得た直前情報や解説を添えること）
 4. 【推奨買い目】
 必ず【三連複】と【三連単】の2つの買い目を提示すること。
-※三連単は点数が非現実的にならないよう、必ず「フォーメーション」または「1着2着軸マルチ」のどちらかで組み立てること。
+※三連単はフォーメーション形式で、1着軸にはスコア1位（◎）を固定すること。
 """
 
     prompt = f"""
@@ -262,7 +300,7 @@ def generate_prediction(race_id_target, race_display_name):
 ---
 """
 
-    with st.spinner("🦙 勝ちぱかが人気度外視の独自スコアをベースに、Web検索で最新情報を調査中..."):
+    with st.spinner("🦙 勝ちぱかが過去走の全データを一括解析し、Web検索で最新情報を調査中..."):
         client = genai.Client(api_key=GEMINI_API_KEY)
         
         models_to_try = ['gemini-2.5-flash', 'gemini-2.5-flash', 'gemini-2.5-pro']
@@ -276,7 +314,7 @@ def generate_prediction(race_id_target, race_display_name):
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
                         tools=[{"google_search": {}}],
-                        temperature=0.75
+                        temperature=0.7
                     )
                 )
                 if response:
