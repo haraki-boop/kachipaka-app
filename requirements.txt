@@ -1,8 +1,9 @@
+streamlit
 pandas
 numpy
 joblib
 lightgbm
 scikit-learn
-optuna
-streamlit
 google-genai
+beautifulsoup4
+requests
