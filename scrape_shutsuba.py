@@ -42,17 +42,18 @@ def detect_grade(race_name, soup):
     return f"{grade_prefix}{clean_name}".strip()
 
 def fetch_with_retry(session, url, max_retries=3):
-    """通信が切断されたりブロックされた場合に、自動で再試行する機能"""
     for i in range(max_retries):
         try:
             res = session.get(url, timeout=15)
             if res.status_code == 200:
+                # 🎯 修正箇所：最新のUTF-8として正しく読み込む
+                res.encoding = 'utf-8'
                 return res
             else:
                 print(f"    [警告] 通信エラー(コード: {res.status_code}) - 3秒待機して再試行します...")
         except Exception as e:
             print(f"    [エラー] {e} - 3秒待機して再試行します...")
-        time.sleep(3) # エラー時は長めに待機
+        time.sleep(3)
     return None
 
 def scrape_shutsuba():
@@ -61,15 +62,13 @@ def scrape_shutsuba():
     all_race_ids = []
     id_to_date = {}
 
-    # セッションを作成（同じブラウザからのアクセスだと認識させ、ブロックを防ぐ）
     session = requests.Session()
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Referer": "https://race.netkeiba.com/",
         "Accept-Language": "ja,en-US;q=0.9,en;q=0.8"
     })
 
-    # 1. レースIDの収集（2つの取得ルートを使って取りこぼしを完全防止）
     for date_str in target_dates:
         urls_to_check = [
             f"https://race.netkeiba.com/top/race_list_sub.html?kaisai_date={date_str}",
@@ -79,9 +78,7 @@ def scrape_shutsuba():
         for url in urls_to_check:
             res = fetch_with_retry(session, url)
             if res:
-                # バイトデータから強制的にEUC-JPとしてデコード（文字化けの根本解決）
-                html_text = res.content.decode('euc-jp', errors='replace')
-                found_ids = re.findall(r'race_id=["\']?(\d{12})["\']?', html_text)
+                found_ids = re.findall(r'race_id=["\']?(\d{12})["\']?', res.text)
                 for rid in found_ids:
                     if rid not in all_race_ids:
                         all_race_ids.append(rid)
@@ -92,7 +89,7 @@ def scrape_shutsuba():
         print("❌ 対象日のレースIDが見つかりませんでした。")
         return
 
-    all_race_ids.sort() # レースを順番通りに整列
+    all_race_ids.sort()
     print(f"\n🎉 合計 {len(all_race_ids)} レースが見つかりました！出馬表を取得中...")
     
     race_data_list = []
@@ -108,9 +105,7 @@ def scrape_shutsuba():
             continue
 
         try:
-            # バイトデータから強制的にEUC-JPとしてデコード
-            html_text = res.content.decode('euc-jp', errors='replace')
-            soup = BeautifulSoup(html_text, "html.parser")
+            soup = BeautifulSoup(res.text, "html.parser")
             
             date_str = id_to_date.get(race_id, "")
             display_date = f"{datetime.strptime(date_str, '%Y%m%d').month}月{datetime.strptime(date_str, '%Y%m%d').day}日({weekdays[datetime.strptime(date_str, '%Y%m%d').weekday()]})" if date_str else "不明"
@@ -128,13 +123,10 @@ def scrape_shutsuba():
                 if len(cols) >= 7:
                     waku = clean_text(cols[0].text)
                     umaban = clean_text(cols[1].text)
-                    
                     horse_td = cols[3]
                     horse_name = clean_text(horse_td.find("a").text) if horse_td.find("a") else clean_text(horse_td.text)
-                    
                     sex_age = clean_text(cols[4].text)
                     kinryo = clean_text(cols[5].text)
-                    
                     jockey_td = cols[6]
                     jockey = clean_text(jockey_td.find("a").text) if jockey_td.find("a") else clean_text(jockey_td.text)
                     
@@ -151,15 +143,14 @@ def scrape_shutsuba():
                             "斤量": kinryo,
                             "騎手": jockey,
                         })
-            # ブロック回避のため、待機時間を「1秒〜1.5秒」に増加
-            time.sleep(random.uniform(1.0, 1.5))
+            time.sleep(random.uniform(0.5, 1.0))
             
         except Exception as e:
             print(f"  └ 解析エラー: {e}")
 
     if race_data_list:
         df_future = pd.DataFrame(race_data_list)
-        # utf-8-sig (BOM付きUTF-8)で保存し、Windows環境での文字化けを防ぐ
+        # 🎯 修正箇所：Excelでダブルクリックしても絶対に文字化けしない魔法のフォーマット「utf-8-sig」で保存
         df_future.to_csv(FUTURE_CSV, index=False, encoding='utf-8-sig')
         print(f"\n✅ {len(race_data_list)}頭のデータを保存完了！ ({FUTURE_CSV})")
     else:

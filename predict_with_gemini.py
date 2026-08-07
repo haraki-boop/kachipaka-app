@@ -1,12 +1,14 @@
 import os
+import re
 import time
+import random
+import requests
 import pandas as pd
 import numpy as np
 import joblib
 import streamlit as st
-import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timedelta
 from google import genai
 from google.genai import types
 
@@ -26,6 +28,7 @@ if 'selected_race_id' not in st.session_state:
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
 HISTORY_CSV = "prediction_history.csv"
+FUTURE_CSV = "future_races.csv"
 
 @st.cache_resource
 def load_model():
@@ -36,7 +39,11 @@ def load_model():
 @st.cache_data
 def load_past_data():
     if os.path.exists("cleaned_keiba_data.csv"):
-        df = pd.read_csv("cleaned_keiba_data.csv", low_memory=False, dtype={'race_id': str}, encoding='utf-8-sig')
+        try:
+            df = pd.read_csv("cleaned_keiba_data.csv", low_memory=False, dtype={'race_id': str}, encoding='utf-8-sig')
+        except:
+            df = pd.read_csv("cleaned_keiba_data.csv", low_memory=False, dtype={'race_id': str}, encoding='cp932')
+            
         if 'time_seconds' not in df.columns and 'タイム' in df.columns:
             def ts(t):
                 if pd.isna(t): return np.nan
@@ -48,11 +55,13 @@ def load_past_data():
         return df
     return pd.DataFrame()
 
-@st.cache_data
 def load_future_data():
-    if os.path.exists("future_races.csv"):
-        # 📝 修正箇所：アプリがShift-JISと誤認しないように utf-8-sig を強制指定
-        df = pd.read_csv("future_races.csv", dtype={'race_id': str}, encoding='utf-8-sig')
+    if os.path.exists(FUTURE_CSV):
+        try:
+            df = pd.read_csv(FUTURE_CSV, dtype={'race_id': str}, encoding='utf-8-sig')
+        except:
+            df = pd.read_csv(FUTURE_CSV, dtype={'race_id': str}, encoding='cp932')
+            
         PLACE_MAP_REV = {
             "01": "札幌", "02": "函館", "03": "福島", "04": "新潟", "05": "東京",
             "06": "中山", "07": "中京", "08": "京都", "09": "阪神", "10": "小倉"
@@ -61,16 +70,17 @@ def load_future_data():
         df['place_name'] = df['place_code'].map(PLACE_MAP_REV).fillna("不明")
         df['r_num'] = df['race_id'].str[10:12].astype(int)
         
-        if 'race_name' not in df.columns:
-            df['race_name'] = ""
-            
+        if 'race_name' not in df.columns: df['race_name'] = ""
         df['day_label'] = df['date'] if 'date' in df.columns else "不明"
         return df
     return pd.DataFrame()
 
 def load_history_data():
     if os.path.exists(HISTORY_CSV):
-        return pd.read_csv(HISTORY_CSV, dtype={'race_id': str, 'honmei_umaban': str}, encoding='utf-8-sig')
+        try:
+            return pd.read_csv(HISTORY_CSV, dtype={'race_id': str, 'honmei_umaban': str}, encoding='utf-8-sig')
+        except:
+            return pd.read_csv(HISTORY_CSV, dtype={'race_id': str, 'honmei_umaban': str}, encoding='cp932')
     return pd.DataFrame(columns=['date', 'race_id', 'race_name', 'honmei_umaban', 'honmei_name', 'result_pay'])
 
 model = load_model()
@@ -78,49 +88,150 @@ df_past = load_past_data()
 df_future = load_future_data()
 df_history = load_history_data()
 
-def update_race_results():
-    if df_history.empty: return
-    updated = False
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    for idx, row in df_history.iterrows():
-        if pd.isna(row['result_pay']) or str(row['result_pay']).strip() == "":
-            rid = str(row['race_id'])
-            url = f"https://db.netkeiba.com/race/{rid}/"
-            try:
-                res = requests.get(url, headers=headers, timeout=5)
-                res.encoding = 'euc-jp'
-                soup = BeautifulSoup(res.text, "html.parser")
-                tables = soup.find_all("table", summary="払い戻し")
-                if tables:
-                    for table in tables:
-                        for tr in table.find_all("tr"):
-                            th = tr.find("th")
-                            if th and th.text.strip() == "単勝":
-                                tds = tr.find_all("td")
-                                winners = [w.strip() for w in list(tds[0].stripped_strings)]
-                                amounts = [a.replace(',', '').strip() for a in list(tds[1].stripped_strings)]
-                                pred_num = str(int(row['honmei_umaban']))
-                                if pred_num in winners:
-                                    win_idx = winners.index(pred_num)
-                                    df_history.at[idx, 'result_pay'] = int(amounts[win_idx])
-                                else:
-                                    df_history.at[idx, 'result_pay'] = 0
-                                updated = True
-            except:
-                pass
-            time.sleep(1)
-    if updated:
-        df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig')
+# ==========================================
+# 🚀 NEW: アプリ内蔵スクレイピング機能
+# ==========================================
+def get_target_dates():
+    today = datetime.now()
+    return sorted(list(set([(today + timedelta(days=i)).strftime("%Y%m%d") for i in range(7) if (today + timedelta(days=i)).weekday() in [5, 6]])))
 
+def clean_text(text):
+    return re.sub(r'\s+', ' ', re.sub(r'[\r\n\t]+', ' ', text)).strip() if text else ""
+
+def detect_grade(race_name, soup):
+    grade_prefix = ""
+    grade_icon = soup.find(class_=re.compile(r'Icon_GradeType\d+'))
+    if grade_icon:
+        cls_str = " ".join(grade_icon.get('class', []))
+        if 'GradeType1' in cls_str: grade_prefix = "👑 G1 "
+        elif 'GradeType2' in cls_str: grade_prefix = "👑 G2 "
+        elif 'GradeType3' in cls_str: grade_prefix = "👑 G3 "
+    if not grade_prefix:
+        if re.search(r'G1|Ｇ１|ＧＩ|\(G1\)', race_name, re.IGNORECASE): grade_prefix = "👑 G1 "
+        elif re.search(r'G2|Ｇ２|ＧⅡ|\(G2\)', race_name, re.IGNORECASE): grade_prefix = "👑 G2 "
+        elif re.search(r'G3|Ｇ３|ＧⅢ|\(G3\)', race_name, re.IGNORECASE): grade_prefix = "👑 G3 "
+    return f"{grade_prefix}{re.sub(r'\(?G[123１２３ＩⅡⅢ]\)?', '', race_name).strip()}".strip()
+
+def run_scraper(p_text, p_bar):
+    target_dates = get_target_dates()
+    all_race_ids, id_to_date = [], {}
+    session = requests.Session()
+    session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer": "https://race.netkeiba.com/"})
+
+    p_text.text("📅 開催日を確認中...")
+    for date_str in target_dates:
+        for url in [f"https://race.netkeiba.com/top/race_list_sub.html?kaisai_date={date_str}", f"https://race.netkeiba.com/top/race_list.html?kaisai_date={date_str}"]:
+            try:
+                res = session.get(url, timeout=10)
+                if res.status_code == 200:
+                    res.encoding = 'utf-8'
+                    found_ids = re.findall(r'race_id=["\']?(\d{12})["\']?', res.text)
+                    for rid in found_ids:
+                        if rid not in all_race_ids:
+                            all_race_ids.append(rid)
+                            id_to_date[rid] = date_str
+            except: pass
+            time.sleep(1)
+
+    all_race_ids.sort()
+    if not all_race_ids: return False
+
+    race_data_list = []
+    weekdays = ["月", "火", "水", "木", "金", "土", "日"]
+    total = len(all_race_ids)
+
+    for i, race_id in enumerate(all_race_ids):
+        p_text.text(f"📥 出馬表を取得中... ({i+1}/{total} レース)")
+        p_bar.progress((i + 1) / total)
+        try:
+            res = session.get(f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}", timeout=10)
+            if res.status_code == 200:
+                res.encoding = 'utf-8'
+                soup = BeautifulSoup(res.text, "html.parser")
+                d_str = id_to_date.get(race_id, "")
+                display_date = f"{datetime.strptime(d_str, '%Y%m%d').month}月{datetime.strptime(d_str, '%Y%m%d').day}日({weekdays[datetime.strptime(d_str, '%Y%m%d').weekday()]})" if d_str else "不明"
+                r_name_elem = soup.find(class_="RaceName") or soup.find(class_="RaceList_Item02")
+                r_name = detect_grade(clean_text(r_name_elem.text), soup) if r_name_elem else ""
+
+                for row in soup.select("tr.HorseList"):
+                    cols = row.find_all("td")
+                    if len(cols) >= 7:
+                        nm = clean_text(cols[3].find("a").text) if cols[3].find("a") else clean_text(cols[3].text)
+                        ub = clean_text(cols[1].text)
+                        if nm and ub.isdigit():
+                            sa = clean_text(cols[4].text)
+                            race_data_list.append({
+                                "race_id": race_id, "date": display_date, "race_name": r_name,
+                                "枠番": clean_text(cols[0].text), "馬番": ub, "馬名": nm,
+                                "sex_code": sa[0] if sa else "", "age": sa[1:] if len(sa)>1 else "",
+                                "斤量": clean_text(cols[5].text),
+                                "騎手": clean_text(cols[6].find("a").text) if cols[6].find("a") else clean_text(cols[6].text)
+                            })
+            time.sleep(random.uniform(0.5, 1.0))
+        except: pass
+
+    if race_data_list:
+        pd.DataFrame(race_data_list).to_csv(FUTURE_CSV, index=False, encoding='utf-8-sig')
+        return True
+    return False
+
+# ==========================================
+# サイドバー UI
+# ==========================================
+st.sidebar.header("🔄 画面の更新")
+if st.sidebar.button("🔄 最新の情報にリロード", use_container_width=True):
+    st.cache_data.clear()
+    st.rerun()
+
+st.sidebar.markdown("---")
+st.sidebar.header("📥 今週の出馬表取得")
+st.sidebar.caption("※ボタンを押すと全自動で今週のデータを取ってきます。")
+if st.sidebar.button("🌐 出馬表を自動取得する", use_container_width=True):
+    with st.spinner("出馬表データを取得しています（約1分）..."):
+        p_text = st.sidebar.empty()
+        p_bar = st.sidebar.progress(0)
+        if run_scraper(p_text, p_bar):
+            st.cache_data.clear()
+            st.sidebar.success("✅ 今週末の出馬表を取得しました！")
+            time.sleep(1.5)
+            st.rerun()
+        else:
+            st.sidebar.error("❌ データの取得に失敗しました。")
+
+st.sidebar.markdown("---")
 st.sidebar.header("🏁 実戦結果の更新")
 if st.sidebar.button("🏆 終了したレースの結果を取得", use_container_width=True):
     with st.spinner("🏁 レース結果を照合中..."):
-        update_race_results()
+        if not df_history.empty:
+            updated = False
+            headers = {"User-Agent": "Mozilla/5.0"}
+            for idx, row in df_history.iterrows():
+                if pd.isna(row['result_pay']) or str(row['result_pay']).strip() == "":
+                    try:
+                        res = requests.get(f"https://db.netkeiba.com/race/{str(row['race_id'])}/", headers=headers, timeout=5)
+                        res.encoding = 'utf-8'
+                        soup = BeautifulSoup(res.text, "html.parser")
+                        for table in soup.find_all("table", summary="払い戻し"):
+                            for tr in table.find_all("tr"):
+                                th = tr.find("th")
+                                if th and th.text.strip() == "単勝":
+                                    tds = tr.find_all("td")
+                                    winners = [w.strip() for w in list(tds[0].stripped_strings)]
+                                    amounts = [a.replace(',', '').strip() for a in list(tds[1].stripped_strings)]
+                                    pn = str(int(row['honmei_umaban']))
+                                    df_history.at[idx, 'result_pay'] = int(amounts[winners.index(pn)]) if pn in winners else 0
+                                    updated = True
+                    except: pass
+                    time.sleep(1)
+            if updated: df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig', errors='replace')
         st.cache_data.clear()
         st.success("✅ 成績を最新化しました！")
         time.sleep(1)
         st.rerun()
 
+# ==========================================
+# メイン画面ロジック
+# ==========================================
 def calculate_race_scores(race_id_target, target_df):
     race_df = target_df[target_df['race_id'] == str(race_id_target)].copy()
     if race_df.empty or df_past.empty or model is None: return None
@@ -141,7 +252,6 @@ def calculate_race_scores(race_id_target, target_df):
     race_df['score'] = np.clip(rs, 50, 120).round().astype(int)
     return race_df.sort_values(by='score', ascending=False).reset_index(drop=True)
 
-@st.cache_data(show_spinner=False)
 def get_all_markers():
     markers = {}
     if df_future.empty: return markers
@@ -149,12 +259,9 @@ def get_all_markers():
         sdf = calculate_race_scores(rid, df_future)
         if sdf is not None and len(sdf) >= 5:
             sc = sdf['score'].tolist()
-            if sc[0] >= 108 and (sc[0] - sc[1]) >= 4:
-                markers[rid] = "★"
-            elif (sc[0] - sc[4]) <= 5:
-                markers[rid] = "◎"
-            else:
-                markers[rid] = ""
+            if sc[0] >= 108 and (sc[0] - sc[1]) >= 4: markers[rid] = "★"
+            elif (sc[0] - sc[4]) <= 5: markers[rid] = "◎"
+            else: markers[rid] = ""
     return markers
 markers = get_all_markers()
 
@@ -162,7 +269,7 @@ tab_forecast, tab_dashboard = st.tabs(["🏇 レース予想", "📈 実戦成�
 
 with tab_forecast:
     if df_future.empty:
-        st.warning("⚠️ 出馬表データが存在しません。")
+        st.warning("⚠️ 出馬表データが存在しません。左のメニューから「出馬表を自動取得する」を押してください。")
     else:
         date_options = sorted(df_future['day_label'].unique())
         selected_date = st.radio("開催日", date_options, horizontal=True, label_visibility="collapsed")
@@ -171,7 +278,6 @@ with tab_forecast:
         places = day_df['place_name'].unique()
         
         place_tabs = st.tabs([f"🏇 {p}" for p in places])
-        
         for p_idx, place in enumerate(places):
             with place_tabs[p_idx]:
                 place_df = day_df[day_df['place_name'] == place]
