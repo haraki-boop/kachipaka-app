@@ -4,39 +4,29 @@ import pandas as pd
 import numpy as np
 import joblib
 import streamlit as st
-import subprocess
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 from google import genai
 from google.genai import types
 
-# --------------------------------------------------
-# ページ初期設定
-# --------------------------------------------------
 st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="image_61b676.png", layout="wide")
 
 col_img, col_text = st.columns([1, 10])
 with col_img:
     try:
-        st.image("image_61b676.png", width=80)
+        st.image("image_61b676.png", width=70)
     except:
         pass
 with col_text:
     st.title("AI予想 勝ちぱかくん")
 
-st.caption("AI基礎スコア判定 ＋ Geminiリアルタイム検索 ＋ 実戦成績ダッシュボード")
-
 if 'selected_race_id' not in st.session_state:
     st.session_state['selected_race_id'] = None
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
-
 HISTORY_CSV = "prediction_history.csv"
 
-# --------------------------------------------------
-# モデル＆データ読み込み
-# --------------------------------------------------
 @st.cache_resource
 def load_model():
     if os.path.exists("keiba_ai_model.pkl"):
@@ -69,9 +59,10 @@ def load_future_data():
         df['place_code'] = df['race_id'].str[4:6]
         df['place_name'] = df['place_code'].map(PLACE_MAP_REV).fillna("不明")
         df['r_num'] = df['race_id'].str[10:12].astype(int)
-        df['kai'] = df['race_id'].str[6:8].astype(int)
-        df['day'] = df['race_id'].str[8:10].astype(int)
-        df['day_label'] = "第" + df['kai'].astype(str) + "回 " + df['day'].astype(str) + "日目"
+        
+        if 'race_name' not in df.columns:
+            df['race_name'] = ""
+        df['day_label'] = df['date'] if 'date' in df.columns else "不明"
         return df
     return pd.DataFrame()
 
@@ -85,18 +76,11 @@ df_past = load_past_data()
 df_future = load_future_data()
 df_history = load_history_data()
 
-# --------------------------------------------------
-# 実戦結果の更新ロジック（レース終了後に結果を取得）
-# --------------------------------------------------
 def update_race_results():
-    if df_history.empty:
-        return
-        
+    if df_history.empty: return
     updated = False
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    
     for idx, row in df_history.iterrows():
-        # まだ結果が出ていない（NaNまたは空）レースのみ取得
         if pd.isna(row['result_pay']) or str(row['result_pay']).strip() == "":
             rid = str(row['race_id'])
             url = f"https://db.netkeiba.com/race/{rid}/"
@@ -104,8 +88,6 @@ def update_race_results():
                 res = requests.get(url, headers=headers, timeout=5)
                 res.encoding = 'euc-jp'
                 soup = BeautifulSoup(res.text, "html.parser")
-                
-                # 単勝の払い戻しを取得
                 tables = soup.find_all("table", summary="払い戻し")
                 if tables:
                     for table in tables:
@@ -115,8 +97,6 @@ def update_race_results():
                                 tds = tr.find_all("td")
                                 winners = [w.strip() for w in list(tds[0].stripped_strings)]
                                 amounts = [a.replace(',', '').strip() for a in list(tds[1].stripped_strings)]
-                                
-                                # ◎の馬番が勝っていれば配当を記録、外れていれば0を記録
                                 pred_num = str(int(row['honmei_umaban']))
                                 if pred_num in winners:
                                     win_idx = winners.index(pred_num)
@@ -124,24 +104,12 @@ def update_race_results():
                                 else:
                                     df_history.at[idx, 'result_pay'] = 0
                                 updated = True
-            except Exception:
+            except:
                 pass
             time.sleep(1)
-            
     if updated:
         df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig')
 
-# --------------------------------------------------
-# 🔄 サイドバー：データ管理＆結果更新
-# --------------------------------------------------
-st.sidebar.header("⚙️ データ管理")
-if st.sidebar.button("🔄 今週末の出馬表を取得", use_container_width=True):
-    with st.spinner("🔄 データを取得中..."):
-        subprocess.run(["python", "scrape_shutsuba.py"], capture_output=True, text=True)
-        st.cache_data.clear()
-        st.rerun()
-
-st.sidebar.markdown("---")
 st.sidebar.header("🏁 実戦結果の更新")
 if st.sidebar.button("🏆 終了したレースの結果を取得", use_container_width=True):
     with st.spinner("🏁 レース結果を照合中..."):
@@ -150,36 +118,25 @@ if st.sidebar.button("🏆 終了したレースの結果を取得", use_contain
         st.success("✅ 成績を最新化しました！")
         time.sleep(1)
         st.rerun()
-st.sidebar.info("※予想を保存したレースが終わった後に押すと、自動で結果と配当がダッシュボードに反映されます。")
 
-# --------------------------------------------------
-# AIスコア計算ロジック
-# --------------------------------------------------
 def calculate_race_scores(race_id_target, target_df):
     race_df = target_df[target_df['race_id'] == str(race_id_target)].copy()
     if race_df.empty or df_past.empty or model is None: return None
-
     features = ['枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 'horse_weight', 'weight_change']
     for f in features:
         if f not in race_df.columns: race_df[f] = 0
-
     overall_mean = df_past['time_seconds'].dropna().mean() if 'time_seconds' in df_past.columns else 90.0
-    
     X = race_df[features].copy()
     X['time_seconds'] = X['time_seconds'].fillna(overall_mean)
     X['単勝'] = 10.0
     X['人気'] = 5.0
     X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
-
-    raw_prob = model.predict_proba(X)[:, 1]
-    prob = raw_prob
+    prob = model.predict_proba(X)[:, 1]
     s = prob.sum()
     race_df['win_prob'] = prob / s if s > 0 else 1.0 / len(race_df)
-    
     mp = race_df['win_prob'].mean()
     rs = 100 + ((race_df['win_prob'] - mp) / mp) * 35 if mp > 0 else 100
     race_df['score'] = np.clip(rs, 50, 120).round().astype(int)
-    
     return race_df.sort_values(by='score', ascending=False).reset_index(drop=True)
 
 @st.cache_data(show_spinner=False)
@@ -197,52 +154,56 @@ def get_all_markers():
             else:
                 markers[rid] = ""
     return markers
-
 markers = get_all_markers()
 
-# --------------------------------------------------
-# 画面レイアウト（タブ切り替え）
-# --------------------------------------------------
-tab_forecast, tab_dashboard = st.tabs(["🏇 今週のレース予想", "📈 実戦成績ダッシュボード"])
+tab_forecast, tab_dashboard = st.tabs(["🏇 レース予想", "📈 実戦成績"])
 
 with tab_forecast:
     if df_future.empty:
-        st.warning("⚠️ 予定されているレースデータがありません。左の「🔄 今週末の出馬表を取得」を押してください。")
+        st.warning("⚠️ 出馬表データが存在しません。ローカルで scrape_shutsuba.py を実行してください。")
     else:
-        st.markdown("### 📅 開催日を選択")
         date_options = sorted(df_future['day_label'].unique())
-        selected_date = st.radio("", date_options, horizontal=True, label_visibility="collapsed")
-        
-        st.markdown("`★` = 鉄板・高確率レース（勝負） / `◎` = 大混戦・波乱レース（穴狙い）")
-        st.markdown("---")
+        selected_date = st.radio("開催日", date_options, horizontal=True, label_visibility="collapsed")
         
         day_df = df_future[df_future['day_label'] == selected_date]
         places = day_df['place_name'].unique()
-        cols = st.columns(len(places))
         
-        for j, place in enumerate(places):
-            with cols[j]:
-                st.markdown(f"#### 🏇 {place}")
+        # 会場をタブでコンパクトに切り替え
+        place_tabs = st.tabs([f"🏇 {p}" for p in places])
+        
+        for p_idx, place in enumerate(places):
+            with place_tabs[p_idx]:
                 place_df = day_df[day_df['place_name'] == place]
                 races = sorted(place_df['r_num'].unique())
                 
-                for r in races:
-                    rid = place_df[place_df['r_num'] == r]['race_id'].iloc[0]
+                # 横並びグリッド配置（コンパクト表示）
+                cols = st.columns(6)
+                for i, r in enumerate(races):
+                    col = cols[i % 6]
+                    race_rows = place_df[place_df['r_num'] == r]
+                    rid = race_rows['race_id'].iloc[0]
+                    rname = str(race_rows['race_name'].iloc[0]).strip() if 'race_name' in race_rows.columns else ""
                     mark = markers.get(rid, "")
-                    btn_label = f"{r}R {mark}" if mark else f"{r}R"
-                    btn_type = "primary" if "★" in mark else "secondary"
                     
-                    if st.button(btn_label, key=f"btn_{rid}", use_container_width=True, type=btn_type):
+                    label = f"{r}R {mark}".strip()
+                    if rname:
+                        # 省スペース用に短縮ラベル
+                        short_name = rname if len(rname) <= 8 else rname[:7] + "…"
+                        label = f"{r}R {short_name} {mark}".strip()
+                        
+                    btn_type = "primary" if "★" in mark else "secondary"
+                    if col.button(label, key=f"btn_{rid}", use_container_width=True, type=btn_type):
                         st.session_state['selected_race_id'] = rid
 
-    st.markdown("---")
-
     if st.session_state['selected_race_id']:
+        st.markdown("---")
         target_id = st.session_state['selected_race_id']
         target_race_info = df_future[df_future['race_id'] == target_id].iloc[0]
-        race_display_name = f"{target_race_info['place_name']} {target_race_info['r_num']}R"
         
-        st.subheader(f"🚀 {race_display_name} のAI予想")
+        rname = target_race_info.get('race_name', "")
+        race_display_name = f"{target_race_info['place_name']} {target_race_info['r_num']}R 【{rname}】" if rname else f"{target_race_info['place_name']} {target_race_info['r_num']}R"
+            
+        st.subheader(f"🚀 {race_display_name}")
         
         if st.button("🧠 勝ちぱかくんに最終予想させる！", type="primary", use_container_width=True):
             if not GEMINI_API_KEY:
@@ -250,13 +211,10 @@ with tab_forecast:
                 st.stop()
                 
             scored_df = calculate_race_scores(target_id, df_future)
-            
-            # --- 実戦記録を保存（◎本命馬を記憶） ---
             honmei_row = scored_df.iloc[0]
             honmei_umaban = int(honmei_row['馬番'])
             honmei_name = honmei_row['馬名']
             
-            # 既に記録済みでなければ履歴CSVに追記
             if df_history.empty or target_id not in df_history['race_id'].values:
                 new_record = pd.DataFrame([{
                     'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -264,12 +222,11 @@ with tab_forecast:
                     'race_name': race_display_name,
                     'honmei_umaban': honmei_umaban,
                     'honmei_name': honmei_name,
-                    'result_pay': "" # レース終了後に更新
+                    'result_pay': ""
                 }])
                 df_history = pd.concat([df_history, new_record], ignore_index=True)
                 df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig')
             
-            # --- 予想出力 ---
             table_summary = []
             for _, row in scored_df.iterrows():
                 table_summary.append(
@@ -280,13 +237,10 @@ with tab_forecast:
 
             system_instruction = f"""
 あなたは競馬分析AI「勝ちぱかくん」です。提供されたデータ（score）を絶対の基準とし、シンプルに印と買い目のみを出力してください。
-
-【厳守事項】
 1. Web検索を使用し、{race_display_name}の最新情報を確認してください。
-2. **印の打刻ルール**: 提供された「score」の最高値に【◎】、2位に【◯】、3位に【▲】、4位に【△】、5位に【☆】と厳格に打ってください。
-3. **長文の解説は【一切不要】です。** 結果のみを出力してください。
+2. 印ルール: scoreの最高値に【◎】、2位に【◯】、3位に【▲】、4位に【△】、5位に【☆】
+3. 長文解説は一切不要。結果のみを出力。
 
-【出力フォーマット】
 ### 1. 【全頭 データ一覧】
 | 馬番 | 馬名 | 騎手 | score | AI勝率予想 |
 ### 2. 【勝ちぱかくんの印】
@@ -295,10 +249,6 @@ with tab_forecast:
 * 単勝: ◎
 * 複勝: ◎、◯
 * 馬連: ◎ - ◯, ▲, △, ☆
-* 馬単: ◎ → ◯, ▲, △, ☆
-* ワイド: ◎ - ◯, ▲, △, ☆
-* 三連複: ◎ - ◯, ▲, △, ☆
-* 三連単: 1着 ◎ → 2着 ◯, ▲ → 3着 ◯, ▲, △, ☆
 """
             prompt = f"以下のレース（ID: {target_id}、{race_display_name}）の出走馬データです。\n{prompt_data}"
 
@@ -315,44 +265,33 @@ with tab_forecast:
                         )
                     )
                     st.markdown(response.text)
-                    st.success("📝 このレースの予想（本命馬）を実戦履歴に記録しました！レース終了後にサイドバーの更新ボタンを押してください。")
+                    st.success("📝 このレースの予想（本命馬）を実戦履歴に記録しました！")
                 except Exception as e:
                     st.error(f"【APIエラー】: {e}")
 
-# ==================================================
-# タブ2：実戦成績ダッシュボード
-# ==================================================
 with tab_dashboard:
-    st.subheader("📈 あなたと勝ちぱかくんの実戦成績（単勝ベース）")
-    
+    st.subheader("📈 実戦成績（単勝ベース）")
     if df_history.empty:
-        st.info("まだ予想履歴がありません。「今週のレース予想」から予想を実行すると、ここに記録が蓄積されます。")
+        st.info("まだ予想履歴がありません。")
     else:
-        # 結果が出ているレースだけを集計対象にする
         finished_races = df_history[pd.to_numeric(df_history['result_pay'], errors='coerce').notna()]
-        
         total_races = len(finished_races)
         waiting_races = len(df_history) - total_races
-        
         st.markdown(f"**結果判明レース**: {total_races} 件 （結果待ち: {waiting_races} 件）")
         
         if total_races > 0:
             hits = len(finished_races[finished_races['result_pay'].astype(float) > 0])
             returns = finished_races['result_pay'].astype(float).sum()
-            invested = total_races * 100 # 1R 100円計算
-            
+            invested = total_races * 100
             hit_rate = (hits / total_races) * 100
             recovery_rate = (returns / invested) * 100
             profit = returns - invested
             
             col1, col2, col3 = st.columns(3)
             col1.metric("🎯 実戦 的中率", f"{hit_rate:.1f}%", f"{hits} / {total_races} 的中")
-            
             delta_color = "normal" if recovery_rate >= 100 else "inverse"
             col2.metric("💰 実戦 回収率", f"{recovery_rate:.1f}%", f"{recovery_rate - 100:.1f}%", delta_color=delta_color)
-            
             col3.metric("💴 累計収支 (1R100円)", f"{int(profit):,} 円")
             
         st.markdown("---")
-        st.markdown("#### 📝 直近の予想履歴")
         st.dataframe(df_history[['date', 'race_name', 'honmei_umaban', 'honmei_name', 'result_pay']].sort_values(by='date', ascending=False), use_container_width=True)
