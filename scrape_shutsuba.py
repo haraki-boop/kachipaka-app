@@ -18,31 +18,26 @@ def get_target_dates():
             dates.append(d.strftime("%Y%m%d"))
     return sorted(list(set(dates)))
 
+def clean_text(text):
+    if not text: return ""
+    text = re.sub(r'[\r\n\t]+', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip().replace('\ufffd', '') # 不正な記号を除去
+
 def detect_grade(race_name, soup):
-    """G1/G2/G3の判定を行い、王冠テキストを返す"""
     grade_prefix = ""
-    
-    # クラス名による判定
     grade_icon = soup.find(class_=re.compile(r'Icon_GradeType\d+'))
     if grade_icon:
         cls_str = " ".join(grade_icon.get('class', []))
-        if 'GradeType1' in cls_str:
-            grade_prefix = "👑 G1 "
-        elif 'GradeType2' in cls_str:
-            grade_prefix = "👑 G2 "
-        elif 'GradeType3' in cls_str:
-            grade_prefix = "👑 G3 "
+        if 'GradeType1' in cls_str: grade_prefix = "👑 G1 "
+        elif 'GradeType2' in cls_str: grade_prefix = "👑 G2 "
+        elif 'GradeType3' in cls_str: grade_prefix = "👑 G3 "
             
-    # テキストによるフォールバック判定
     if not grade_prefix:
-        if re.search(r'G1|Ｇ１|ＧＩ|\(G1\)', race_name, re.IGNORECASE):
-            grade_prefix = "👑 G1 "
-        elif re.search(r'G2|Ｇ２|ＧⅡ|\(G2\)', race_name, re.IGNORECASE):
-            grade_prefix = "👑 G2 "
-        elif re.search(r'G3|Ｇ３|ＧⅢ|\(G3\)', race_name, re.IGNORECASE):
-            grade_prefix = "👑 G3 "
+        if re.search(r'G1|Ｇ１|ＧＩ|\(G1\)', race_name, re.IGNORECASE): grade_prefix = "👑 G1 "
+        elif re.search(r'G2|Ｇ２|ＧⅡ|\(G2\)', race_name, re.IGNORECASE): grade_prefix = "👑 G2 "
+        elif re.search(r'G3|Ｇ３|ＧⅢ|\(G3\)', race_name, re.IGNORECASE): grade_prefix = "👑 G3 "
 
-    # 重複表記をクリーン化して結合
     clean_name = re.sub(r'\(?G[123１２３ＩⅡⅢ]\)?', '', race_name).strip()
     return f"{grade_prefix}{clean_name}".strip()
 
@@ -53,7 +48,7 @@ def scrape_shutsuba():
     id_to_date = {}
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Referer": "https://race.netkeiba.com/",
     }
 
@@ -61,7 +56,7 @@ def scrape_shutsuba():
         url = f"https://race.netkeiba.com/top/race_list_sub.html?kaisai_date={date_str}"
         try:
             res = requests.get(url, headers=headers, timeout=10)
-            res.encoding = 'euc-jp'
+            res.encoding = 'euc-jp' # 標準のeuc-jpに戻す
             found_ids = re.findall(r'race_id=(\d{12})', res.text)
             for rid in found_ids:
                 if rid not in all_race_ids:
@@ -89,18 +84,12 @@ def scrape_shutsuba():
             soup = BeautifulSoup(res.text, "html.parser")
             
             date_str = id_to_date.get(race_id, "")
-            if date_str:
-                dt = datetime.strptime(date_str, "%Y%m%d")
-                display_date = f"{dt.month}月{dt.day}日({weekdays[dt.weekday()]})"
-            else:
-                display_date = "不明"
+            display_date = f"{datetime.strptime(date_str, '%Y%m%d').month}月{datetime.strptime(date_str, '%Y%m%d').day}日({weekdays[datetime.strptime(date_str, '%Y%m%d').weekday()]})" if date_str else "不明"
                 
-            # レース名抽出
             raw_race_name = ""
             rn_elem = soup.find(class_="RaceName") or soup.find(class_="RaceList_Item02")
             if rn_elem:
-                raw_race_name = rn_elem.text.strip()
-                raw_race_name = re.sub(r'\s+', ' ', raw_race_name)
+                raw_race_name = clean_text(rn_elem.text)
             
             final_race_name = detect_grade(raw_race_name, soup)
             
@@ -108,14 +97,14 @@ def scrape_shutsuba():
             for row in rows:
                 cols = row.find_all("td")
                 if len(cols) >= 7:
-                    waku = cols[0].text.strip()
-                    umaban = cols[1].text.strip()
+                    waku = clean_text(cols[0].text)
+                    umaban = clean_text(cols[1].text)
                     horse_td = cols[3]
-                    horse_name = horse_td.find("a").text.strip() if horse_td.find("a") else horse_td.text.strip()
-                    sex_age = cols[4].text.strip()
-                    kinryo = cols[5].text.strip()
+                    horse_name = clean_text(horse_td.find("a").text) if horse_td.find("a") else clean_text(horse_td.text)
+                    sex_age = clean_text(cols[4].text)
+                    kinryo = clean_text(cols[5].text)
                     jockey_td = cols[6]
-                    jockey = jockey_td.find("a").text.strip() if jockey_td.find("a") else jockey_td.text.strip()
+                    jockey = clean_text(jockey_td.find("a").text) if jockey_td.find("a") else clean_text(jockey_td.text)
                     
                     if horse_name and umaban.isdigit():
                         race_data_list.append({
@@ -136,6 +125,7 @@ def scrape_shutsuba():
 
     if race_data_list:
         df_future = pd.DataFrame(race_data_list)
+        # utf-8-sigで保存する
         df_future.to_csv(FUTURE_CSV, index=False, encoding='utf-8-sig')
         print(f"\n✅ 保存完了！ ({FUTURE_CSV})")
 

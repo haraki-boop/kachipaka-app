@@ -36,7 +36,7 @@ def load_model():
 @st.cache_data
 def load_past_data():
     if os.path.exists("cleaned_keiba_data.csv"):
-        df = pd.read_csv("cleaned_keiba_data.csv", low_memory=False, dtype={'race_id': str})
+        df = pd.read_csv("cleaned_keiba_data.csv", low_memory=False, dtype={'race_id': str}, encoding='utf-8-sig')
         if 'time_seconds' not in df.columns and 'タイム' in df.columns:
             def ts(t):
                 if pd.isna(t): return np.nan
@@ -51,7 +51,8 @@ def load_past_data():
 @st.cache_data
 def load_future_data():
     if os.path.exists("future_races.csv"):
-        df = pd.read_csv("future_races.csv", dtype={'race_id': str})
+        # 📝 修正箇所：アプリがShift-JISと誤認しないように utf-8-sig を強制指定
+        df = pd.read_csv("future_races.csv", dtype={'race_id': str}, encoding='utf-8-sig')
         PLACE_MAP_REV = {
             "01": "札幌", "02": "函館", "03": "福島", "04": "新潟", "05": "東京",
             "06": "中山", "07": "中京", "08": "京都", "09": "阪神", "10": "小倉"
@@ -62,13 +63,14 @@ def load_future_data():
         
         if 'race_name' not in df.columns:
             df['race_name'] = ""
+            
         df['day_label'] = df['date'] if 'date' in df.columns else "不明"
         return df
     return pd.DataFrame()
 
 def load_history_data():
     if os.path.exists(HISTORY_CSV):
-        return pd.read_csv(HISTORY_CSV, dtype={'race_id': str, 'honmei_umaban': str})
+        return pd.read_csv(HISTORY_CSV, dtype={'race_id': str, 'honmei_umaban': str}, encoding='utf-8-sig')
     return pd.DataFrame(columns=['date', 'race_id', 'race_name', 'honmei_umaban', 'honmei_name', 'result_pay'])
 
 model = load_model()
@@ -160,7 +162,7 @@ tab_forecast, tab_dashboard = st.tabs(["🏇 レース予想", "📈 実戦成�
 
 with tab_forecast:
     if df_future.empty:
-        st.warning("⚠️ 出馬表データが存在しません。ローカルで scrape_shutsuba.py を実行してください。")
+        st.warning("⚠️ 出馬表データが存在しません。")
     else:
         date_options = sorted(df_future['day_label'].unique())
         selected_date = st.radio("開催日", date_options, horizontal=True, label_visibility="collapsed")
@@ -168,7 +170,6 @@ with tab_forecast:
         day_df = df_future[df_future['day_label'] == selected_date]
         places = day_df['place_name'].unique()
         
-        # 会場をタブでコンパクトに切り替え
         place_tabs = st.tabs([f"🏇 {p}" for p in places])
         
         for p_idx, place in enumerate(places):
@@ -176,7 +177,6 @@ with tab_forecast:
                 place_df = day_df[day_df['place_name'] == place]
                 races = sorted(place_df['r_num'].unique())
                 
-                # 横並びグリッド配置（コンパクト表示）
                 cols = st.columns(6)
                 for i, r in enumerate(races):
                     col = cols[i % 6]
@@ -187,7 +187,6 @@ with tab_forecast:
                     
                     label = f"{r}R {mark}".strip()
                     if rname:
-                        # 省スペース用に短縮ラベル
                         short_name = rname if len(rname) <= 8 else rname[:7] + "…"
                         label = f"{r}R {short_name} {mark}".strip()
                         
