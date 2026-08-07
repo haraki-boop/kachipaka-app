@@ -9,11 +9,20 @@ from google import genai
 from google.genai import types
 
 # --------------------------------------------------
-# ページ初期設定
+# ページ初期設定（オリジナルイラストをアイコンに設定）
 # --------------------------------------------------
-st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="🦙", layout="wide")
+st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="image_61b676.png", layout="wide")
 
-st.title("🦙 AI予想 勝ちぱかくん (実戦モード)")
+# タイトル周りをスッキリさせ、オリジナルイラストを表示
+col_img, col_text = st.columns([1, 10])
+with col_img:
+    try:
+        st.image("image_61b676.png", width=80)
+    except:
+        pass # 画像が見つからない場合のエラー回避
+with col_text:
+    st.title("AI予想 勝ちぱかくん")
+
 st.caption("AI基礎スコア判定 ＋ Geminiリアルタイム検索 ＋ バックテスト成績")
 
 if 'selected_race_id' not in st.session_state:
@@ -87,7 +96,7 @@ if st.sidebar.button("🔄 今週末の出馬表を取得", use_container_width=
                 time.sleep(1)
                 st.rerun()
             else:
-                st.sidebar.error("取得失敗。")
+                st.sidebar.error("取得失敗。ターミナルで python scrape_shutsuba.py を実行してエラーを確認してください。")
         except Exception as e:
             st.sidebar.error(f"エラー: {e}")
 
@@ -111,7 +120,6 @@ def calculate_race_scores(race_id_target, target_df):
 
     overall_mean = df_past['time_seconds'].dropna().mean() if 'time_seconds' in df_past.columns else 90.0
     
-    # 高速化のためバックテスト時は簡易平均を使用
     X = race_df[features].copy()
     X['time_seconds'] = X['time_seconds'].fillna(overall_mean)
     X['単勝'] = 10.0
@@ -119,7 +127,6 @@ def calculate_race_scores(race_id_target, target_df):
     X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
 
     raw_prob = model.predict_proba(X)[:, 1]
-    
     prob = raw_prob
     s = prob.sum()
     race_df['win_prob'] = prob / s if s > 0 else 1.0 / len(race_df)
@@ -155,7 +162,6 @@ markers = get_all_markers()
 def calculate_backtest():
     if df_past.empty or df_payout.empty or model is None: return None
     
-    # 簡易的に全過去データのAIスコアを算出して◎(1位)を取得
     X = df_past[['枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 'horse_weight', 'weight_change']].copy()
     X['単勝'] = 10.0
     X['人気'] = 5.0
@@ -164,13 +170,10 @@ def calculate_backtest():
     df_past_copy = df_past.copy()
     df_past_copy['raw_prob'] = model.predict_proba(X)[:, 1]
     
-    # 各レースの1位（本命◎）を抽出
     idx = df_past_copy.groupby('race_id')['raw_prob'].idxmax()
     top_horses = df_past_copy.loc[idx, ['race_id', '馬番', '馬名']]
     
-    # 払戻金データと結合
     merged = pd.merge(top_horses, df_payout, on='race_id', how='inner')
-    
     total_races = len(merged)
     if total_races == 0: return None
     
@@ -180,7 +183,6 @@ def calculate_backtest():
     for _, row in merged.iterrows():
         try:
             pred_num = str(int(row['馬番']))
-            # 単勝の当たり馬番と配当を取得
             actual_nums = [str(int(n)) for n in str(row['tansho_num']).split('/') if n.strip().isdigit()]
             if pred_num in actual_nums:
                 tansho_hits += 1
@@ -189,7 +191,7 @@ def calculate_backtest():
         except:
             continue
             
-    invested = total_races * 100 # 1レース100円投資とした場合
+    invested = total_races * 100
     recovery_rate = (tansho_returns / invested) * 100 if invested > 0 else 0
     hit_rate = (tansho_hits / total_races) * 100 if total_races > 0 else 0
     
@@ -209,9 +211,6 @@ backtest_results = calculate_backtest()
 # --------------------------------------------------
 tab_forecast, tab_dashboard = st.tabs(["🏇 今週のレース予想", "📈 AI成績ダッシュボード"])
 
-# ==================================================
-# タブ1：今週の予想（メインUI）
-# ==================================================
 with tab_forecast:
     if df_future.empty:
         st.warning("⚠️ 予定されているレースデータがありません。左の「🔄 今週末の出馬表を取得」を押してください。")
@@ -289,7 +288,7 @@ with tab_forecast:
 """
             prompt = f"以下のレース（ID: {target_id}、{race_display_name}）の出走馬データです。\n{prompt_data}"
 
-            with st.spinner("🦙 過去データ解析と最新情報のWeb検索を実行中..."):
+            with st.spinner("解析とWeb検索を実行中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 try:
                     response = client.models.generate_content(
@@ -305,32 +304,21 @@ with tab_forecast:
                 except Exception as e:
                     st.error(f"【APIエラー】: {e}")
 
-
-# ==================================================
-# タブ2：AI成績ダッシュボード
-# ==================================================
 with tab_dashboard:
     st.subheader("📊 勝ちぱかくん 過去成績（単勝・本命◎）")
     
     if df_payout.empty:
-        st.info("🔄 現在、過去の払戻金データを収集中です。裏側で動いているターミナルの処理が終わるまでお待ちください。")
+        st.info("🔄 現在、過去の払戻金データを収集中です。")
     elif backtest_results is None:
         st.warning("⚠️ 成績の計算に必要なデータが不足しています。")
     else:
-        st.markdown(f"**集計対象レース数**: {backtest_results['total_races']:,} レース（データ収集中...）")
+        st.markdown(f"**集計対象レース数**: {backtest_results['total_races']:,} レース")
         
         col1, col2, col3 = st.columns(3)
         col1.metric("🎯 単勝 的中率", f"{backtest_results['hit_rate']:.1f}%")
         
-        # 回収率が100%超えなら赤字（ポジティブ）、下回れば青字などの装飾
         ret_rate = backtest_results['recovery_rate']
         delta_color = "normal" if ret_rate >= 100 else "inverse"
         col2.metric("💰 単勝 回収率", f"{ret_rate:.1f}%", f"{ret_rate - 100:.1f}%", delta_color=delta_color)
         
         col3.metric("💴 累計収支 (1R100円)", f"{backtest_results['returns'] - backtest_results['invested']:,} 円")
-        
-        st.markdown("---")
-        st.markdown("""
-        *※現在は「単勝（◎の1点買い）」の基本成績を表示しています。*
-        *払戻金データの収集が完了次第、馬連や三連複などの買い目ごとの詳細な回収率分析も追加可能です！*
-        """)
