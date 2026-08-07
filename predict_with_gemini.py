@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import joblib
 import streamlit as st
+import subprocess
 from google import genai
 from google.genai import types
 
@@ -12,364 +13,324 @@ from google.genai import types
 # --------------------------------------------------
 st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="🦙", layout="wide")
 
-st.title("🦙 AI予想 勝ちぱかくん")
-st.caption("LightGBM基礎スコア（全過去走自動集計・人気度外視） × GeminiリアルタイムWeb検索")
+st.title("🦙 AI予想 勝ちぱかくん (実戦モード)")
+st.caption("AI基礎スコア判定 ＋ Geminiリアルタイム検索 ＋ バックテスト成績")
 
-# --------------------------------------------------
-# 🔑 Gemini APIキーの設定
-# --------------------------------------------------
+if 'selected_race_id' not in st.session_state:
+    st.session_state['selected_race_id'] = None
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
 
 # --------------------------------------------------
-# タイム（文字列）を秒数に変換する補助関数
-# --------------------------------------------------
-def time_to_seconds(t_str):
-    if pd.isna(t_str):
-        return None
-    t_str = str(t_str).strip()
-    parts = t_str.split(':')
-    if len(parts) == 2:
-        try:
-            return float(parts[0]) * 60 + float(parts[1])
-        except ValueError:
-            return None
-    elif len(parts) == 1:
-        try:
-            return float(parts[0])
-        except ValueError:
-            return None
-    return None
-
-# --------------------------------------------------
-# データ＆モデル読み込み
+# モデル＆データ読み込み
 # --------------------------------------------------
 @st.cache_resource
 def load_model():
-    model_path = "keiba_ai_model.pkl"
-    if os.path.exists(model_path):
-        try:
-            return joblib.load(model_path)
-        except Exception as e:
-            st.error(f"【モデル読み込みエラー】: {e}")
-            return None
+    if os.path.exists("keiba_ai_model.pkl"):
+        return joblib.load("keiba_ai_model.pkl")
     return None
 
-def load_data():
-    data_path = "cleaned_keiba_data.csv"
-    if os.path.exists(data_path):
-        try:
-            loaded_df = pd.read_csv(data_path, low_memory=False, dtype={'race_id': str})
-            # time_seconds 列が存在しない場合は タイム 列から自動補完
-            if 'time_seconds' not in loaded_df.columns:
-                if 'タイム' in loaded_df.columns:
-                    loaded_df['time_seconds'] = loaded_df['タイム'].apply(time_to_seconds)
-                else:
-                    loaded_df['time_seconds'] = np.nan
-            return loaded_df
-        except Exception as e:
-            st.error(f"【CSV読み込みエラー】: {e}")
-            return None
-    return None
+@st.cache_data
+def load_past_data():
+    if os.path.exists("cleaned_keiba_data.csv"):
+        df = pd.read_csv("cleaned_keiba_data.csv", low_memory=False, dtype={'race_id': str})
+        if 'time_seconds' not in df.columns and 'タイム' in df.columns:
+            def ts(t):
+                if pd.isna(t): return np.nan
+                p = str(t).strip().split(':')
+                if len(p) == 2: return float(p[0]) * 60 + float(p[1])
+                try: return float(p[0])
+                except: return np.nan
+            df['time_seconds'] = df['タイム'].apply(ts)
+        return df
+    return pd.DataFrame()
+
+@st.cache_data
+def load_future_data():
+    if os.path.exists("future_races.csv"):
+        df = pd.read_csv("future_races.csv", dtype={'race_id': str})
+        PLACE_MAP_REV = {
+            "01": "札幌", "02": "函館", "03": "福島", "04": "新潟", "05": "東京",
+            "06": "中山", "07": "中京", "08": "京都", "09": "阪神", "10": "小倉"
+        }
+        df['place_code'] = df['race_id'].str[4:6]
+        df['place_name'] = df['place_code'].map(PLACE_MAP_REV).fillna("不明")
+        df['r_num'] = df['race_id'].str[10:12].astype(int)
+        df['kai'] = df['race_id'].str[6:8].astype(int)
+        df['day'] = df['race_id'].str[8:10].astype(int)
+        df['day_label'] = "第" + df['kai'].astype(str) + "回 " + df['day'].astype(str) + "日目"
+        return df
+    return pd.DataFrame()
+
+@st.cache_data
+def load_payout_data():
+    if os.path.exists("payout_data.csv"):
+        return pd.read_csv("payout_data.csv", dtype={'race_id': str})
+    return pd.DataFrame()
 
 model = load_model()
-df = load_data()
+df_past = load_past_data()
+df_future = load_future_data()
+df_payout = load_payout_data()
 
 # --------------------------------------------------
-# 🔄 最新データ更新処理
+# 🔄 最新データ更新ボタン（サイドバー）
 # --------------------------------------------------
-def update_keiba_data():
-    with st.spinner("🔄 JRA/netkeiba等から最新の出馬表・直前オッズデータを取得中..."):
+st.sidebar.header("⚙️ データ管理")
+if st.sidebar.button("🔄 今週末の出馬表を取得", use_container_width=True):
+    with st.spinner("🔄 JRA/netkeiba等からデータを取得中..."):
         try:
-            time.sleep(2)
-            st.cache_data.clear()
-            st.success("✅ 最新の出馬表・直前オッズデータの更新が完了しました！")
-            st.rerun()
+            result = subprocess.run(["python", "scrape_shutsuba.py"], capture_output=True, text=True)
+            if result.returncode == 0:
+                st.cache_data.clear()
+                st.success("✅ 取得完了！")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.sidebar.error("取得失敗。")
         except Exception as e:
-            st.error(f"【データ更新エラー】: {e}")
+            st.sidebar.error(f"エラー: {e}")
 
-# --------------------------------------------------
-# 🎯 サイドバー（日付表示対応UI）
-# --------------------------------------------------
-st.sidebar.header("⚙️ データ更新・管理")
-if st.sidebar.button("🔄 最新出馬表・オッズを自動更新", use_container_width=True):
-    update_keiba_data()
+if st.sidebar.button("📊 払戻金・成績データを最新化", use_container_width=True):
+    st.cache_data.clear()
+    st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.header("🎯 レース選択")
+st.sidebar.info("💡 収集スクリプトが動いている間でも、「成績データを最新化」を押せば、そこまで集まったデータで回収率が計算されます。")
 
-if df is not None and not df.empty:
-    PLACE_MAP_REV = {
-        "01": "札幌", "02": "函館", "03": "福島", "04": "新潟", "05": "東京",
-        "06": "中山", "07": "中京", "08": "京都", "09": "阪神", "10": "小倉"
+# --------------------------------------------------
+# AIスコア計算ロジック
+# --------------------------------------------------
+def calculate_race_scores(race_id_target, target_df):
+    race_df = target_df[target_df['race_id'] == str(race_id_target)].copy()
+    if race_df.empty or df_past.empty or model is None: return None
+
+    features = ['枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 'horse_weight', 'weight_change']
+    for f in features:
+        if f not in race_df.columns: race_df[f] = 0
+
+    overall_mean = df_past['time_seconds'].dropna().mean() if 'time_seconds' in df_past.columns else 90.0
+    
+    # 高速化のためバックテスト時は簡易平均を使用
+    X = race_df[features].copy()
+    X['time_seconds'] = X['time_seconds'].fillna(overall_mean)
+    X['単勝'] = 10.0
+    X['人気'] = 5.0
+    X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
+
+    raw_prob = model.predict_proba(X)[:, 1]
+    
+    prob = raw_prob
+    s = prob.sum()
+    race_df['win_prob'] = prob / s if s > 0 else 1.0 / len(race_df)
+    
+    mp = race_df['win_prob'].mean()
+    rs = 100 + ((race_df['win_prob'] - mp) / mp) * 35 if mp > 0 else 100
+    race_df['score'] = np.clip(rs, 50, 120).round().astype(int)
+    
+    return race_df.sort_values(by='score', ascending=False).reset_index(drop=True)
+
+@st.cache_data(show_spinner=False)
+def get_all_markers():
+    markers = {}
+    if df_future.empty: return markers
+    for rid in df_future['race_id'].unique():
+        sdf = calculate_race_scores(rid, df_future)
+        if sdf is not None and len(sdf) >= 5:
+            sc = sdf['score'].tolist()
+            if sc[0] >= 108 and (sc[0] - sc[1]) >= 4:
+                markers[rid] = "★"
+            elif (sc[0] - sc[4]) <= 5:
+                markers[rid] = "◎"
+            else:
+                markers[rid] = ""
+    return markers
+
+markers = get_all_markers()
+
+# --------------------------------------------------
+# バックテスト計算ロジック
+# --------------------------------------------------
+@st.cache_data(show_spinner=False)
+def calculate_backtest():
+    if df_past.empty or df_payout.empty or model is None: return None
+    
+    # 簡易的に全過去データのAIスコアを算出して◎(1位)を取得
+    X = df_past[['枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 'horse_weight', 'weight_change']].copy()
+    X['単勝'] = 10.0
+    X['人気'] = 5.0
+    X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
+    
+    df_past_copy = df_past.copy()
+    df_past_copy['raw_prob'] = model.predict_proba(X)[:, 1]
+    
+    # 各レースの1位（本命◎）を抽出
+    idx = df_past_copy.groupby('race_id')['raw_prob'].idxmax()
+    top_horses = df_past_copy.loc[idx, ['race_id', '馬番', '馬名']]
+    
+    # 払戻金データと結合
+    merged = pd.merge(top_horses, df_payout, on='race_id', how='inner')
+    
+    total_races = len(merged)
+    if total_races == 0: return None
+    
+    tansho_hits = 0
+    tansho_returns = 0
+    
+    for _, row in merged.iterrows():
+        try:
+            pred_num = str(int(row['馬番']))
+            # 単勝の当たり馬番と配当を取得
+            actual_nums = [str(int(n)) for n in str(row['tansho_num']).split('/') if n.strip().isdigit()]
+            if pred_num in actual_nums:
+                tansho_hits += 1
+                pays = str(row['tansho_pay']).split('/')
+                tansho_returns += int(pays[0].replace(',', '').strip())
+        except:
+            continue
+            
+    invested = total_races * 100 # 1レース100円投資とした場合
+    recovery_rate = (tansho_returns / invested) * 100 if invested > 0 else 0
+    hit_rate = (tansho_hits / total_races) * 100 if total_races > 0 else 0
+    
+    return {
+        'total_races': total_races,
+        'tansho_hits': tansho_hits,
+        'invested': invested,
+        'returns': tansho_returns,
+        'recovery_rate': recovery_rate,
+        'hit_rate': hit_rate
     }
 
-    if 'race_id' in df.columns:
-        df['race_id_str'] = df['race_id'].astype(str).str.replace(r'\.0$', '', regex=True)
-        
-        date_col = None
-        for col in ['date', '日付', '開催日', '年月日', 'Date']:
-            if col in df.columns:
-                date_col = col
-                break
+backtest_results = calculate_backtest()
 
-        def parse_race_info(row):
-            rid = str(row['race_id_str'])
-            raw_date = str(row[date_col]) if date_col and pd.notna(row[date_col]) else ""
-            
-            if len(rid) == 12:
-                year = rid[:4]
-                p_code = rid[4:6]
-                p_name = PLACE_MAP_REV.get(p_code, "その他")
-                kai = int(rid[6:8])
-                day = int(rid[8:10])
-                r_num = int(rid[10:12])
+# --------------------------------------------------
+# 画面レイアウト（タブ切り替え）
+# --------------------------------------------------
+tab_forecast, tab_dashboard = st.tabs(["🏇 今週のレース予想", "📈 AI成績ダッシュボード"])
+
+# ==================================================
+# タブ1：今週の予想（メインUI）
+# ==================================================
+with tab_forecast:
+    if df_future.empty:
+        st.warning("⚠️ 予定されているレースデータがありません。左の「🔄 今週末の出馬表を取得」を押してください。")
+    else:
+        st.markdown("### 📅 開催日を選択")
+        date_options = sorted(df_future['day_label'].unique())
+        selected_date = st.radio("", date_options, horizontal=True, label_visibility="collapsed")
+        
+        st.markdown("`★` = 鉄板・高確率レース（勝負） / `◎` = 大混戦・波乱レース（穴狙い）")
+        st.markdown("---")
+        
+        day_df = df_future[df_future['day_label'] == selected_date]
+        places = day_df['place_name'].unique()
+        cols = st.columns(len(places))
+        
+        for j, place in enumerate(places):
+            with cols[j]:
+                st.markdown(f"#### 🏇 {place}")
+                place_df = day_df[day_df['place_name'] == place]
+                races = sorted(place_df['r_num'].unique())
                 
-                if raw_date and "年" in raw_date:
-                    date_label = raw_date
-                elif raw_date and len(raw_date) >= 8:
-                    clean_date = raw_date.replace('-', '').replace('/', '')
-                    try:
-                        date_label = f"{clean_date[:4]}年{int(clean_date[4:6])}月{int(clean_date[6:8])}日"
-                    except ValueError:
-                        date_label = raw_date
-                else:
-                    date_label = f"{year}年 第{kai}回{day}日目"
+                for r in races:
+                    rid = place_df[place_df['r_num'] == r]['race_id'].iloc[0]
+                    mark = markers.get(rid, "")
+                    btn_label = f"{r}R {mark}" if mark else f"{r}R"
+                    btn_type = "primary" if "★" in mark else "secondary"
                     
-                return year, p_code, p_name, date_label, f"{r_num}R"
-            return "不明", "00", "不明", "不明", "不明"
+                    if st.button(btn_label, key=f"btn_{rid}", use_container_width=True, type=btn_type):
+                        st.session_state['selected_race_id'] = rid
 
-        parsed = df.apply(parse_race_info, axis=1)
-        df['place_name'] = [p[2] for p in parsed]
-        df['date_label'] = [p[3] for p in parsed]
-        df['race_num_label'] = [p[4] for p in parsed]
+    st.markdown("---")
 
-        # 1. 競馬場選択
-        all_places = [p for p in PLACE_MAP_REV.values() if p in df['place_name'].unique()]
-        selected_place = st.sidebar.selectbox("🏇 競馬場を選択", all_places if all_places else sorted(df['place_name'].unique()))
-
-        # 2. 開催日選択
-        df_place = df[df['place_name'] == selected_place]
-        all_dates = sorted(df_place['date_label'].unique(), reverse=True)
-        selected_date_label = st.sidebar.selectbox("📅 開催日を選択", all_dates)
-
-        # 3. レース選択
-        df_date = df_place[df_place['date_label'] == selected_date_label]
-        all_races = sorted(df_date['race_num_label'].unique(), key=lambda x: int(x.replace('R', '')) if 'R' in x else 0)
-        selected_race_num = st.sidebar.selectbox("🏁 レース（R）を選択", all_races)
-
-        matched_rows = df_date[df_date['race_num_label'] == selected_race_num]
-        if not matched_rows.empty:
-            target_race_id = matched_rows['race_id_str'].iloc[0]
-            selected_label = f"{selected_date_label} {selected_place} {selected_race_num}"
-        else:
-            st.error("【エラー】一致するレースIDが見つかりません。")
-            st.stop()
-
-        btn_predict = st.sidebar.button("🚀 勝ちぱかくんに予想させる！", type="primary", use_container_width=True)
-    else:
-        st.error("【エラー】CSV内に 'race_id' 列が見つかりません。")
-        st.stop()
-else:
-    st.error("【エラー】'cleaned_keiba_data.csv' が読み込めません。")
-    st.stop()
-
-# --------------------------------------------------
-# 🤖 予想生成ロジック
-# --------------------------------------------------
-def generate_prediction(race_id_target, race_display_name):
-    if not GEMINI_API_KEY:
-        st.error("【設定エラー】GEMINI_API_KEY が見つかりません。")
-        return
-
-    if model is None:
-        st.error("【モデルエラー】AIモデル（keiba_ai_model.pkl）が読み込めません。")
-        return
-
-    race_df = df[df['race_id_str'] == str(race_id_target)].copy()
-
-    if race_df.empty:
-        st.warning(f"選択されたレース（ID: {race_id_target}）の出走馬データが見つかりません。")
-        return
-
-    past_df = df[df['race_id_str'] != str(race_id_target)].copy()
-
-    # 特徴量の準備
-    features = ['枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 'horse_weight', 'weight_change']
-    if '単勝' in df.columns: features.append('単勝')
-    if '人気' in df.columns: features.append('人気')
-
-    for f in features:
-        if f not in race_df.columns:
-            race_df[f] = 0
-
-    X_race = race_df[features].copy()
-
-    if '単勝' in X_race.columns: X_race['単勝'] = 10.0
-    if '人気' in X_race.columns: X_race['人気'] = 5.0
-
-    # 過去タイムの平均値
-    if 'time_seconds' in past_df.columns and not past_df['time_seconds'].dropna().empty:
-        overall_mean_time = past_df['time_seconds'].dropna().mean()
-    else:
-        overall_mean_time = 90.0
-
-    past_avg_ranks = []
-    past_top3_rates = []
-    filled_times = []
-
-    for idx, row in race_df.iterrows():
-        hname = row.get('馬名', '')
-        h_past = past_df[past_df['馬名'] == hname] if ('馬名' in past_df.columns and hname) else pd.DataFrame()
+    if st.session_state['selected_race_id']:
+        target_id = st.session_state['selected_race_id']
+        target_race_info = df_future[df_future['race_id'] == target_id].iloc[0]
+        race_display_name = f"{target_race_info['place_name']} {target_race_info['r_num']}R"
         
-        if not h_past.empty:
-            avg_r = pd.to_numeric(h_past['着順'], errors='coerce').mean() if '着順' in h_past.columns else 8.0
-            avg_r = avg_r if pd.notna(avg_r) else 8.0
-            
-            top3_r = (pd.to_numeric(h_past['着順'], errors='coerce') <= 3).mean() if '着順' in h_past.columns else 0.1
-            top3_r = top3_r if pd.notna(top3_r) else 0.1
-            
-            if 'time_seconds' in h_past.columns:
-                v_times = pd.to_numeric(h_past['time_seconds'], errors='coerce').dropna()
-                avg_t = v_times.mean() if not v_times.empty else overall_mean_time
-            else:
-                avg_t = overall_mean_time
-        else:
-            avg_r = 8.0
-            top3_r = 0.1
-            avg_t = overall_mean_time
-
-        past_avg_ranks.append(avg_r)
-        past_top3_rates.append(top3_r)
-        filled_times.append(avg_t)
-
-    X_race['time_seconds'] = filled_times
-    X_race = X_race.apply(pd.to_numeric, errors='coerce').fillna(0)
-
-    raw_prob = model.predict_proba(X_race)[:, 1]
-
-    rank_weights = np.array([1.0 / (r + 1.0) for r in past_avg_ranks])
-    top3_weights = np.array(past_top3_rates) + 0.1
-    
-    combined_prob = raw_prob * rank_weights * top3_weights
-
-    prob_sum = combined_prob.sum()
-    if prob_sum > 0:
-        race_df['win_prob'] = combined_prob / prob_sum
-    else:
-        race_df['win_prob'] = 1.0 / len(race_df)
-
-    mean_prob = race_df['win_prob'].mean()
-    if mean_prob > 0:
-        raw_score = 100 + ((race_df['win_prob'] - mean_prob) / mean_prob) * 35
-    else:
-        raw_score = 100
-
-    race_df['score'] = np.clip(raw_score, 50, 120).round().astype(int)
-    race_df = race_df.sort_values(by='win_prob', ascending=False).reset_index(drop=True)
-
-    table_summary = []
-    for idx, row in race_df.iterrows():
-        horse_name = row.get('馬名', f"馬番{int(row.get('馬番', 0))}")
-        jockey_name = row.get('騎手', "不明")
+        st.subheader(f"🚀 {race_display_name} のAI予想")
         
-        horse_info = (
-            f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{horse_name} | 騎手:{jockey_name} | "
-            f"score:{row['score']:3d} | AI勝率予想:{row['win_prob']*100:.1f}% | "
-            f"斤量:{row.get('斤量', 0)}kg | 人気:{row.get('人気', '---')} | 単勝:{row.get('単勝', '---')}倍"
-        )
-        table_summary.append(horse_info)
+        if st.button("🧠 勝ちぱかくんに最終予想させる！", type="primary", use_container_width=True):
+            if not GEMINI_API_KEY:
+                st.error("【設定エラー】GEMINI_API_KEY が見つかりません。")
+                st.stop()
+                
+            scored_df = calculate_race_scores(target_id, df_future)
+            table_summary = []
+            for _, row in scored_df.iterrows():
+                table_summary.append(
+                    f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | 騎手:{row.get('騎手', '不明')} | "
+                    f"score:{row['score']:3d} | AI勝率予想:{row['win_prob']*100:.1f}% | 斤量:{row.get('斤量', 0)}kg"
+                )
+            prompt_data = "\n".join(table_summary)
 
-    prompt_data = "\n".join(table_summary)
-
-    # ==================================================
-    # 変更箇所：解説抜きのストイックな出力＆全券種網羅
-    # ==================================================
-    system_instruction = f"""
-あなたは競馬分析AI「勝ちぱかくん」です。
-提供されたデータ（score）を絶対の基準とし、シンプルかつ機械的に印と買い目のみを出力してください。
+            system_instruction = f"""
+あなたは競馬分析AI「勝ちぱかくん」です。提供されたデータ（score）を絶対の基準とし、シンプルかつ機械的に印と買い目のみを出力してください。
 
 【厳守事項・最優先ルール】
-1. Web検索を使用し、最新の出走取り消しや馬場状態などを確認してください。（分析対象: {race_display_name}）
-2. **印（◎、◯、▲、△、☆）の打刻ルール**:
-   必ず提供された「score」の最高値の馬に【◎】、2位に【◯】、3位に【▲】、4位に【△】、5位に【☆】と、**スコア上位順に厳格に印を打ってください**。AIスコアを無視することは絶対厳禁です。
-3. **長文の解説、レース見解、選んだ理由などの文章は【一切不要】です。** 結果のみをテンポよく出力してください。
+1. Web検索を使用し、{race_display_name}の最新情報を確認してください。
+2. **印の打刻ルール**: 提供された「score」の最高値に【◎】、2位に【◯】、3位に【▲】、4位に【△】、5位に【☆】と厳格に打ってください。
+3. **長文の解説は【一切不要】です。** 結果のみを出力してください。
 
-【出力フォーマット】（必ず以下の1〜3の構成のみで出力すること）
-
+【出力フォーマット】
 ### 1. 【全頭 データ一覧】
-（※途中で文章を挟まず、提供された全頭分を以下のMarkdown形式で出力）
-| 馬番 | 馬名 | 騎手 | score | AI勝率予想 | 人気 | 単勝オッズ |
-|---|---|---|---|---|---|---|
-| 01 | 〇〇 | 〇〇 | 115 | 22.5% | 2 | 4.5倍 |
-
+| 馬番 | 馬名 | 騎手 | score | AI勝率予想 |
 ### 2. 【勝ちぱかくんの印】
-◎：〇番（馬名）
-◯：〇番（馬名）
-▲：〇番（馬名）
-△：〇番（馬名）
-☆：〇番（馬名）
-
+◎：〇番（馬名）など
 ### 3. 【推奨買い目】
-（※上記の印に基づいた具体的な馬番の買い目のみを記載。説明不要）
-*   **単勝**: ◎
-*   **複勝**: ◎、◯
-*   **馬連** (流し): ◎ - ◯, ▲, △, ☆
-*   **馬単** (1着固定流し): ◎ → ◯, ▲, △, ☆
-*   **ワイド** (流し): ◎ - ◯, ▲, △, ☆
-*   **三連複** (1頭軸流し): ◎ - ◯, ▲, △, ☆
-*   **三連単** (フォーメーション): 1着 ◎ → 2着 ◯, ▲ → 3着 ◯, ▲, △, ☆
+* 単勝: ◎
+* 複勝: ◎、◯
+* 馬連: ◎ - ◯, ▲, △, ☆
+* 馬単: ◎ → ◯, ▲, △, ☆
+* ワイド: ◎ - ◯, ▲, △, ☆
+* 三連複: ◎ - ◯, ▲, △, ☆
+* 三連単: 1着 ◎ → 2着 ◯, ▲ → 3着 ◯, ▲, △, ☆
 """
+            prompt = f"以下のレース（ID: {target_id}、{race_display_name}）の出走馬データです。\n{prompt_data}"
 
-    prompt = f"""
-以下のレース（ID: {race_id_target}、{race_display_name}）の出走馬データをベースに、最新情報をWeb検索してプロ予想記事を作成してください。
---- 出走馬ベースデータ ---
-{prompt_data}
----
-"""
-
-    with st.spinner("🦙 勝ちぱかが過去走の全データを一括解析し、Web検索で最新情報を調査中..."):
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        
-        models_to_try = ['gemini-2.5-flash', 'gemini-2.5-flash', 'gemini-2.5-pro']
-        response = None
-        
-        for i, model_name in enumerate(models_to_try):
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        tools=[{"google_search": {}}],
-                        temperature=0.7
+            with st.spinner("🦙 過去データ解析と最新情報のWeb検索を実行中..."):
+                client = genai.Client(api_key=GEMINI_API_KEY)
+                try:
+                    response = client.models.generate_content(
+                        model='gemini-2.5-flash',
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            system_instruction=system_instruction,
+                            tools=[{"google_search": {}}],
+                            temperature=0.7
+                        )
                     )
-                )
-                if response:
-                    break
-            except Exception as e:
-                if "503" in str(e) or "UNAVAILABLE" in str(e):
-                    if i < len(models_to_try) - 1:
-                        st.warning(f"⚠️ サーバー混雑中...（{i+1}/{len(models_to_try)}回目）")
-                        time.sleep(3)
-                        continue
-                    else:
-                        st.error("【APIエラー】サーバーが大変混雑しています。数分時間をおいてから再度お試しください。")
-                        return
-                else:
+                    st.markdown(response.text)
+                except Exception as e:
                     st.error(f"【APIエラー】: {e}")
-                    return
 
-        if response and response.text:
-            st.markdown("---")
-            st.subheader(f"📰 {race_display_name} 勝ちぱかくんの予想")
-            st.markdown(response.text)
-        else:
-            st.error("【エラー】Google APIからの応答を取得できませんでした。")
 
-# --------------------------------------------------
-# メイン画面描画
-# --------------------------------------------------
-st.info(f"選択中: **{selected_label}** (ID: `{target_race_id}`)")
-
-if btn_predict:
-    generate_prediction(target_race_id, selected_label)
+# ==================================================
+# タブ2：AI成績ダッシュボード
+# ==================================================
+with tab_dashboard:
+    st.subheader("📊 勝ちぱかくん 過去成績（単勝・本命◎）")
+    
+    if df_payout.empty:
+        st.info("🔄 現在、過去の払戻金データを収集中です。裏側で動いているターミナルの処理が終わるまでお待ちください。")
+    elif backtest_results is None:
+        st.warning("⚠️ 成績の計算に必要なデータが不足しています。")
+    else:
+        st.markdown(f"**集計対象レース数**: {backtest_results['total_races']:,} レース（データ収集中...）")
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("🎯 単勝 的中率", f"{backtest_results['hit_rate']:.1f}%")
+        
+        # 回収率が100%超えなら赤字（ポジティブ）、下回れば青字などの装飾
+        ret_rate = backtest_results['recovery_rate']
+        delta_color = "normal" if ret_rate >= 100 else "inverse"
+        col2.metric("💰 単勝 回収率", f"{ret_rate:.1f}%", f"{ret_rate - 100:.1f}%", delta_color=delta_color)
+        
+        col3.metric("💴 累計収支 (1R100円)", f"{backtest_results['returns'] - backtest_results['invested']:,} 円")
+        
+        st.markdown("---")
+        st.markdown("""
+        *※現在は「単勝（◎の1点買い）」の基本成績を表示しています。*
+        *払戻金データの収集が完了次第、馬連や三連複などの買い目ごとの詳細な回収率分析も追加可能です！*
+        """)
