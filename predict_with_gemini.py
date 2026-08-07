@@ -110,7 +110,10 @@ def detect_grade(race_name, soup):
         if re.search(r'G1|Ｇ１|ＧＩ|\(G1\)', race_name, re.IGNORECASE): grade_prefix = "👑 G1 "
         elif re.search(r'G2|Ｇ２|ＧⅡ|\(G2\)', race_name, re.IGNORECASE): grade_prefix = "👑 G2 "
         elif re.search(r'G3|Ｇ３|ＧⅢ|\(G3\)', race_name, re.IGNORECASE): grade_prefix = "👑 G3 "
-    return f"{grade_prefix}{re.sub(r'\(?G[123１２３ＩⅡⅢ]\)?', '', race_name).strip()}".strip()
+        
+    # ⚠️ 修正箇所：f文字列の中で \ を使わないように外に出しました
+    clean_name = re.sub(r'\(?G[123１２３ＩⅡⅢ]\)?', '', race_name).strip()
+    return f"{grade_prefix}{clean_name}".strip()
 
 def run_scraper(p_text, p_bar):
     target_dates = get_target_dates()
