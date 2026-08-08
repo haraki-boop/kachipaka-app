@@ -106,7 +106,7 @@ df_future = load_future_data()
 df_history = load_history_data()
 
 # ==========================================
-# 2. スクレイパー (出馬表の自動上書き)
+# 2. スクレイパー関数 (BOTから呼び出し可能)
 # ==========================================
 def get_target_dates():
     today = datetime.now()
@@ -139,14 +139,11 @@ def run_scraper(p_text, p_bar):
         time.sleep(1)
 
     if not all_race_ids:
-        st.sidebar.error(f"❌ レースIDが1件も見つかりませんでした。")
         return False
 
     race_data_list = []
     weekdays = ["月", "火", "水", "木", "金", "土", "日"]
     total = len(all_race_ids)
-    
-    st.sidebar.info(f"✅ 対象レースを {total}件 発見しました！取得を開始します。")
 
     for i, race_id in enumerate(all_race_ids):
         p_text.text(f"📥 出馬表を取得中... ({i+1}/{total} レース)")
@@ -202,11 +199,10 @@ def run_scraper(p_text, p_bar):
                                 "単勝": odds_val, "人気": pop_val,
                                 "surface": surface, "distance": distance, "condition": condition
                             })
-            time.sleep(random.uniform(0.5, 1.0))
+            time.sleep(random.uniform(0.3, 0.7))
         except: pass
 
     if race_data_list:
-        # 余計なGit処理を外し、確実にローカルにCSVを保存する元の仕様に戻しました
         pd.DataFrame(race_data_list).to_csv(FUTURE_CSV, index=False, encoding='utf-8-sig')
         return True
     return False
@@ -219,24 +215,6 @@ if st.sidebar.button("🔄 最新の情報にリロード", use_container_width=
     st.cache_data.clear()
     st.cache_resource.clear()
     st.rerun()
-
-st.sidebar.markdown("---")
-st.sidebar.header("📥 今週の出馬表取得")
-if st.sidebar.button("🌐 出馬表を自動取得する", use_container_width=True):
-    with st.spinner("出馬表データを取得しています..."):
-        p_text = st.sidebar.empty()
-        p_bar = st.sidebar.progress(0)
-        try:
-            success = run_scraper(p_text, p_bar)
-            if success:
-                st.cache_data.clear()
-                st.sidebar.success(f"✅ 出馬表を取得・保存しました！")
-                time.sleep(1.5)
-                st.rerun()
-            else:
-                st.sidebar.error("❌ データが取得できませんでした。")
-        except Exception as e:
-            st.sidebar.error(f"❌ エラーが発生しました: {e}")
 
 st.sidebar.markdown("---")
 st.sidebar.header("🏁 実戦結果の検証")
@@ -307,7 +285,7 @@ if st.sidebar.button("💥 ゴミ予想履歴を完全消去", type="primary", u
 
 
 # ==========================================
-# 3. 🔥 新AIモデルへのデータ結合 ＋ 予想出力 🔥
+# 3. AIスコア計算 ＋ 予想出力
 # ==========================================
 def calculate_race_scores(race_id_target, target_df):
     if target_df.empty or model_data is None: return None
@@ -383,7 +361,6 @@ def calculate_race_scores(race_id_target, target_df):
 
     return race_df.sort_values(by='score', ascending=False).reset_index(drop=True)
 
-# 💡 ボタンを一目で【穴】か【堅】かわかるように修正
 def get_all_markers():
     markers = {}
     if df_future.empty: return markers
@@ -392,13 +369,9 @@ def get_all_markers():
         if sdf is not None and len(sdf) >= 5:
             sc = sdf['score'].tolist()
             
-            # 堅い vs 穴の判定ロジック
-            if sc[0] >= 105 and (sc[0] - sc[2]) >= 10:
-                race_type = "【堅】"
-            elif (sc[0] - sc[4]) <= 7:
-                race_type = "【穴】"
-            else:
-                race_type = "【普】"
+            if sc[0] >= 105 and (sc[0] - sc[2]) >= 10: race_type = "【堅】"
+            elif (sc[0] - sc[4]) <= 7: race_type = "【穴】"
+            else: race_type = "【普】"
 
             if sc[0] >= 108 and (sc[0] - sc[1]) >= 4: mark = "★"
             elif (sc[0] - sc[4]) <= 5: mark = "◎"
@@ -412,7 +385,7 @@ tab_forecast, tab_dashboard = st.tabs(["🏇 レース予想", "📈 実戦成�
 
 with tab_forecast:
     if df_future.empty:
-        st.warning("⚠️ 出馬表データが存在しません。左のメニューから「出馬表を自動取得する」を押してください。")
+        st.warning("⚠️ 出馬表データが存在しません。BOT（auto_pipeline_bot.py）を実行してデータを読み込ませてください。")
     else:
         date_options = sorted(df_future['day_label'].unique())
         selected_date = st.radio("開催日", date_options, horizontal=True, label_visibility="collapsed")
@@ -486,7 +459,6 @@ with tab_forecast:
                     f"AIスコア:{row['score']:3d}"
                 )
 
-            # 💡 【重要】最強の二刀流ロジック（穴と堅実のバランス）に完全復元
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」です。以下の絶対ルールに従い、レースの性質を読み切り最適な馬券戦略を遂行してください。
 
@@ -528,7 +500,6 @@ with tab_forecast:
             with st.spinner("AIがレース波乱度を分析し、Geminiが最適戦略を構築中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 try:
-                    # 💡 APIエラー修正（gemini-1.5-pro-latestに変更）
                     response = client.models.generate_content(
                         model='gemini-1.5-pro-latest',
                         contents=prompt,
