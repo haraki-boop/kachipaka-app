@@ -304,6 +304,16 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
         time.sleep(1.5)
         st.rerun()
 
+st.sidebar.markdown("---")
+st.sidebar.header("🗑️ 履歴のクリア")
+if st.sidebar.button("🗑️ 過去の予想履歴を全消去", use_container_width=True):
+    empty_df = pd.DataFrame(columns=['date', 'race_id', 'race_name', 'honmei_umaban', 'partners', 'honmei_name', 'result_pay'])
+    empty_df.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig')
+    st.cache_data.clear()
+    st.sidebar.success("✅ 予想履歴をすべて削除しました！")
+    time.sleep(1)
+    st.rerun()
+
 # ==========================================
 # 3. 🧠 本格予想ロジック
 # ==========================================
