@@ -26,7 +26,12 @@ with col_text:
 if 'selected_race_id' not in st.session_state:
     st.session_state['selected_race_id'] = None
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    try:
+        GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    except:
+        GEMINI_API_KEY = None
 HISTORY_CSV = "prediction_history.csv"
 FUTURE_CSV = "future_races.csv"
 ENHANCED_DB_CSV = "enhanced_keiba_data.csv"
@@ -428,9 +433,14 @@ with tab_forecast:
                 df_history = pd.concat([df_history, new_record], ignore_index=True)
                 df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig')
             
-            # 買い目の表示
+            # 買い目の表示（エラー回避のためリスト内包表記を展開して安全に処理）
+            partner_details = []
+            for _, row in partners_df.iterrows():
+                partner_details.append(f"{row['馬番']}番({row['馬名']})")
+            partner_display_str = ", ".join(partner_details)
+
             st.info(f"**【推奨 軸馬 (1頭)】**\n* ◎ {honmei_umaban}番 {honmei_name}")
-            st.warning(f"**【相手 (5頭)】**\n* {', '.join([f'{row['馬番']}番({row['馬名']})' for _, row in partners_df.iterrows()])}")
+            st.warning(f"**【相手 (5頭)】**\n* {partner_display_str}")
             st.success("**📝 買い目フォーマット (計21点 = 2,100円推奨):**\n"
                        f"単勝: **{honmei_umaban}** (1点)\n"
                        f"馬連・ワイド: **{honmei_umaban}** － **{', '.join(map(str, partner_nums))}** (各5点)\n"
