@@ -110,7 +110,7 @@ df_future = load_future_data()
 df_history = load_history_data()
 
 # ==========================================
-# 2. 出馬表自動取得機能（オッズ・人気取得対応）
+# 2. 出馬表自動取得機能
 # ==========================================
 def get_target_dates():
     today = datetime.now()
@@ -184,20 +184,15 @@ def run_scraper(p_text, p_bar):
                         ub = clean_text(cols[1].text)
                         if nm and ub.isdigit():
                             sa = clean_text(cols[4].text)
-                            
-                            # 単勝オッズと人気の取得（存在しない場合はデフォルト値）
-                            odds_val = np.nan
-                            pop_val = np.nan
-                            
+                            odds_val, pop_val = np.nan, np.nan
                             odds_elem = row.find(class_=re.compile(r'Popular_Txt|Odds'))
                             if odds_elem:
                                 try: odds_val = float(clean_text(odds_elem.text))
-                                except: pass
-                                
+                                except Exception: pass
                             pop_elem = row.find(class_=re.compile(r'Popular_Num'))
                             if pop_elem:
                                 try: pop_val = float(clean_text(pop_elem.text))
-                                except: pass
+                                except Exception: pass
 
                             race_data_list.append({
                                 "race_id": str(race_id), "date": display_date, "race_name": r_name,
@@ -320,17 +315,13 @@ def calculate_race_scores(race_id_target, target_df):
     if race_df.empty:
         return None
 
-    # モデルが学習した10個の特徴量を定義
     features = ['枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 'horse_weight', 'weight_change', '単勝', '人気']
-    
     if isinstance(model_data, dict):
         model = model_data.get('model')
-        if 'features' in model_data:
-            features = model_data['features']
+        if 'features' in model_data: features = model_data['features']
     else:
         model = model_data
 
-    # 過去データから持ちタイム・上がり3F・馬体重を集計して結合
     if not df_past.empty and '馬名' in df_past.columns:
         agg_dict = {}
         if 'time_seconds' in df_past.columns: agg_dict['time_seconds'] = 'mean'
@@ -342,18 +333,14 @@ def calculate_race_scores(race_id_target, target_df):
             horse_stats = df_past.groupby('馬名').agg(agg_dict).reset_index()
             race_df = pd.merge(race_df, horse_stats, on='馬名', how='left')
 
-    # 不足列の補填（オッズ・人気・馬体重など）
     for f in features:
-        if f not in race_df.columns:
-            race_df[f] = np.nan
+        if f not in race_df.columns: race_df[f] = np.nan
 
     if 'sex_code' in race_df.columns and race_df['sex_code'].dtype == object:
         race_df['sex_code'] = race_df['sex_code'].map({'牡': 0, '牝': 1, 'セ': 2}).fillna(0)
 
-    # デフォルト値の安全な割り当て
     X = race_df[features].copy()
     X = X.apply(pd.to_numeric, errors='coerce')
-    
     if '単勝' in X.columns: X['単勝'] = X['単勝'].fillna(10.0)
     if '人気' in X.columns: X['人気'] = X['人気'].fillna(5.0)
     X = X.fillna(0)
@@ -364,7 +351,6 @@ def calculate_race_scores(race_id_target, target_df):
         else:
             prob = model.predict(X)
     except Exception as e:
-        st.error(f"🚨 【AIモデル予測内でエラーが発生しました】: {e}")
         return None
 
     s = prob.sum()
@@ -443,6 +429,22 @@ with tab_forecast:
                 st.error("出走頭数が少ない、またはデータが不足しているため予想をスキップします。")
                 st.stop()
 
+            # -----------------------------------
+            # 📊 追加：AI全頭スコア＆勝率の画面表示
+            # -----------------------------------
+            st.markdown("### 📊 AI分析スコア＆勝率一覧")
+            display_df = scored_df.copy()
+            display_df['AI勝率'] = (display_df['win_prob'] * 100).round(1).astype(str) + "%"
+            display_df['過去上がり3F'] = display_df['last_3f'].apply(lambda x: f"{x:.1f}秒" if pd.notna(x) else "データなし")
+            
+            show_cols = ['馬番', '馬名', '騎手', 'score', 'AI勝率', '過去上がり3F']
+            show_cols = [c for c in show_cols if c in display_df.columns]
+            
+            st.dataframe(
+                display_df[show_cols].style.background_gradient(subset=['score'], cmap='Reds'),
+                use_container_width=True
+            )
+
             honmei_row = scored_df.iloc[0]
             partners_df = scored_df.iloc[1:6]
             
@@ -474,6 +476,7 @@ with tab_forecast:
                        f"馬連・ワイド: **{honmei_umaban}** － **{', '.join(map(str, partner_nums))}** (各5点)\n"
                        f"三連複: **{honmei_umaban}** － **{', '.join(map(str, partner_nums))}** (1頭軸流し 10点)")
 
+            # Geminiへのプロンプト設定
             table_summary = []
             for _, row in scored_df.iterrows():
                 last_3f_val = f"{row['last_3f']:.1f}" if pd.notna(row.get('last_3f')) else "データなし"
@@ -494,6 +497,11 @@ with tab_forecast:
 ### 1. 【全頭 データ一覧】
 | 馬番 | 馬名 | 騎手 | score | AI勝率予想 | 平均上がり3F |
 ### 2. 【勝ちぱかくんの印】
+◎：〇番（馬名）
+◯：〇番（馬名）
+▲：〇番（馬名）
+△：〇番（馬名）
+☆：〇番（馬名）
 """
             prompt = f"以下のレース（ID: {target_id}、{race_display_name}）の出走馬データです。\n{prompt_data}"
 
@@ -509,7 +517,21 @@ with tab_forecast:
                             temperature=0.7
                         )
                     )
-                    st.markdown(response.text)
+                    
+                    # -----------------------------------
+                    # 🛠️ 修正：Geminiレスポンスの完全抽出
+                    # -----------------------------------
+                    res_text = response.text if response.text else ""
+                    if not res_text and response.candidates:
+                        for part in response.candidates[0].content.parts:
+                            if part.text:
+                                res_text += part.text
+                                
+                    if res_text:
+                        st.markdown(res_text)
+                    else:
+                        st.warning("⚠️ Geminiからの回答テキストを取得できませんでした。")
+                        
                     st.success("📝 このレースの予想を実戦履歴に記録しました！")
                 except Exception as e:
                     st.error(f"【APIエラー】: {e}")
