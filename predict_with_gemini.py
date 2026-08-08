@@ -166,7 +166,6 @@ def run_scraper(p_text, p_bar):
                 else:
                     r_name = ""
 
-                # 🔥 コース適性データのスクレイピング 🔥
                 race_data01 = soup.find(class_="RaceData01")
                 surface, distance, condition = "不明", np.nan, "不明"
                 if race_data01:
@@ -379,7 +378,6 @@ def calculate_race_scores(race_id_target, target_df):
     if 'sex_code' in race_df.columns and race_df['sex_code'].dtype == object:
         race_df['sex_code'] = race_df['sex_code'].map({'牡': 0, '牝': 1, 'セ': 2}).fillna(0)
         
-    # 🔥 コース適性のエンコーダー適用 🔥
     if isinstance(model_data, dict):
         if 'le_surf' in model_data and 'surface' in race_df.columns:
             le_surf = model_data['le_surf']
@@ -388,24 +386,31 @@ def calculate_race_scores(race_id_target, target_df):
             le_cond = model_data['le_cond']
             race_df['condition_code'] = race_df['condition'].map(lambda c: le_cond.transform([c])[0] if c in le_cond.classes_ else le_cond.transform(['不明'])[0])
 
-    # 🔥 騎手成績の動的算出 🔥
-    if not df_past.empty and '騎手' in df_past.columns and '着順' in df_past.columns:
+    race_df['jockey_win_rate'] = 0.0
+    race_df['jockey_track_win_rate'] = 0.0
+
+    if not df_past.empty and '騎手' in df_past.columns and '着順' in df_past.columns and '騎手' in race_df.columns:
         df_past['is_win'] = (pd.to_numeric(df_past['着順'], errors='coerce') == 1).astype(int)
-        j_stats = df_past.groupby('騎手')['is_win'].mean().reset_index()
-        j_stats.rename(columns={'is_win': 'jockey_win_rate'}, inplace=True)
-        race_df = pd.merge(race_df, j_stats, on='騎手', how='left')
         
+        j_stats = df_past.groupby('騎手')['is_win'].mean().reset_index()
+        j_stats.rename(columns={'is_win': 'calc_j_win'}, inplace=True)
+        race_df = pd.merge(race_df, j_stats, on='騎手', how='left')
+        if 'calc_j_win' in race_df.columns:
+            race_df['jockey_win_rate'] = race_df['calc_j_win'].fillna(0.0)
+            
         if 'place_name' not in df_past.columns and 'place' in df_past.columns:
             df_past['place_name'] = df_past['place']
+            
         if 'place_name' in df_past.columns and 'place_name' in race_df.columns:
             j_p_stats = df_past.groupby(['騎手', 'place_name'])['is_win'].mean().reset_index()
-            j_p_stats.rename(columns={'is_win': 'jockey_track_win_rate'}, inplace=True)
+            j_p_stats.rename(columns={'is_win': 'calc_jp_win'}, inplace=True)
             race_df = pd.merge(race_df, j_p_stats, on=['騎手', 'place_name'], how='left')
+            if 'calc_jp_win' in race_df.columns:
+                race_df['jockey_track_win_rate'] = race_df['calc_jp_win'].fillna(0.0)
+            else:
+                race_df['jockey_track_win_rate'] = race_df['jockey_win_rate']
         else:
             race_df['jockey_track_win_rate'] = race_df['jockey_win_rate']
-    else:
-        race_df['jockey_win_rate'] = 0.0
-        race_df['jockey_track_win_rate'] = 0.0
 
     X = race_df[features].copy()
     X = X.apply(pd.to_numeric, errors='coerce')
@@ -528,38 +533,48 @@ with tab_forecast:
                 pop = row.get('人気', '-')
                 if pd.isna(pop): pop = '-'
                 
+                # 🔥 データがない騎手（勝率0.0）をGeminiに検知させるためのフラグを付与 🔥
+                j_win = row.get('jockey_win_rate', 0.0)
+                jockey_name = row.get('騎手', '不明')
+                if j_win == 0.0:
+                    j_info = f"過去データなし(要検索)"
+                else:
+                    j_info = f"勝率{j_win*100:.1f}%"
+                
                 win_prob = row['win_prob']
                 ev = (win_prob * odds) if odds > 0 else 0.0
                 
                 table_summary.append(
                     f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | "
+                    f"騎手:{jockey_name}({j_info}) | "
                     f"単勝オッズ:{odds}倍 ({pop}人気) | "
                     f"純粋勝率:{win_prob*100:.1f}% | 🎯単勝期待値:{ev:.2f} | "
-                    f"AIスコア:{row['score']:3d} | 過去上がり3F:{last_3f_val}秒"
+                    f"AIスコア:{row['score']:3d}"
                 )
             prompt_data = "\n".join(table_summary)
 
+            # 🔥 検索グラウンディングを前提としたシステム指示にアップデート 🔥
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」です。以下の絶対ルールに従い、冷酷にバリュー投資（期待値買い）を遂行してください。
 
 【絶対遵守事項】
 1. 前置き、挨拶、言い訳は一切禁止。即座に出力フォーマットに従うこと。
 2. データ内の【🎯単勝期待値（純粋勝率 × 実際のオッズ）】を最重要視してください。
-3. 期待値が1.0未満の「過剰人気馬（オッズが安すぎる馬）」は評価を大きく下げてください。
-4. 期待値が1.0を大きく超える「オッズの盲点になっている美味しい穴馬」を本命（◎）や穴（☆）に抜擢してください。
-5. **トリガミ（的中してもマイナス収支になる買い目）は完全に排除**してください。
+3. 期待値が1.0未満の過剰人気馬は評価を大きく下げ、期待値が1.0を超える美味しい穴馬を本命（◎）や穴（☆）に抜擢してください。
+4. **【超重要】提供されたデータ内で騎手の成績が「過去データなし(要検索)」となっている場合（新人や短期免許の外国人騎手など）は、必ずあなたが持つWeb検索機能を利用して、その騎手の最新の成績・評判・特徴を調べ、見解に反映させてください。**
+5. トリガミ（的中してもマイナス収支になる買い目）は完全に排除してください。
 
 出力フォーマット：
 ---
 ### 📊 1. 出走馬 期待値＆データ一覧
-（全出走馬の【馬番 / 馬名 / オッズ / 純粋勝率 / 期待値 / AIスコア】をきれいなMarkdownテーブルで出力）
+（全出走馬の【馬番 / 馬名 / 騎手 / オッズ / 純粋勝率 / 期待値 / AIスコア】をきれいなMarkdownテーブルで出力）
 
 ### 🌪️ 2. レース展開＆バリュー分析
 * **馬場・展開:** （想定ペース）
-* **バリュー評価:** （どの馬が過剰人気で、どの馬が美味しいか）
+* **バリュー評価と騎手情報:** （過剰人気馬の指摘、美味しい穴馬の指摘。検索で補完した騎手情報があればここに記載）
 
 ### 🎯 3. 勝ちぱかくんの印と詳細見解
-* **◎（本命）:** 〇番（馬名） - （期待値面での抜擢理由）
+* **◎（本命）:** 〇番（馬名） - （期待値面での抜擢理由。騎手の手腕も加味すること）
 * **◯（対抗）:** 〇番（馬名） - （評価理由）
 * **▲（単穴）:** 〇番（馬名） - （逆転要素）
 * **△（連下）:** 〇番（馬名）、〇番（馬名） - （ヒモ候補）
@@ -576,15 +591,17 @@ with tab_forecast:
 """
             prompt = f"対象レース: {race_display_name}\n\n出走馬データ:\n{prompt_data}"
 
-            with st.spinner("第1.5のAIが計算した期待値をもとに、Geminiが買い目を構築中..."):
+            with st.spinner("第1.5のAIが計算した期待値をもとに、GeminiがWeb検索も活用して買い目を構築中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 try:
+                    # 🔥 Google Search Grounding（Web検索能力）を有効化 🔥
                     response = client.models.generate_content(
                         model='gemini-2.5-flash',
                         contents=prompt,
                         config=types.GenerateContentConfig(
                             system_instruction=system_instruction,
-                            temperature=0.7
+                            temperature=0.7,
+                            tools=[{"googleSearch": {}}]
                         )
                     )
                     
