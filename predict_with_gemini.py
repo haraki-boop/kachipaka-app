@@ -12,14 +12,14 @@ from datetime import datetime, timedelta
 from google import genai
 from google.genai import types
 
-st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="image_61b676.png", layout="wide")
+st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="🐴", layout="wide")
 
 col_img, col_text = st.columns([1, 10])
 with col_img:
     try:
         st.image("image_61b676.png", width=70)
     except:
-        pass
+        st.write("🐴")
 with col_text:
     st.title("AI予想 勝ちぱかくん")
 
@@ -31,6 +31,9 @@ HISTORY_CSV = "prediction_history.csv"
 FUTURE_CSV = "future_races.csv"
 ENHANCED_DB_CSV = "enhanced_keiba_data.csv"
 
+# ==========================================
+# 1. データとAIモデルの読み込み
+# ==========================================
 @st.cache_resource
 def load_model():
     if os.path.exists("keiba_ai_model.pkl"):
@@ -39,7 +42,6 @@ def load_model():
 
 @st.cache_data
 def load_past_data():
-    # 🎯 優先的に完全体データベース（enhanced_keiba_data.csv）を読み込む
     target_csv = ENHANCED_DB_CSV if os.path.exists(ENHANCED_DB_CSV) else "cleaned_keiba_data.csv"
     if os.path.exists(target_csv):
         try:
@@ -56,7 +58,6 @@ def load_past_data():
                 except: return np.nan
             df['time_seconds'] = df['タイム'].apply(ts)
             
-        # 上がり3Fの数値化
         if '上り' in df.columns:
             df['last_3f'] = pd.to_numeric(df['上り'], errors='coerce')
         elif 'last_3f' not in df.columns:
@@ -88,18 +89,23 @@ def load_future_data():
 def load_history_data():
     if os.path.exists(HISTORY_CSV):
         try:
-            return pd.read_csv(HISTORY_CSV, dtype={'race_id': str, 'honmei_umaban': str}, encoding='utf-8-sig')
+            df = pd.read_csv(HISTORY_CSV, dtype={'race_id': str, 'honmei_umaban': str, 'partners': str}, encoding='utf-8-sig')
         except:
-            return pd.read_csv(HISTORY_CSV, dtype={'race_id': str, 'honmei_umaban': str}, encoding='cp932')
-    return pd.DataFrame(columns=['date', 'race_id', 'race_name', 'honmei_umaban', 'honmei_name', 'result_pay'])
+            df = pd.read_csv(HISTORY_CSV, dtype={'race_id': str, 'honmei_umaban': str, 'partners': str}, encoding='cp932')
+        
+        # 古い履歴ファイルへの互換性対応
+        if 'partners' not in df.columns:
+            df['partners'] = ""
+        return df
+    return pd.DataFrame(columns=['date', 'race_id', 'race_name', 'honmei_umaban', 'partners', 'honmei_name', 'result_pay'])
 
-model = load_model()
+model_data = load_model()
 df_past = load_past_data()
 df_future = load_future_data()
 df_history = load_history_data()
 
 # ==========================================
-# 🚀 出馬表自動取得機能
+# 2. 出馬表自動取得機能
 # ==========================================
 def get_target_dates():
     today = datetime.now()
@@ -200,7 +206,6 @@ if st.sidebar.button("🔄 最新の情報にリロード", use_container_width=
 
 st.sidebar.markdown("---")
 st.sidebar.header("📥 今週の出馬表取得")
-st.sidebar.caption("※ボタンを押すと全自動で今週のデータを取ってきます。")
 if st.sidebar.button("🌐 出馬表を自動取得する", use_container_width=True):
     with st.spinner("出馬表データを取得しています（約1分）..."):
         p_text = st.sidebar.empty()
@@ -214,9 +219,9 @@ if st.sidebar.button("🌐 出馬表を自動取得する", use_container_width=
             st.sidebar.error("❌ データの取得に失敗しました。")
 
 st.sidebar.markdown("---")
-st.sidebar.header("🏁 実戦結果の更新")
-if st.sidebar.button("🏆 終了したレースの結果を取得", use_container_width=True):
-    with st.spinner("🏁 レース結果を照合中..."):
+st.sidebar.header("🏁 実戦結果の検証（全券種対応）")
+if st.sidebar.button("🏆 終了したレースの配当を取得", use_container_width=True):
+    with st.spinner("🏁 実際の着順と全券種（単・連・ワイ・3複）の配当を計算中..."):
         if not df_history.empty:
             updated = False
             headers = {"User-Agent": "Mozilla/5.0"}
@@ -226,32 +231,83 @@ if st.sidebar.button("🏆 終了したレースの結果を取得", use_contain
                         res = requests.get(f"https://db.netkeiba.com/race/{str(row['race_id'])}/", headers=headers, timeout=5)
                         res.encoding = 'utf-8'
                         soup = BeautifulSoup(res.text, "html.parser")
+                        
+                        axis = str(int(row['honmei_umaban']))
+                        partners = [str(int(p.strip())) for p in str(row.get('partners', '')).split(',') if p.strip().isdigit()]
+                        
+                        # ① 着順の取得
+                        rt = soup.find("table", class_="race_table_01")
+                        r1, r2, r3 = None, None, None
+                        if rt:
+                            rows = rt.find_all("tr")[1:]
+                            ranks = [r.find_all("td")[2].text.strip() for r in rows if r.find_all("td")[0].text.strip().isdigit()]
+                            if len(ranks) >= 3:
+                                r1, r2, r3 = ranks[0], ranks[1], ranks[2]
+
+                        if not r1: continue
+                        top3 = {r1, r2, r3}
+                        top2 = {r1, r2}
+                        
+                        # 的中判定（単勝、馬連、ワイド、3連複）
+                        hit_tansho = (axis == r1)
+                        hit_umaren = (axis in top2) and any(p in top2 for p in partners)
+                        hit_sanrenpuku = (axis in top3) and (len([p for p in partners if p in top3]) >= 2)
+                        
+                        total_payout = 0
+                        # ② 配当の取得と合算
                         for table in soup.find_all("table", summary="払い戻し"):
                             for tr in table.find_all("tr"):
                                 th = tr.find("th")
-                                if th and th.text.strip() == "単勝":
-                                    tds = tr.find_all("td")
-                                    winners = [w.strip() for w in list(tds[0].stripped_strings)]
-                                    amounts = [a.replace(',', '').strip() for a in list(tds[1].stripped_strings)]
-                                    pn = str(int(row['honmei_umaban']))
-                                    df_history.at[idx, 'result_pay'] = int(amounts[winners.index(pn)]) if pn in winners else 0
-                                    updated = True
+                                if not th: continue
+                                kind = th.text.strip()
+                                tds = tr.find_all("td")
+                                if len(tds) < 2: continue
+                                
+                                win_texts = tds[0].get_text(separator=" ").split()
+                                amt_texts = tds[1].get_text(separator=" ").replace(',', '').replace('円', '').split()
+                                
+                                if kind == "単勝" and hit_tansho:
+                                    for w, a in zip(win_texts, amt_texts):
+                                        if w == axis: total_payout += int(a)
+                                elif kind == "馬連" and hit_umaren:
+                                    for w, a in zip(win_texts, amt_texts):
+                                        w_set = set(w.split('-'))
+                                        if axis in w_set and any(p in w_set for p in partners): total_payout += int(a)
+                                elif kind == "ワイド":
+                                    for w, a in zip(win_texts, amt_texts):
+                                        w_set = set(w.split('-'))
+                                        if axis in w_set and any(p in w_set for p in partners):
+                                            if w_set.issubset(top3): total_payout += int(a)
+                                elif kind == "三連複" and hit_sanrenpuku:
+                                    for w, a in zip(win_texts, amt_texts):
+                                        w_set = set(w.split('-'))
+                                        if axis in w_set and len(w_set.intersection(set(partners))) >= 2: total_payout += int(a)
+
+                        df_history.at[idx, 'result_pay'] = total_payout
+                        updated = True
                     except: pass
                     time.sleep(1)
             if updated: df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig', errors='replace')
         st.cache_data.clear()
-        st.success("✅ 成績を最新化しました！")
-        time.sleep(1)
+        st.success("✅ 実戦結果（全券種）を最新化しました！")
+        time.sleep(1.5)
         st.rerun()
 
 # ==========================================
-# 🧠 本格予想ロジック（ガチDBとの連携）
+# 3. 🧠 本格予想ロジック（完全体AIモデル使用）
 # ==========================================
 def calculate_race_scores(race_id_target, target_df):
     race_df = target_df[target_df['race_id'] == str(race_id_target)].copy()
-    if race_df.empty or df_past.empty or model is None: return None
+    if race_df.empty or df_past.empty or model_data is None: return None
     
-    # 🎯 データベースから「持ちタイム」「平均上がり3F」「馬体重」を集計して結合
+    # 辞書型（新モデル）か直接モデル（旧モデル）かの判定
+    if isinstance(model_data, dict):
+        model = model_data['model']
+        features = model_data['features']
+    else:
+        return None # 新しい完全体モデル(keiba_ai_model.pkl)が必要です
+
+    # 🎯 データベースから「持ちタイム」「平均上がり3F」「馬体重」を集計
     if not df_past.empty and '馬名' in df_past.columns:
         agg_dict = {'time_seconds': 'mean'}
         if 'last_3f' in df_past.columns: agg_dict['last_3f'] = 'mean'
@@ -261,23 +317,19 @@ def calculate_race_scores(race_id_target, target_df):
         horse_stats = df_past.groupby('馬名').agg(agg_dict).reset_index()
         race_df = pd.merge(race_df, horse_stats, on='馬名', how='left')
     
-    features = ['枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 'horse_weight', 'weight_change']
+    # 未知のデータ（未来レース）を安全に補完
     for f in features:
-        if f not in race_df.columns: race_df[f] = np.nan
-        
-    overall_time_mean = df_past['time_seconds'].dropna().mean() if 'time_seconds' in df_past.columns else 90.0
-    overall_weight_mean = df_past['horse_weight'].dropna().mean() if 'horse_weight' in df_past.columns else 470.0
+        if f not in race_df.columns:
+            race_df[f] = np.nan
+            
+    if 'sex_code' in race_df.columns and race_df['sex_code'].dtype == object:
+        race_df['sex_code'] = race_df['sex_code'].map({'牡': 0, '牝': 1, 'セ': 2}).fillna(0)
     
     X = race_df[features].copy()
-    X['time_seconds'] = X['time_seconds'].fillna(overall_time_mean)
-    X['horse_weight'] = X['horse_weight'].fillna(overall_weight_mean)
-    X['weight_change'] = X['weight_change'].fillna(0)
-    
-    X['単勝'] = 10.0
-    X['人気'] = 5.0
-    
     X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
-    prob = model.predict_proba(X)[:, 1]
+    
+    # 新しいLightGBMモデルで勝率スコアを予測
+    prob = model.predict(X)
     
     s = prob.sum()
     race_df['win_prob'] = prob / s if s > 0 else 1.0 / len(race_df)
@@ -351,9 +403,17 @@ with tab_forecast:
                 st.stop()
                 
             scored_df = calculate_race_scores(target_id, df_future)
+            if scored_df is None or len(scored_df) < 6:
+                st.error("出走頭数が少ない、またはデータが不足しているため予想をスキップします。")
+                st.stop()
+
             honmei_row = scored_df.iloc[0]
+            partners_df = scored_df.iloc[1:6]
+            
             honmei_umaban = int(honmei_row['馬番'])
             honmei_name = honmei_row['馬名']
+            partner_nums = partners_df['馬番'].astype(int).tolist()
+            partners_str = ",".join(map(str, partner_nums))
             
             if df_history.empty or target_id not in df_history['race_id'].values:
                 new_record = pd.DataFrame([{
@@ -361,27 +421,35 @@ with tab_forecast:
                     'race_id': target_id,
                     'race_name': race_display_name,
                     'honmei_umaban': honmei_umaban,
+                    'partners': partners_str,
                     'honmei_name': honmei_name,
                     'result_pay': ""
                 }])
                 df_history = pd.concat([df_history, new_record], ignore_index=True)
                 df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig')
             
-            # Geminiへ渡すプロンプトに上がり3Fデータも載せる
+            # 買い目の表示
+            st.info(f"**【推奨 軸馬 (1頭)】**\n* ◎ {honmei_umaban}番 {honmei_name}")
+            st.warning(f"**【相手 (5頭)】**\n* {', '.join([f'{row['馬番']}番({row['馬名']})' for _, row in partners_df.iterrows()])}")
+            st.success("**📝 買い目フォーマット (計21点 = 2,100円推奨):**\n"
+                       f"単勝: **{honmei_umaban}** (1点)\n"
+                       f"馬連・ワイド: **{honmei_umaban}** － **{', '.join(map(str, partner_nums))}** (各5点)\n"
+                       f"三連複: **{honmei_umaban}** － **{', '.join(map(str, partner_nums))}** (1頭軸流し 10点)")
+
+            # Geminiへ渡すプロンプト
             table_summary = []
             for _, row in scored_df.iterrows():
                 last_3f_val = f"{row['last_3f']:.1f}" if pd.notna(row.get('last_3f')) else "データなし"
                 table_summary.append(
                     f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | 騎手:{row.get('騎手', '不明')} | "
-                    f"score:{row['score']:3d} | AI勝率予想:{row['win_prob']*100:.1f}% | 過去平均上がり3F:{last_3f_val}秒"
+                    f"score:{row['score']:3d} | AI勝率予想:{row['win_prob']*100:.1f}% | 過去上がり3F:{last_3f_val}秒"
                 )
             prompt_data = "\n".join(table_summary)
 
-            # 🚨 全買い目を網羅させた出力指示書
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」です。提供されたデータ（scoreおよび過去の上がり3F実績）を最優先基準とし、シンプルに印と買い目のみを出力してください。
 1. Web検索を使用し、{race_display_name}の直前情報（馬場状態、オッズ傾向など）を最終確認してください。
-2. 印ルール: scoreおよびデータ総合値最高に【◎】、2位に【◯】、3位に【▲】、4位に【△】、5位に【☆】
+2. 印ルール: score最高に【◎】、2位に【◯】、3位に【▲】、4位に【△】、5位に【☆】
 3. 長文解説は一切不要。結果と推奨買い目のみを出力。
 
 ### 1. 【全頭 データ一覧】
@@ -392,14 +460,6 @@ with tab_forecast:
 ▲：〇番（馬名）
 △：〇番（馬名）
 ☆：〇番（馬名）
-
-### 3. 【推奨買い目（全券種）】
-* 単勝: ◎
-* 複勝: ◎、◯
-* 馬連: ◎ - ◯, ▲, △, ☆
-* ワイド: ◎ - ◯, ▲, △, ☆
-* 3連複: ◎ - ◯, ▲, △, ☆ (1頭軸流し)
-* 3連単: ◎ ➔ ◯, ▲ ➔ ◯, ▲, △, ☆ (1着固定フォーメーション)
 """
             prompt = f"以下のレース（ID: {target_id}、{race_display_name}）の出走馬データです。\n{prompt_data}"
 
@@ -416,12 +476,12 @@ with tab_forecast:
                         )
                     )
                     st.markdown(response.text)
-                    st.success("📝 このレースの予想（本命馬）を実戦履歴に記録しました！")
+                    st.success("📝 このレースの予想（1頭軸5頭流し）を実戦履歴に記録しました！")
                 except Exception as e:
                     st.error(f"【APIエラー】: {e}")
 
 with tab_dashboard:
-    st.subheader("📈 実戦成績（単勝ベース）")
+    st.subheader("📈 実戦成績（単・連・ワイ・3複 総合ベース）")
     if df_history.empty:
         st.info("まだ予想履歴がありません。")
     else:
@@ -433,16 +493,17 @@ with tab_dashboard:
         if total_races > 0:
             hits = len(finished_races[finished_races['result_pay'].astype(float) > 0])
             returns = finished_races['result_pay'].astype(float).sum()
-            invested = total_races * 100
+            # 投資額: 1レースあたり 単勝1点+馬連5点+ワイド5点+三連複10点 = 計21点(2100円)
+            invested = total_races * 2100 
             hit_rate = (hits / total_races) * 100
             recovery_rate = (returns / invested) * 100
             profit = returns - invested
             
             col1, col2, col3 = st.columns(3)
-            col1.metric("🎯 実戦 的中率", f"{hit_rate:.1f}%", f"{hits} / {total_races} 的中")
+            col1.metric("🎯 レース的中率 (いずれか的中)", f"{hit_rate:.1f}%", f"{hits} / {total_races} 的中")
             delta_color = "normal" if recovery_rate >= 100 else "inverse"
-            col2.metric("💰 実戦 回収率", f"{recovery_rate:.1f}%", f"{recovery_rate - 100:.1f}%", delta_color=delta_color)
-            col3.metric("💴 累計収支 (1R100円)", f"{int(profit):,} 円")
+            col2.metric("💰 総合回収率", f"{recovery_rate:.1f}%", f"{recovery_rate - 100:.1f}%", delta_color=delta_color)
+            col3.metric("💴 累計収支 (1点100円計算)", f"{int(profit):,} 円")
             
         st.markdown("---")
-        st.dataframe(df_history[['date', 'race_name', 'honmei_umaban', 'honmei_name', 'result_pay']].sort_values(by='date', ascending=False), use_container_width=True)
+        st.dataframe(df_history[['date', 'race_name', 'honmei_umaban', 'partners', 'honmei_name', 'result_pay']].sort_values(by='date', ascending=False), use_container_width=True)
