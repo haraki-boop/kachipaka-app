@@ -340,11 +340,19 @@ def calculate_race_scores(race_id_target, target_df):
     if 'sex_code' in race_df.columns and race_df['sex_code'].dtype == object:
         race_df['sex_code'] = race_df['sex_code'].map({'牡': 0, '牝': 1, 'セ': 2}).fillna(0)
 
+    # =============== 🚨 修正箇所 🚨 ===============
+    # 欠損値（NaN）を0ではなく、平均値で埋めることでAIのバグ暴走を防止
     X = race_df[features].copy()
     X = X.apply(pd.to_numeric, errors='coerce')
     if '単勝' in X.columns: X['単勝'] = X['単勝'].fillna(10.0)
     if '人気' in X.columns: X['人気'] = X['人気'].fillna(5.0)
+    
+    # 欠損値を列ごとの平均値で補完
+    X = X.fillna(X.mean())
+    # 平均も取れない場合（全データ空など）の安全対策
+    if 'time_seconds' in X.columns: X['time_seconds'] = X['time_seconds'].fillna(100.0)
     X = X.fillna(0)
+    # ==============================================
 
     try:
         if hasattr(model, "predict_proba"):
