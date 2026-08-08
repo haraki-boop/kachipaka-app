@@ -166,6 +166,23 @@ def run_scraper(p_text, p_bar):
                 else:
                     r_name = ""
 
+                # 🔥 コース適性データのスクレイピング 🔥
+                race_data01 = soup.find(class_="RaceData01")
+                surface, distance, condition = "不明", np.nan, "不明"
+                if race_data01:
+                    rd_text = race_data01.text
+                    if "芝" in rd_text: surface = "芝"
+                    elif "ダ" in rd_text: surface = "ダート"
+                    elif "障" in rd_text: surface = "障害"
+
+                    dist_match = re.search(r'(\d+)m', rd_text)
+                    if dist_match: distance = float(dist_match.group(1))
+
+                    if "良" in rd_text: condition = "良"
+                    elif "稍" in rd_text: condition = "稍重"
+                    elif "重" in rd_text: condition = "重"
+                    elif "不良" in rd_text: condition = "不良"
+
                 for row in soup.select("tr.HorseList"):
                     cols = row.find_all("td")
                     if len(cols) >= 7:
@@ -189,7 +206,8 @@ def run_scraper(p_text, p_bar):
                                 "sex_code": sa[0] if sa else "", "age": sa[1:] if len(sa)>1 else "",
                                 "斤量": clean_text(cols[5].text),
                                 "騎手": clean_text(cols[6].find("a").text) if cols[6].find("a") else clean_text(cols[6].text),
-                                "単勝": odds_val, "人気": pop_val
+                                "単勝": odds_val, "人気": pop_val,
+                                "surface": surface, "distance": distance, "condition": condition
                             })
             time.sleep(random.uniform(0.5, 1.0))
         except Exception: pass
@@ -292,25 +310,17 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
         time.sleep(1.5)
         st.rerun()
 
-# ==========================================
-# 🔥 新規追加: AIの自動進化ボタン 🔥
-# ==========================================
 st.sidebar.markdown("---")
 st.sidebar.header("🧠 AIの進化（再学習）")
 if st.sidebar.button("🚀 最新データ取得＆AI再学習", type="primary", use_container_width=True):
     with st.spinner("過去データの取得とAIの再学習を実行しています...（数分かかります）"):
         try:
-            # 1. 過去データのスクレイピングスクリプトが存在する場合に実行
             if os.path.exists("scrape_real_database.py"):
                 st.sidebar.info("📥 過去レースのデータを収集しています...")
                 subprocess.run(["python", "scrape_real_database.py"], check=True)
-            
-            # 2. AIモデルの再学習スクリプトを実行
             if os.path.exists("train_lightgbm.py"):
                 st.sidebar.info("🧠 新しいデータでAIの脳みそを再構築しています...")
                 subprocess.run(["python", "train_lightgbm.py"], check=True)
-            
-            # 3. 古いキャッシュを完全に消去して再読み込み
             st.cache_resource.clear()
             st.cache_data.clear()
             st.sidebar.success("✅ AIのアップデートが完了しました！新しい脳みそで予想を開始します。")
@@ -345,7 +355,7 @@ def calculate_race_scores(race_id_target, target_df):
     if race_df.empty:
         return None
 
-    features = ['枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 'horse_weight', 'weight_change']
+    features = ['枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 'horse_weight', 'weight_change', 'distance', 'surface_code', 'condition_code', 'jockey_win_rate', 'jockey_track_win_rate']
     if isinstance(model_data, dict):
         model = model_data.get('model')
         if 'features' in model_data: features = model_data['features']
@@ -368,6 +378,34 @@ def calculate_race_scores(race_id_target, target_df):
 
     if 'sex_code' in race_df.columns and race_df['sex_code'].dtype == object:
         race_df['sex_code'] = race_df['sex_code'].map({'牡': 0, '牝': 1, 'セ': 2}).fillna(0)
+        
+    # 🔥 コース適性のエンコーダー適用 🔥
+    if isinstance(model_data, dict):
+        if 'le_surf' in model_data and 'surface' in race_df.columns:
+            le_surf = model_data['le_surf']
+            race_df['surface_code'] = race_df['surface'].map(lambda s: le_surf.transform([s])[0] if s in le_surf.classes_ else le_surf.transform(['不明'])[0])
+        if 'le_cond' in model_data and 'condition' in race_df.columns:
+            le_cond = model_data['le_cond']
+            race_df['condition_code'] = race_df['condition'].map(lambda c: le_cond.transform([c])[0] if c in le_cond.classes_ else le_cond.transform(['不明'])[0])
+
+    # 🔥 騎手成績の動的算出 🔥
+    if not df_past.empty and '騎手' in df_past.columns and '着順' in df_past.columns:
+        df_past['is_win'] = (pd.to_numeric(df_past['着順'], errors='coerce') == 1).astype(int)
+        j_stats = df_past.groupby('騎手')['is_win'].mean().reset_index()
+        j_stats.rename(columns={'is_win': 'jockey_win_rate'}, inplace=True)
+        race_df = pd.merge(race_df, j_stats, on='騎手', how='left')
+        
+        if 'place_name' not in df_past.columns and 'place' in df_past.columns:
+            df_past['place_name'] = df_past['place']
+        if 'place_name' in df_past.columns and 'place_name' in race_df.columns:
+            j_p_stats = df_past.groupby(['騎手', 'place_name'])['is_win'].mean().reset_index()
+            j_p_stats.rename(columns={'is_win': 'jockey_track_win_rate'}, inplace=True)
+            race_df = pd.merge(race_df, j_p_stats, on=['騎手', 'place_name'], how='left')
+        else:
+            race_df['jockey_track_win_rate'] = race_df['jockey_win_rate']
+    else:
+        race_df['jockey_win_rate'] = 0.0
+        race_df['jockey_track_win_rate'] = 0.0
 
     X = race_df[features].copy()
     X = X.apply(pd.to_numeric, errors='coerce')
