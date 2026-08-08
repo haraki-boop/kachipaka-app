@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 import joblib
 import streamlit as st
+import subprocess
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from google import genai
@@ -291,6 +292,35 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
         time.sleep(1.5)
         st.rerun()
 
+# ==========================================
+# 🔥 新規追加: AIの自動進化ボタン 🔥
+# ==========================================
+st.sidebar.markdown("---")
+st.sidebar.header("🧠 AIの進化（再学習）")
+if st.sidebar.button("🚀 最新データ取得＆AI再学習", type="primary", use_container_width=True):
+    with st.spinner("過去データの取得とAIの再学習を実行しています...（数分かかります）"):
+        try:
+            # 1. 過去データのスクレイピングスクリプトが存在する場合に実行
+            if os.path.exists("scrape_real_database.py"):
+                st.sidebar.info("📥 過去レースのデータを収集しています...")
+                subprocess.run(["python", "scrape_real_database.py"], check=True)
+            
+            # 2. AIモデルの再学習スクリプトを実行
+            if os.path.exists("train_lightgbm.py"):
+                st.sidebar.info("🧠 新しいデータでAIの脳みそを再構築しています...")
+                subprocess.run(["python", "train_lightgbm.py"], check=True)
+            
+            # 3. 古いキャッシュを完全に消去して再読み込み
+            st.cache_resource.clear()
+            st.cache_data.clear()
+            st.sidebar.success("✅ AIのアップデートが完了しました！新しい脳みそで予想を開始します。")
+            time.sleep(3)
+            st.rerun()
+        except subprocess.CalledProcessError as e:
+            st.sidebar.error(f"❌ 処理中にエラーが発生しました。\nターミナルのログを確認してください。")
+        except Exception as e:
+            st.sidebar.error(f"❌ 予期せぬエラー: {e}")
+
 st.sidebar.markdown("---")
 st.sidebar.header("🗑️ 履歴の完全リセット")
 if st.sidebar.button("💥 ゴミ予想履歴を完全消去", type="primary", use_container_width=True):
@@ -455,15 +485,11 @@ with tab_forecast:
             for _, row in scored_df.iterrows():
                 last_3f_val = f"{row['last_3f']:.1f}" if pd.notna(row.get('last_3f')) else "データなし"
                 
-                # ==========================================
-                # 🔥 第1.5のAI処理：ここで期待値（EV）を計算！ 🔥
-                # ==========================================
                 odds = row.get('単勝', 0)
                 if pd.isna(odds): odds = 0.0
                 pop = row.get('人気', '-')
                 if pd.isna(pop): pop = '-'
                 
-                # 勝率(%)を小数に戻してオッズを掛ける
                 win_prob = row['win_prob']
                 ev = (win_prob * odds) if odds > 0 else 0.0
                 
@@ -475,9 +501,6 @@ with tab_forecast:
                 )
             prompt_data = "\n".join(table_summary)
 
-            # ==========================================
-            # 🔥 第2のAI（Gemini）への指示を「期待値・バリュー投資特化」に改造 🔥
-            # ==========================================
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」です。以下の絶対ルールに従い、冷酷にバリュー投資（期待値買い）を遂行してください。
 
