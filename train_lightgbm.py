@@ -4,7 +4,6 @@ import lightgbm as lgb
 import joblib
 import re
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
 import os
 
 DB_CSV = "enhanced_keiba_data.csv"
@@ -17,14 +16,14 @@ def main():
     except Exception:
         df = pd.read_csv(DB_CSV, low_memory=False, encoding='cp932', dtype=str)
         
-    print("🛠️ データの前処理（AI用の頭脳づくり）を開始します...")
+    print("🛠️ データの前処理（オッズ・人気を完全排除した純粋能力評価）を開始します...")
     
     # 1. 目的変数（1着を予測）
     df['着順'] = pd.to_numeric(df['着順'], errors='coerce')
     df = df.dropna(subset=['着順'])
     df['is_win'] = (df['着順'] == 1).astype(int)
     
-    # 2. タイムと上がり3F
+    # 2. タイム
     def time_to_sec(t):
         if pd.isna(t): return np.nan
         parts = str(t).strip().split(':')
@@ -36,11 +35,6 @@ def main():
         df['time_seconds'] = df['タイム'].apply(time_to_sec)
     else:
         df['time_seconds'] = np.nan
-        
-    if '上り' in df.columns:
-        df['last_3f'] = pd.to_numeric(df['上り'], errors='coerce')
-    else:
-        df['last_3f'] = np.nan
         
     # 3. 馬体重・増減
     if '馬体重' in df.columns:
@@ -58,51 +52,34 @@ def main():
         df['sex_code'] = 0
         df['age'] = np.nan
         
-    # 5. 脚質（通過順位から「逃げ・差し」などを数値化）
-    def calc_position(p):
-        if pd.isna(p): return np.nan
-        nums = re.findall(r'\d+', str(p))
-        if not nums: return np.nan
-        return np.mean([int(n) for n in nums]) # 数値が小さいほど「逃げ・先行」
-        
-    if '通過' in df.columns:
-        df['avg_position'] = df['通過'].apply(calc_position)
-    else:
-        df['avg_position'] = np.nan
-
-    # 6. コース環境（芝ダート、距離、馬場状態）
-    df['distance'] = pd.to_numeric(df['distance'], errors='coerce')
-    
-    # LabelEncoderの保存用（後でアプリ側で使えるようにします）
-    le_surf = LabelEncoder()
-    df['surface_code'] = le_surf.fit_transform(df['surface'].fillna('不明').astype(str))
-    
-    le_cond = LabelEncoder()
-    df['condition_code'] = le_cond.fit_transform(df['condition'].fillna('不明').astype(str))
-    
-    # 7. その他の基本データ数値化
+    # 5. その他の基本データ数値化
     for col in ['枠番', '馬番', '斤量']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    # 🎯 AIに与える最終的な「特徴量（考える材料）」リスト
+    # 🎯 オッズ・人気を一切含めない、純粋な物理特徴量のみ（本番アプリと完全一致）
     features = [
-        '枠番', '馬番', '斤量', 'sex_code', 'age', 
-        'horse_weight', 'weight_change',
-        'time_seconds', 'last_3f', 'avg_position', 
-        'distance', 'surface_code', 'condition_code'
+        '枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 
+        'horse_weight', 'weight_change'
     ]
     
-    # 特徴量と正解データのセット
     X = df[features].copy()
+    X = X.apply(pd.to_numeric, errors='coerce')
+    
+    # 欠損値を平均値で補完（本番アプリと同じ安全処理）
+    X = X.fillna(X.mean())
+    if 'time_seconds' in X.columns:
+        X['time_seconds'] = X['time_seconds'].fillna(100.0)
+    X = X.fillna(0)
+    
     y = df['is_win'].copy()
     
     print(f"📊 学習データ件数: {len(X)} 件")
     
-    # 学習用とテスト用（答え合わせ用）にデータを分割
+    # 学習用とテスト用に分割
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
-    print("🧠 LightGBMモデルをトレーニング中... (プロ馬券師の思考を注入中)")
+    print("🧠 LightGBMモデルをトレーニング中... (オッズを無視した真の実力評価)")
     
     params = {
         'objective': 'binary',
@@ -124,11 +101,9 @@ def main():
         callbacks=[lgb.early_stopping(stopping_rounds=50)]
     )
     
-    # 学習済みモデルと、エンコーダー（文字を数字に変換する辞書）を一緒に保存
+    # 学習済みモデルと特徴量リストを保存
     joblib.dump({
         'model': model,
-        'le_surf': le_surf,
-        'le_cond': le_cond,
         'features': features
     }, MODEL_FILE)
     

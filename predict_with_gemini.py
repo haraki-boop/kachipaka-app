@@ -236,7 +236,6 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                         payout_found = False
                         total_payout = 0
                         
-                        # 直近レース(race.netkeiba)と過去DB(db.netkeiba)の両方をチェックして速報にも対応
                         for url in [f"https://race.netkeiba.com/race/result.html?race_id={str(row['race_id'])}", f"https://db.netkeiba.com/race/{str(row['race_id'])}/"]:
                             res = requests.get(url, headers=headers, timeout=5)
                             res.encoding = 'EUC-JP' if 'db.netkeiba' in url else 'utf-8'
@@ -253,7 +252,6 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                                 
                                 payout_found = True
                                 
-                                # HTMLのリスト構造を改行に変換してパースを完全安定化
                                 for br in tds[0].find_all('br'): br.replace_with('\n')
                                 for ul in tds[0].find_all('ul'): ul.insert_after('\n')
                                 for div in tds[0].find_all('div'): div.insert_after('\n')
@@ -268,7 +266,6 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                                 for w_str, a_str in zip(win_lines, amt_lines):
                                     if not a_str.isdigit(): continue
                                     amt = int(a_str)
-                                    # ハイフンや矢印で数字を分割（10-05や10→05）
                                     w_nums = [str(int(n)) for n in re.split(r'[-→=]', w_str) if n.isdigit()]
                                     
                                     if kind == "単勝" and len(w_nums) == 1:
@@ -285,7 +282,7 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                             if payout_found:
                                 df_history.at[idx, 'result_pay'] = total_payout
                                 updated = True
-                                break # 1つのURLで結果が取れたらループを抜ける
+                                break
                     except Exception: pass
                     time.sleep(1)
             if updated: df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig', errors='replace')
@@ -318,7 +315,7 @@ def calculate_race_scores(race_id_target, target_df):
     if race_df.empty:
         return None
 
-    features = ['枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 'horse_weight', 'weight_change', '単勝', '人気']
+    features = ['枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 'horse_weight', 'weight_change']
     if isinstance(model_data, dict):
         model = model_data.get('model')
         if 'features' in model_data: features = model_data['features']
@@ -342,11 +339,8 @@ def calculate_race_scores(race_id_target, target_df):
     if 'sex_code' in race_df.columns and race_df['sex_code'].dtype == object:
         race_df['sex_code'] = race_df['sex_code'].map({'牡': 0, '牝': 1, 'セ': 2}).fillna(0)
 
-    # 欠損値を平均値で埋めることでAIのバグ暴走を防止
     X = race_df[features].copy()
     X = X.apply(pd.to_numeric, errors='coerce')
-    if '単勝' in X.columns: X['単勝'] = X['単勝'].fillna(10.0)
-    if '人気' in X.columns: X['人気'] = X['人気'].fillna(5.0)
     
     X = X.fillna(X.mean())
     if 'time_seconds' in X.columns: X['time_seconds'] = X['time_seconds'].fillna(100.0)
@@ -460,48 +454,68 @@ with tab_forecast:
             table_summary = []
             for _, row in scored_df.iterrows():
                 last_3f_val = f"{row['last_3f']:.1f}" if pd.notna(row.get('last_3f')) else "データなし"
+                
+                # ==========================================
+                # 🔥 第1.5のAI処理：ここで期待値（EV）を計算！ 🔥
+                # ==========================================
+                odds = row.get('単勝', 0)
+                if pd.isna(odds): odds = 0.0
+                pop = row.get('人気', '-')
+                if pd.isna(pop): pop = '-'
+                
+                # 勝率(%)を小数に戻してオッズを掛ける
+                win_prob = row['win_prob']
+                ev = (win_prob * odds) if odds > 0 else 0.0
+                
                 table_summary.append(
-                    f"枠:{row.get('枠番','')} | 馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | 騎手:{row.get('騎手', '不明')} | "
-                    f"斤量:{row.get('斤量','')} | AI_score:{row['score']:3d} | 勝率予測:{row['win_prob']*100:.1f}% | 過去上がり3F:{last_3f_val}秒"
+                    f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | "
+                    f"単勝オッズ:{odds}倍 ({pop}人気) | "
+                    f"純粋勝率:{win_prob*100:.1f}% | 🎯単勝期待値:{ev:.2f} | "
+                    f"AIスコア:{row['score']:3d} | 過去上がり3F:{last_3f_val}秒"
                 )
             prompt_data = "\n".join(table_summary)
 
+            # ==========================================
+            # 🔥 第2のAI（Gemini）への指示を「期待値・バリュー投資特化」に改造 🔥
+            # ==========================================
             system_instruction = f"""
-あなたはプロの競馬分析AI「勝ちぱかくん」です。
+あなたはプロの競馬分析AI「勝ちぱかくん」です。以下の絶対ルールに従い、冷酷にバリュー投資（期待値買い）を遂行してください。
 
 【絶対遵守事項】
-1. 前置き、挨拶、謝罪、日付やレース名に関する言い訳、検索に関するコメントは一切禁止します。直ちに下記のフォーマット通り出力してください。
-2. 提供された【出走馬データ＆AI_score】を絶対的な分析根拠としてください。
-3. 印（◎◯▲△☆）と見解、推奨買い目（三連単を含む）を明確に記述してください。
+1. 前置き、挨拶、言い訳は一切禁止。即座に出力フォーマットに従うこと。
+2. データ内の【🎯単勝期待値（純粋勝率 × 実際のオッズ）】を最重要視してください。
+3. 期待値が1.0未満の「過剰人気馬（オッズが安すぎる馬）」は評価を大きく下げてください。
+4. 期待値が1.0を大きく超える「オッズの盲点になっている美味しい穴馬」を本命（◎）や穴（☆）に抜擢してください。
+5. **トリガミ（的中してもマイナス収支になる買い目）は完全に排除**してください。
 
 出力フォーマット：
 ---
-### 📊 1. 出走馬データ＆AI分析一覧
-（全出走馬の【枠 / 馬番 / 馬名 / 騎手 / AIスコア / 予想勝率】をきれいなMarkdownテーブルで出力）
+### 📊 1. 出走馬 期待値＆データ一覧
+（全出走馬の【馬番 / 馬名 / オッズ / 純粋勝率 / 期待値 / AIスコア】をきれいなMarkdownテーブルで出力）
 
-### 🌪️ 2. レース展開＆馬場分析
-* **馬場・トラックバイアス:** （コース特性と想定馬場状態）
-* **展開予想:** （想定ペースと有利な脚質）
+### 🌪️ 2. レース展開＆バリュー分析
+* **馬場・展開:** （想定ペース）
+* **バリュー評価:** （どの馬が過剰人気で、どの馬が美味しいか）
 
 ### 🎯 3. 勝ちぱかくんの印と詳細見解
-* **◎（本命）:** 〇番（馬名） - （AIスコア・データ面の根拠）
+* **◎（本命）:** 〇番（馬名） - （期待値面での抜擢理由）
 * **◯（対抗）:** 〇番（馬名） - （評価理由）
 * **▲（単穴）:** 〇番（馬名） - （逆転要素）
 * **△（連下）:** 〇番（馬名）、〇番（馬名） - （ヒモ候補）
 * **☆（穴馬）:** 〇番（馬名） - （高配当要素）
 
-### 💡 4. 戦略的・推奨買い目
+### 💡 4. 戦略的・推奨買い目（トリガミ完全排除）
 * **単勝:** ◎ (1点)
 * **馬連:** ◎ － ◯, ▲, △, ☆ (4〜5点)
 * **ワイド:** ◎ － ◯, ▲, ☆ (3点)
 * **三連複 (軸1頭流し):** ◎ － ◯, ▲, △, ☆ (10点)
 * **三連単 (1着固定流し / 軸1頭マルチ):** 1着:◎ → 2・3着:◯, ▲, △, ☆ (12〜60点)
-* **【勝ちぱかポイント】:** (資金配分や高配当狙いのポイント)
+* **【資金配分と狙い目】:** (トリガミを避けるための買い方アドバイス)
 ---
 """
             prompt = f"対象レース: {race_display_name}\n\n出走馬データ:\n{prompt_data}"
 
-            with st.spinner("出走馬データとAIスコアを多角分析中..."):
+            with st.spinner("第1.5のAIが計算した期待値をもとに、Geminiが買い目を構築中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 try:
                     response = client.models.generate_content(
