@@ -119,22 +119,24 @@ def get_target_dates():
 def clean_text(text):
     return re.sub(r'\s+', ' ', re.sub(r'[\r\n\t]+', ' ', text)).strip() if text else ""
 
+# 修正：より厳密にレース名とG1アイコンだけを判定する
 def detect_grade(r_name_elem):
     if not r_name_elem: return ""
-    raw_name = clean_text(r_name_elem.text)
-    grade_prefix = ""
+    
+    # 広告等を除外するため、spanタグ内の純粋なレース名のみを狙う
+    main_name_span = r_name_elem.find("span", class_="RaceName_main")
+    if main_name_span:
+        raw_name = clean_text(main_name_span.text)
+    else:
+        raw_name = clean_text(r_name_elem.text)
 
+    grade_prefix = ""
     grade_icon = r_name_elem.find(class_=re.compile(r'Icon_GradeType\d+'))
     if grade_icon:
         cls_str = " ".join(grade_icon.get('class', []))
         if 'GradeType1' in cls_str: grade_prefix = "👑 G1 "
         elif 'GradeType2' in cls_str: grade_prefix = "👑 G2 "
         elif 'GradeType3' in cls_str: grade_prefix = "👑 G3 "
-        
-    if not grade_prefix:
-        if re.search(r'\(?(G1|Ｇ１|ＧⅠ|Jpn1|JpnⅠ)\)?', raw_name, re.IGNORECASE): grade_prefix = "👑 G1 "
-        elif re.search(r'\(?(G2|Ｇ２|ＧⅡ|Jpn2|JpnⅡ)\)?', raw_name, re.IGNORECASE): grade_prefix = "👑 G2 "
-        elif re.search(r'\(?(G3|Ｇ３|ＧⅢ|Jpn3|JpnⅢ)\)?', raw_name, re.IGNORECASE): grade_prefix = "👑 G3 "
         
     clean_name = re.sub(r'\(?(G1|G2|G3|Ｇ１|Ｇ２|Ｇ３|ＧⅠ|ＧⅡ|ＧⅢ|Jpn1|Jpn2|Jpn3|JpnⅠ|JpnⅡ|JpnⅢ)\)?', '', raw_name, flags=re.IGNORECASE).strip()
     return f"{grade_prefix}{clean_name}".strip()
@@ -219,16 +221,16 @@ if st.sidebar.button("🌐 出馬表を自動取得する", use_container_width=
         p_bar = st.sidebar.progress(0)
         if run_scraper(p_text, p_bar):
             st.cache_data.clear()
-            st.sidebar.success("✅ 今週末の出馬表を取得しました！")
+            st.sidebar.success(f"✅ 出馬表を取得しました！（更新: {datetime.now().strftime('%H:%M:%S')}）")
             time.sleep(1.5)
             st.rerun()
         else:
             st.sidebar.error("❌ データの取得に失敗しました。")
 
 st.sidebar.markdown("---")
-st.sidebar.header("🏁 実戦結果の検証（全券種対応）")
+st.sidebar.header("🏁 実戦結果の検証")
 if st.sidebar.button("🏆 終了したレースの配当を取得", use_container_width=True):
-    with st.spinner("🏁 実際の着順と全券種（単・連・ワイ・3複）の配当を計算中..."):
+    with st.spinner("🏁 実際の着順と全券種の配当を計算中..."):
         if not df_history.empty:
             updated = False
             headers = {"User-Agent": "Mozilla/5.0"}
@@ -301,11 +303,17 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
 # 3. 🧠 本格予想ロジック
 # ==========================================
 def calculate_race_scores(race_id_target, target_df):
-    if target_df.empty or model_data is None:
+    if target_df.empty:
+        st.error("🚨 予測エラー: 出馬表データ (future_races.csv) が空です。")
+        return None
+
+    if model_data is None:
+        st.error("🚨 予測エラー: AIモデル (keiba_ai_model.pkl) が読み込めていません。")
         return None
 
     race_df = target_df[target_df['race_id'].astype(str) == str(race_id_target)].copy()
     if race_df.empty:
+        st.error(f"🚨 予測エラー: 選択したレースID ({race_id_target}) の出走馬データが見つかりません。")
         return None
 
     if isinstance(model_data, dict):
@@ -314,9 +322,6 @@ def calculate_race_scores(race_id_target, target_df):
     else:
         model = model_data
         features = ['枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 'horse_weight', 'weight_change']
-
-    if model is None:
-        return None
 
     if not df_past.empty and '馬名' in df_past.columns:
         agg_dict = {}
@@ -339,12 +344,16 @@ def calculate_race_scores(race_id_target, target_df):
     X = race_df[features].copy()
     X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
 
+    # 🚨 修正：ここでエラーを隠蔽せず、画面に詳細を表示させる
     try:
         if hasattr(model, "predict_proba"):
             prob = model.predict_proba(X)[:, 1]
         else:
             prob = model.predict(X)
-    except Exception:
+    except Exception as e:
+        st.error(f"🚨 【AIモデル予測内でエラーが発生しました】\n"
+                 f"エラー詳細: `{str(e)}`\n"
+                 f"要求されたデータ項目: `{features}`")
         return None
 
     s = prob.sum()
@@ -359,7 +368,9 @@ def get_all_markers():
     markers = {}
     if df_future.empty: return markers
     for rid in df_future['race_id'].unique():
-        sdf = calculate_race_scores(rid, df_future)
+        # 一覧画面ではエラーメッセージを出さないように抑制
+        with st.empty():
+            sdf = calculate_race_scores(rid, df_future)
         if sdf is not None and len(sdf) >= 6:
             sc = sdf['score'].tolist()
             if sc[0] >= 108 and (sc[0] - sc[1]) >= 4: markers[rid] = "★"
