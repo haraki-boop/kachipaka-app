@@ -43,18 +43,25 @@ ENHANCED_DB_CSV = "enhanced_keiba_data.csv"
 # ==========================================
 @st.cache_resource
 def load_model():
-    if os.path.exists("keiba_ai_model.pkl"):
-        return joblib.load("keiba_ai_model.pkl")
+    # 🔥 空のファイル（0バイト）でクラッシュしないようにサイズチェックを追加 🔥
+    if os.path.exists("keiba_ai_model.pkl") and os.path.getsize("keiba_ai_model.pkl") > 0:
+        try:
+            return joblib.load("keiba_ai_model.pkl")
+        except Exception:
+            return None
     return None
 
 @st.cache_data
 def load_past_data():
     target_csv = ENHANCED_DB_CSV if os.path.exists(ENHANCED_DB_CSV) else "cleaned_keiba_data.csv"
-    if os.path.exists(target_csv):
+    if os.path.exists(target_csv) and os.path.getsize(target_csv) > 0:
         try:
             df = pd.read_csv(target_csv, low_memory=False, dtype={'race_id': str}, encoding='utf-8-sig')
         except Exception:
-            df = pd.read_csv(target_csv, low_memory=False, dtype={'race_id': str}, encoding='cp932')
+            try:
+                df = pd.read_csv(target_csv, low_memory=False, dtype={'race_id': str}, encoding='cp932')
+            except Exception:
+                return pd.DataFrame()
             
         if 'time_seconds' not in df.columns and 'タイム' in df.columns:
             def ts(t):
@@ -74,12 +81,16 @@ def load_past_data():
     return pd.DataFrame()
 
 def load_future_data():
-    if os.path.exists(FUTURE_CSV):
+    # 🔥 空のファイル（0バイト）で絶対にクラッシュさせない最強の防波堤 🔥
+    if os.path.exists(FUTURE_CSV) and os.path.getsize(FUTURE_CSV) > 0:
         try:
             df = pd.read_csv(FUTURE_CSV, dtype={'race_id': str}, encoding='utf-8-sig')
         except Exception:
-            df = pd.read_csv(FUTURE_CSV, dtype={'race_id': str}, encoding='cp932')
-            
+            try:
+                df = pd.read_csv(FUTURE_CSV, dtype={'race_id': str}, encoding='cp932')
+            except Exception:
+                return pd.DataFrame() # 万が一文字化けしていても空データとして安全に返す
+                
         PLACE_MAP_REV = {
             "01": "札幌", "02": "函館", "03": "福島", "04": "新潟", "05": "東京",
             "06": "中山", "07": "中京", "08": "京都", "09": "阪神", "10": "小倉"
@@ -94,11 +105,14 @@ def load_future_data():
     return pd.DataFrame()
 
 def load_history_data():
-    if os.path.exists(HISTORY_CSV):
+    if os.path.exists(HISTORY_CSV) and os.path.getsize(HISTORY_CSV) > 0:
         try:
             df = pd.read_csv(HISTORY_CSV, dtype={'race_id': str, 'honmei_umaban': str, 'partners': str}, encoding='utf-8-sig')
         except Exception:
-            df = pd.read_csv(HISTORY_CSV, dtype={'race_id': str, 'honmei_umaban': str, 'partners': str}, encoding='cp932')
+            try:
+                df = pd.read_csv(HISTORY_CSV, dtype={'race_id': str, 'honmei_umaban': str, 'partners': str}, encoding='cp932')
+            except Exception:
+                return pd.DataFrame()
         
         if 'partners' not in df.columns:
             df['partners'] = ""
@@ -533,7 +547,6 @@ with tab_forecast:
                 pop = row.get('人気', '-')
                 if pd.isna(pop): pop = '-'
                 
-                # 🔥 データがない騎手（勝率0.0）をGeminiに検知させるためのフラグを付与 🔥
                 j_win = row.get('jockey_win_rate', 0.0)
                 jockey_name = row.get('騎手', '不明')
                 if j_win == 0.0:
@@ -553,7 +566,6 @@ with tab_forecast:
                 )
             prompt_data = "\n".join(table_summary)
 
-            # 🔥 検索グラウンディングを前提としたシステム指示にアップデート 🔥
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」です。以下の絶対ルールに従い、冷酷にバリュー投資（期待値買い）を遂行してください。
 
@@ -594,7 +606,6 @@ with tab_forecast:
             with st.spinner("第1.5のAIが計算した期待値をもとに、GeminiがWeb検索も活用して買い目を構築中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 try:
-                    # 🔥 Google Search Grounding（Web検索能力）を有効化 🔥
                     response = client.models.generate_content(
                         model='gemini-2.5-flash',
                         contents=prompt,
