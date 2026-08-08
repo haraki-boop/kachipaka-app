@@ -119,21 +119,7 @@ def get_target_dates():
 def clean_text(text):
     return re.sub(r'\s+', ' ', re.sub(r'[\r\n\t]+', ' ', text)).strip() if text else ""
 
-def detect_grade(r_name_elem):
-    if not r_name_elem: return ""
-    main_name_span = r_name_elem.find("span", class_="RaceName_main")
-    raw_name = clean_text(main_name_span.text) if main_name_span else clean_text(r_name_elem.text)
-
-    grade_prefix = ""
-    grade_icon = r_name_elem.find(class_=re.compile(r'Icon_GradeType\d+'))
-    if grade_icon:
-        cls_str = " ".join(grade_icon.get('class', []))
-        if 'GradeType1' in cls_str: grade_prefix = "👑 G1 "
-        elif 'GradeType2' in cls_str: grade_prefix = "👑 G2 "
-        elif 'GradeType3' in cls_str: grade_prefix = "👑 G3 "
-        
-    clean_name = re.sub(r'\(?(G1|G2|G3|Ｇ１|Ｇ２|Ｇ３|ＧⅠ|ＧⅡ|ＧⅢ|Jpn1|Jpn2|Jpn3|JpnⅠ|JpnⅡ|JpnⅢ)\)?', '', raw_name, flags=re.IGNORECASE).strip()
-    return f"{grade_prefix}{clean_name}".strip()
+# 🚨 G1/G2/G3の判定・付与ロジックを完全削除しました 🚨
 
 def run_scraper(p_text, p_bar):
     target_dates = get_target_dates()
@@ -174,8 +160,13 @@ def run_scraper(p_text, p_bar):
                 d_str = id_to_date.get(race_id, "")
                 display_date = f"{datetime.strptime(d_str, '%Y%m%d').month}月{datetime.strptime(d_str, '%Y%m%d').day}日({weekdays[datetime.strptime(d_str, '%Y%m%d').weekday()]})" if d_str else "不明"
                 
+                # 🚨 単純なレース名のみを取得するように変更 🚨
                 r_name_elem = soup.find(class_="RaceName") or soup.find(class_="RaceList_Item02")
-                r_name = detect_grade(r_name_elem)
+                if r_name_elem:
+                    main_name_span = r_name_elem.find("span", class_="RaceName_main")
+                    r_name = clean_text(main_name_span.text) if main_name_span else clean_text(r_name_elem.text)
+                else:
+                    r_name = ""
 
                 for row in soup.select("tr.HorseList"):
                     cols = row.find_all("td")
@@ -304,15 +295,19 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
         time.sleep(1.5)
         st.rerun()
 
+# 🚨 【完全強制消去】: ゴミファイル自体を物理的に抹消する
 st.sidebar.markdown("---")
-st.sidebar.header("🗑️ 履歴のクリア")
-if st.sidebar.button("🗑️ 過去の予想履歴を全消去", use_container_width=True):
-    empty_df = pd.DataFrame(columns=['date', 'race_id', 'race_name', 'honmei_umaban', 'partners', 'honmei_name', 'result_pay'])
-    empty_df.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig')
-    st.cache_data.clear()
-    st.sidebar.success("✅ 予想履歴をすべて削除しました！")
-    time.sleep(1)
-    st.rerun()
+st.sidebar.header("🗑️ 履歴の完全リセット")
+if st.sidebar.button("💥 ゴミ予想履歴を完全消去", type="primary", use_container_width=True):
+    try:
+        if os.path.exists(HISTORY_CSV):
+            os.remove(HISTORY_CSV) # ファイルそのものを破壊・消去
+        st.cache_data.clear()
+        st.sidebar.success("✅ 履歴データを物理的に完全消去しました！")
+        time.sleep(1.5)
+        st.rerun()
+    except Exception as e:
+        st.sidebar.error(f"消去エラー: {e}")
 
 # ==========================================
 # 3. 🧠 本格予想ロジック
