@@ -110,7 +110,7 @@ df_future = load_future_data()
 df_history = load_history_data()
 
 # ==========================================
-# 2. 出馬表自動取得機能
+# 2. 出馬表自動取得機能（オッズ・人気取得対応）
 # ==========================================
 def get_target_dates():
     today = datetime.now()
@@ -119,16 +119,10 @@ def get_target_dates():
 def clean_text(text):
     return re.sub(r'\s+', ' ', re.sub(r'[\r\n\t]+', ' ', text)).strip() if text else ""
 
-# 修正：より厳密にレース名とG1アイコンだけを判定する
 def detect_grade(r_name_elem):
     if not r_name_elem: return ""
-    
-    # 広告等を除外するため、spanタグ内の純粋なレース名のみを狙う
     main_name_span = r_name_elem.find("span", class_="RaceName_main")
-    if main_name_span:
-        raw_name = clean_text(main_name_span.text)
-    else:
-        raw_name = clean_text(r_name_elem.text)
+    raw_name = clean_text(main_name_span.text) if main_name_span else clean_text(r_name_elem.text)
 
     grade_prefix = ""
     grade_icon = r_name_elem.find(class_=re.compile(r'Icon_GradeType\d+'))
@@ -190,12 +184,28 @@ def run_scraper(p_text, p_bar):
                         ub = clean_text(cols[1].text)
                         if nm and ub.isdigit():
                             sa = clean_text(cols[4].text)
+                            
+                            # 単勝オッズと人気の取得（存在しない場合はデフォルト値）
+                            odds_val = np.nan
+                            pop_val = np.nan
+                            
+                            odds_elem = row.find(class_=re.compile(r'Popular_Txt|Odds'))
+                            if odds_elem:
+                                try: odds_val = float(clean_text(odds_elem.text))
+                                except: pass
+                                
+                            pop_elem = row.find(class_=re.compile(r'Popular_Num'))
+                            if pop_elem:
+                                try: pop_val = float(clean_text(pop_elem.text))
+                                except: pass
+
                             race_data_list.append({
                                 "race_id": str(race_id), "date": display_date, "race_name": r_name,
                                 "枠番": clean_text(cols[0].text), "馬番": ub, "馬名": nm,
                                 "sex_code": sa[0] if sa else "", "age": sa[1:] if len(sa)>1 else "",
                                 "斤量": clean_text(cols[5].text),
-                                "騎手": clean_text(cols[6].find("a").text) if cols[6].find("a") else clean_text(cols[6].text)
+                                "騎手": clean_text(cols[6].find("a").text) if cols[6].find("a") else clean_text(cols[6].text),
+                                "単勝": odds_val, "人気": pop_val
                             })
             time.sleep(random.uniform(0.5, 1.0))
         except Exception: pass
@@ -303,26 +313,24 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
 # 3. 🧠 本格予想ロジック
 # ==========================================
 def calculate_race_scores(race_id_target, target_df):
-    if target_df.empty:
-        st.error("🚨 予測エラー: 出馬表データ (future_races.csv) が空です。")
-        return None
-
-    if model_data is None:
-        st.error("🚨 予測エラー: AIモデル (keiba_ai_model.pkl) が読み込めていません。")
+    if target_df.empty or model_data is None:
         return None
 
     race_df = target_df[target_df['race_id'].astype(str) == str(race_id_target)].copy()
     if race_df.empty:
-        st.error(f"🚨 予測エラー: 選択したレースID ({race_id_target}) の出走馬データが見つかりません。")
         return None
 
+    # モデルが学習した10個の特徴量を定義
+    features = ['枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 'horse_weight', 'weight_change', '単勝', '人気']
+    
     if isinstance(model_data, dict):
         model = model_data.get('model')
-        features = model_data.get('features', ['枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 'horse_weight', 'weight_change'])
+        if 'features' in model_data:
+            features = model_data['features']
     else:
         model = model_data
-        features = ['枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 'horse_weight', 'weight_change']
 
+    # 過去データから持ちタイム・上がり3F・馬体重を集計して結合
     if not df_past.empty and '馬名' in df_past.columns:
         agg_dict = {}
         if 'time_seconds' in df_past.columns: agg_dict['time_seconds'] = 'mean'
@@ -334,6 +342,7 @@ def calculate_race_scores(race_id_target, target_df):
             horse_stats = df_past.groupby('馬名').agg(agg_dict).reset_index()
             race_df = pd.merge(race_df, horse_stats, on='馬名', how='left')
 
+    # 不足列の補填（オッズ・人気・馬体重など）
     for f in features:
         if f not in race_df.columns:
             race_df[f] = np.nan
@@ -341,19 +350,21 @@ def calculate_race_scores(race_id_target, target_df):
     if 'sex_code' in race_df.columns and race_df['sex_code'].dtype == object:
         race_df['sex_code'] = race_df['sex_code'].map({'牡': 0, '牝': 1, 'セ': 2}).fillna(0)
 
+    # デフォルト値の安全な割り当て
     X = race_df[features].copy()
-    X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
+    X = X.apply(pd.to_numeric, errors='coerce')
+    
+    if '単勝' in X.columns: X['単勝'] = X['単勝'].fillna(10.0)
+    if '人気' in X.columns: X['人気'] = X['人気'].fillna(5.0)
+    X = X.fillna(0)
 
-    # 🚨 修正：ここでエラーを隠蔽せず、画面に詳細を表示させる
     try:
         if hasattr(model, "predict_proba"):
             prob = model.predict_proba(X)[:, 1]
         else:
             prob = model.predict(X)
     except Exception as e:
-        st.error(f"🚨 【AIモデル予測内でエラーが発生しました】\n"
-                 f"エラー詳細: `{str(e)}`\n"
-                 f"要求されたデータ項目: `{features}`")
+        st.error(f"🚨 【AIモデル予測内でエラーが発生しました】: {e}")
         return None
 
     s = prob.sum()
@@ -368,9 +379,7 @@ def get_all_markers():
     markers = {}
     if df_future.empty: return markers
     for rid in df_future['race_id'].unique():
-        # 一覧画面ではエラーメッセージを出さないように抑制
-        with st.empty():
-            sdf = calculate_race_scores(rid, df_future)
+        sdf = calculate_race_scores(rid, df_future)
         if sdf is not None and len(sdf) >= 6:
             sc = sdf['score'].tolist()
             if sc[0] >= 108 and (sc[0] - sc[1]) >= 4: markers[rid] = "★"
@@ -455,9 +464,7 @@ with tab_forecast:
                 df_history = pd.concat([df_history, new_record], ignore_index=True)
                 df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig')
             
-            partner_details = []
-            for _, row in partners_df.iterrows():
-                partner_details.append(f"{row['馬番']}番({row['馬名']})")
+            partner_details = [f"{row['馬番']}番({row['馬名']})" for _, row in partners_df.iterrows()]
             partner_display_str = ", ".join(partner_details)
 
             st.info(f"**【推奨 軸馬 (1頭)】**\n* ◎ {honmei_umaban}番 {honmei_name}")
@@ -477,8 +484,10 @@ with tab_forecast:
             prompt_data = "\n".join(table_summary)
 
             system_instruction = f"""
-あなたはプロの競馬分析AI「勝ちぱかくん」です。提供されたデータ（scoreおよび過去の上がり3F実績）を最優先基準とし、シンプルに印と買い目のみを出力してください。
-1. Web検索を使用し、{race_display_name}の直前情報（馬場状態、オッズ傾向など）を最終確認してください。
+あなたはプロの競馬分析AI「勝ちぱかくん」です。
+提供されたデータ（scoreおよび過去の上がり3F実績）を最優先基準とし、世間の単勝オッズや人気だけに流されず、純粋なデータ分析に基づいてシンプルに印と買い目のみを出力してください。
+
+1. Web検索を使用し、{race_display_name}の直前情報（馬場状態、天候など）を最終確認してください。
 2. 印ルール: score上位から【◎】【◯】【▲】【△】【☆】
 3. 長文解説は一切不要。結果と推奨買い目のみを出力。
 
