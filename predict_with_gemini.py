@@ -43,7 +43,6 @@ ENHANCED_DB_CSV = "enhanced_keiba_data.csv"
 # ==========================================
 @st.cache_resource
 def load_model():
-    # 🔥 空のファイル（0バイト）でクラッシュしないようにサイズチェックを追加 🔥
     if os.path.exists("keiba_ai_model.pkl") and os.path.getsize("keiba_ai_model.pkl") > 0:
         try:
             return joblib.load("keiba_ai_model.pkl")
@@ -81,7 +80,6 @@ def load_past_data():
     return pd.DataFrame()
 
 def load_future_data():
-    # 🔥 空のファイル（0バイト）で絶対にクラッシュさせない最強の防波堤 🔥
     if os.path.exists(FUTURE_CSV) and os.path.getsize(FUTURE_CSV) > 0:
         try:
             df = pd.read_csv(FUTURE_CSV, dtype={'race_id': str}, encoding='utf-8-sig')
@@ -89,7 +87,7 @@ def load_future_data():
             try:
                 df = pd.read_csv(FUTURE_CSV, dtype={'race_id': str}, encoding='cp932')
             except Exception:
-                return pd.DataFrame() # 万が一文字化けしていても空データとして安全に返す
+                return pd.DataFrame()
                 
         PLACE_MAP_REV = {
             "01": "札幌", "02": "函館", "03": "福島", "04": "新潟", "05": "東京",
