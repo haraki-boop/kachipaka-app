@@ -229,7 +229,6 @@ if st.sidebar.button("🌐 出馬表を自動取得する", use_container_width=
         p_text = st.sidebar.empty()
         p_bar = st.sidebar.progress(0)
         
-        # ファイルがExcel等で開かれていて上書きロックされていないかチェック
         try:
             with open(FUTURE_CSV, 'a'): pass
         except PermissionError:
@@ -359,8 +358,14 @@ def calculate_race_scores(race_id_target, target_df):
         race_df = pd.merge(race_df, j_stats, on='騎手', how='left')
         
         if 'place_code' in race_df.columns and 'place_code' in df_past.columns:
+            # 💡 型の不一致エラーを防ぐために文字列に統一
+            race_df['place_code'] = race_df['place_code'].astype(str)
+            df_past['place_code'] = df_past['place_code'].astype(str)
+            
             jp_stats = df_past.groupby(['騎手', 'place_code'])['is_win'].mean().reset_index()
             jp_stats.rename(columns={'is_win': 'jockey_track_win_rate'}, inplace=True)
+            jp_stats['place_code'] = jp_stats['place_code'].astype(str)
+            
             race_df = pd.merge(race_df, jp_stats, on=['騎手', 'place_code'], how='left')
         else:
             race_df['jockey_track_win_rate'] = race_df['jockey_win_rate']
@@ -441,6 +446,7 @@ with tab_forecast:
                     if col.button(label, key=f"btn_{rid}", use_container_width=True, type=btn_type):
                         st.session_state['selected_race_id'] = rid
 
+    # 💡 データの空エラーを防ぐ安全装置を追加
     if st.session_state['selected_race_id'] and not df_future.empty and 'race_id' in df_future.columns:
         st.markdown("---")
         target_id = st.session_state['selected_race_id']
