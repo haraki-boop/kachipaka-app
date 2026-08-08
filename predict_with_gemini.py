@@ -350,7 +350,7 @@ def calculate_race_scores(race_id_target, target_df):
             prob = model.predict_proba(X)[:, 1]
         else:
             prob = model.predict(X)
-    except Exception as e:
+    except Exception:
         return None
 
     s = prob.sum()
@@ -429,9 +429,7 @@ with tab_forecast:
                 st.error("出走頭数が少ない、またはデータが不足しているため予想をスキップします。")
                 st.stop()
 
-            # -----------------------------------
-            # 📊 追加：AI全頭スコア＆勝率の画面表示
-            # -----------------------------------
+            # 📊 AI全頭スコア＆勝率の画面表示（エラー回避のため標準表示）
             st.markdown("### 📊 AI分析スコア＆勝率一覧")
             display_df = scored_df.copy()
             display_df['AI勝率'] = (display_df['win_prob'] * 100).round(1).astype(str) + "%"
@@ -440,10 +438,7 @@ with tab_forecast:
             show_cols = ['馬番', '馬名', '騎手', 'score', 'AI勝率', '過去上がり3F']
             show_cols = [c for c in show_cols if c in display_df.columns]
             
-            st.dataframe(
-                display_df[show_cols].style.background_gradient(subset=['score'], cmap='Reds'),
-                use_container_width=True
-            )
+            st.dataframe(display_df[show_cols], use_container_width=True)
 
             honmei_row = scored_df.iloc[0]
             partners_df = scored_df.iloc[1:6]
@@ -476,7 +471,6 @@ with tab_forecast:
                        f"馬連・ワイド: **{honmei_umaban}** － **{', '.join(map(str, partner_nums))}** (各5点)\n"
                        f"三連複: **{honmei_umaban}** － **{', '.join(map(str, partner_nums))}** (1頭軸流し 10点)")
 
-            # Geminiへのプロンプト設定
             table_summary = []
             for _, row in scored_df.iterrows():
                 last_3f_val = f"{row['last_3f']:.1f}" if pd.notna(row.get('last_3f')) else "データなし"
@@ -518,9 +512,6 @@ with tab_forecast:
                         )
                     )
                     
-                    # -----------------------------------
-                    # 🛠️ 修正：Geminiレスポンスの完全抽出
-                    # -----------------------------------
                     res_text = response.text if response.text else ""
                     if not res_text and response.candidates:
                         for part in response.candidates[0].content.parts:
