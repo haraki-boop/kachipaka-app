@@ -29,6 +29,7 @@ if 'selected_race_id' not in st.session_state:
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
 HISTORY_CSV = "prediction_history.csv"
 FUTURE_CSV = "future_races.csv"
+ENHANCED_DB_CSV = "enhanced_keiba_data.csv"
 
 @st.cache_resource
 def load_model():
@@ -38,11 +39,13 @@ def load_model():
 
 @st.cache_data
 def load_past_data():
-    if os.path.exists("cleaned_keiba_data.csv"):
+    # 🎯 優先的に完全体データベース（enhanced_keiba_data.csv）を読み込む
+    target_csv = ENHANCED_DB_CSV if os.path.exists(ENHANCED_DB_CSV) else "cleaned_keiba_data.csv"
+    if os.path.exists(target_csv):
         try:
-            df = pd.read_csv("cleaned_keiba_data.csv", low_memory=False, dtype={'race_id': str}, encoding='utf-8-sig')
+            df = pd.read_csv(target_csv, low_memory=False, dtype={'race_id': str}, encoding='utf-8-sig')
         except:
-            df = pd.read_csv("cleaned_keiba_data.csv", low_memory=False, dtype={'race_id': str}, encoding='cp932')
+            df = pd.read_csv(target_csv, low_memory=False, dtype={'race_id': str}, encoding='cp932')
             
         if 'time_seconds' not in df.columns and 'タイム' in df.columns:
             def ts(t):
@@ -52,6 +55,13 @@ def load_past_data():
                 try: return float(p[0])
                 except: return np.nan
             df['time_seconds'] = df['タイム'].apply(ts)
+            
+        # 上がり3Fの数値化
+        if '上り' in df.columns:
+            df['last_3f'] = pd.to_numeric(df['上り'], errors='coerce')
+        elif 'last_3f' not in df.columns:
+            df['last_3f'] = np.nan
+            
         return df
     return pd.DataFrame()
 
@@ -89,7 +99,7 @@ df_future = load_future_data()
 df_history = load_history_data()
 
 # ==========================================
-# 🚀 NEW: アプリ内蔵スクレイピング機能
+# 🚀 出馬表自動取得機能
 # ==========================================
 def get_target_dates():
     today = datetime.now()
@@ -100,18 +110,20 @@ def clean_text(text):
 
 def detect_grade(race_name, soup):
     grade_prefix = ""
-    grade_icon = soup.find(class_=re.compile(r'Icon_GradeType\d+'))
-    if grade_icon:
-        cls_str = " ".join(grade_icon.get('class', []))
-        if 'GradeType1' in cls_str: grade_prefix = "👑 G1 "
-        elif 'GradeType2' in cls_str: grade_prefix = "👑 G2 "
-        elif 'GradeType3' in cls_str: grade_prefix = "👑 G3 "
+    header_area = soup.find(class_="RaceList_NameBox") or soup.find(class_="RaceList_Item02")
+    if header_area:
+        grade_icon = header_area.find(class_=re.compile(r'Icon_GradeType\d+'))
+        if grade_icon:
+            cls_str = " ".join(grade_icon.get('class', []))
+            if 'GradeType1' in cls_str: grade_prefix = "👑 G1 "
+            elif 'GradeType2' in cls_str: grade_prefix = "👑 G2 "
+            elif 'GradeType3' in cls_str: grade_prefix = "👑 G3 "
+            
     if not grade_prefix:
         if re.search(r'G1|Ｇ１|ＧＩ|\(G1\)', race_name, re.IGNORECASE): grade_prefix = "👑 G1 "
         elif re.search(r'G2|Ｇ２|ＧⅡ|\(G2\)', race_name, re.IGNORECASE): grade_prefix = "👑 G2 "
         elif re.search(r'G3|Ｇ３|ＧⅢ|\(G3\)', race_name, re.IGNORECASE): grade_prefix = "👑 G3 "
         
-    # ⚠️ 修正箇所：f文字列の中で \ を使わないように外に出しました
     clean_name = re.sub(r'\(?G[123１２３ＩⅡⅢ]\)?', '', race_name).strip()
     return f"{grade_prefix}{clean_name}".strip()
 
@@ -233,26 +245,46 @@ if st.sidebar.button("🏆 終了したレースの結果を取得", use_contain
         st.rerun()
 
 # ==========================================
-# メイン画面ロジック
+# 🧠 本格予想ロジック（ガチDBとの連携）
 # ==========================================
 def calculate_race_scores(race_id_target, target_df):
     race_df = target_df[target_df['race_id'] == str(race_id_target)].copy()
     if race_df.empty or df_past.empty or model is None: return None
+    
+    # 🎯 データベースから「持ちタイム」「平均上がり3F」「馬体重」を集計して結合
+    if not df_past.empty and '馬名' in df_past.columns:
+        agg_dict = {'time_seconds': 'mean'}
+        if 'last_3f' in df_past.columns: agg_dict['last_3f'] = 'mean'
+        if 'horse_weight' in df_past.columns: agg_dict['horse_weight'] = 'mean'
+        if 'weight_change' in df_past.columns: agg_dict['weight_change'] = 'mean'
+        
+        horse_stats = df_past.groupby('馬名').agg(agg_dict).reset_index()
+        race_df = pd.merge(race_df, horse_stats, on='馬名', how='left')
+    
     features = ['枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 'horse_weight', 'weight_change']
     for f in features:
-        if f not in race_df.columns: race_df[f] = 0
-    overall_mean = df_past['time_seconds'].dropna().mean() if 'time_seconds' in df_past.columns else 90.0
+        if f not in race_df.columns: race_df[f] = np.nan
+        
+    overall_time_mean = df_past['time_seconds'].dropna().mean() if 'time_seconds' in df_past.columns else 90.0
+    overall_weight_mean = df_past['horse_weight'].dropna().mean() if 'horse_weight' in df_past.columns else 470.0
+    
     X = race_df[features].copy()
-    X['time_seconds'] = X['time_seconds'].fillna(overall_mean)
+    X['time_seconds'] = X['time_seconds'].fillna(overall_time_mean)
+    X['horse_weight'] = X['horse_weight'].fillna(overall_weight_mean)
+    X['weight_change'] = X['weight_change'].fillna(0)
+    
     X['単勝'] = 10.0
     X['人気'] = 5.0
+    
     X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
     prob = model.predict_proba(X)[:, 1]
+    
     s = prob.sum()
     race_df['win_prob'] = prob / s if s > 0 else 1.0 / len(race_df)
     mp = race_df['win_prob'].mean()
     rs = 100 + ((race_df['win_prob'] - mp) / mp) * 35 if mp > 0 else 100
     race_df['score'] = np.clip(rs, 50, 120).round().astype(int)
+    
     return race_df.sort_values(by='score', ascending=False).reset_index(drop=True)
 
 def get_all_markers():
@@ -335,32 +367,43 @@ with tab_forecast:
                 df_history = pd.concat([df_history, new_record], ignore_index=True)
                 df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig')
             
+            # Geminiへ渡すプロンプトに上がり3Fデータも載せる
             table_summary = []
             for _, row in scored_df.iterrows():
+                last_3f_val = f"{row['last_3f']:.1f}" if pd.notna(row.get('last_3f')) else "データなし"
                 table_summary.append(
                     f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | 騎手:{row.get('騎手', '不明')} | "
-                    f"score:{row['score']:3d} | AI勝率予想:{row['win_prob']*100:.1f}% | 斤量:{row.get('斤量', 0)}kg"
+                    f"score:{row['score']:3d} | AI勝率予想:{row['win_prob']*100:.1f}% | 過去平均上がり3F:{last_3f_val}秒"
                 )
             prompt_data = "\n".join(table_summary)
 
+            # 🚨 全買い目を網羅させた出力指示書
             system_instruction = f"""
-あなたは競馬分析AI「勝ちぱかくん」です。提供されたデータ（score）を絶対の基準とし、シンプルに印と買い目のみを出力してください。
-1. Web検索を使用し、{race_display_name}の最新情報を確認してください。
-2. 印ルール: scoreの最高値に【◎】、2位に【◯】、3位に【▲】、4位に【△】、5位に【☆】
-3. 長文解説は一切不要。結果のみを出力。
+あなたはプロの競馬分析AI「勝ちぱかくん」です。提供されたデータ（scoreおよび過去の上がり3F実績）を最優先基準とし、シンプルに印と買い目のみを出力してください。
+1. Web検索を使用し、{race_display_name}の直前情報（馬場状態、オッズ傾向など）を最終確認してください。
+2. 印ルール: scoreおよびデータ総合値最高に【◎】、2位に【◯】、3位に【▲】、4位に【△】、5位に【☆】
+3. 長文解説は一切不要。結果と推奨買い目のみを出力。
 
 ### 1. 【全頭 データ一覧】
-| 馬番 | 馬名 | 騎手 | score | AI勝率予想 |
+| 馬番 | 馬名 | 騎手 | score | AI勝率予想 | 平均上がり3F |
 ### 2. 【勝ちぱかくんの印】
-◎：〇番（馬名）など
-### 3. 【推奨買い目】
+◎：〇番（馬名）
+◯：〇番（馬名）
+▲：〇番（馬名）
+△：〇番（馬名）
+☆：〇番（馬名）
+
+### 3. 【推奨買い目（全券種）】
 * 単勝: ◎
 * 複勝: ◎、◯
 * 馬連: ◎ - ◯, ▲, △, ☆
+* ワイド: ◎ - ◯, ▲, △, ☆
+* 3連複: ◎ - ◯, ▲, △, ☆ (1頭軸流し)
+* 3連単: ◎ ➔ ◯, ▲ ➔ ◯, ▲, △, ☆ (1着固定フォーメーション)
 """
             prompt = f"以下のレース（ID: {target_id}、{race_display_name}）の出走馬データです。\n{prompt_data}"
 
-            with st.spinner("解析とWeb検索を実行中..."):
+            with st.spinner("最新リアルタイム情報とあわせて解析中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 try:
                     response = client.models.generate_content(
