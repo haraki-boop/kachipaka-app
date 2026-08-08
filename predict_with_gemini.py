@@ -3,6 +3,7 @@ import re
 import time
 import random
 import requests
+import json
 import pandas as pd
 import numpy as np
 import joblib
@@ -146,8 +147,31 @@ def run_scraper(p_text, p_bar):
     total = len(all_race_ids)
 
     for i, race_id in enumerate(all_race_ids):
-        p_text.text(f"📥 出馬表を取得中... ({i+1}/{total} レース)")
+        p_text.text(f"📥 出馬表とオッズを取得中... ({i+1}/{total} レース)")
         p_bar.progress((i + 1) / total)
+        
+        # --- 【追加】裏側のオッズAPIからデータを取得 ---
+        odds_dict = {}
+        try:
+            odds_res = session.get(f"https://race.netkeiba.com/api/api_get_jra_odds.html?race_id={race_id}&type=1&action=init", timeout=5)
+            if odds_res.status_code == 200:
+                odds_json = odds_res.json()
+                if 'data' in odds_json and 'odds' in odds_json['data'] and '1' in odds_json['data']['odds']:
+                    for umaban, vals in odds_json['data']['odds']['1'].items():
+                        odds_dict[str(int(umaban))] = float(vals[0])
+        except: pass
+        # 地方競馬だった場合のフォールバックAPI
+        if not odds_dict:
+            try:
+                odds_res = session.get(f"https://race.netkeiba.com/api/api_get_nar_odds.html?race_id={race_id}&type=1&action=init", timeout=5)
+                if odds_res.status_code == 200:
+                    odds_json = odds_res.json()
+                    if 'data' in odds_json and 'odds' in odds_json['data'] and '1' in odds_json['data']['odds']:
+                        for umaban, vals in odds_json['data']['odds']['1'].items():
+                            odds_dict[str(int(umaban))] = float(vals[0])
+            except: pass
+        # -----------------------------------------------
+
         try:
             res = session.get(f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}", timeout=10)
             if res.status_code == 200:
@@ -180,11 +204,17 @@ def run_scraper(p_text, p_bar):
                         ub = clean_text(cols[1].text)
                         if nm and ub.isdigit():
                             sa = clean_text(cols[4].text)
-                            odds_val, pop_val = np.nan, np.nan
-                            odds_elem = row.find(class_=re.compile(r'Popular_Txt|Odds'))
-                            if odds_elem:
-                                try: odds_val = float(clean_text(odds_elem.text))
-                                except: pass
+                            pop_val = np.nan
+                            
+                            # オッズはAPIから取得した辞書を優先、なければHTMLから探す
+                            odds_val = odds_dict.get(str(int(ub)), np.nan)
+                            
+                            if pd.isna(odds_val):
+                                odds_elem = row.find(class_=re.compile(r'Popular_Txt|Odds'))
+                                if odds_elem:
+                                    try: odds_val = float(clean_text(odds_elem.text))
+                                    except: pass
+                                    
                             pop_elem = row.find(class_=re.compile(r'Popular_Num'))
                             if pop_elem:
                                 try: pop_val = float(clean_text(pop_elem.text))
@@ -500,7 +530,6 @@ with tab_forecast:
             with st.spinner("AIがレース波乱度を分析し、Gemini(3.6 Flash)が最適戦略を構築中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 try:
-                    # 利用可能モデル内で最も高速かつ高精度な gemini-3.6-flash を指定
                     response = client.models.generate_content(
                         model='gemini-3.6-flash',
                         contents=prompt,
