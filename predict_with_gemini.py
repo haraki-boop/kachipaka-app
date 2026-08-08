@@ -36,7 +36,7 @@ if not GEMINI_API_KEY:
 
 HISTORY_CSV = "prediction_history.csv"
 FUTURE_CSV = "future_races.csv"
-ENHANCED_DB_CSV = "enhanced_keiba_data.csv"
+ML_TARGET_CSV = "ml_target_data.csv"
 
 # ==========================================
 # 1. データとAIモデルの読み込み
@@ -52,31 +52,14 @@ def load_model():
 
 @st.cache_data
 def load_past_data():
-    target_csv = ENHANCED_DB_CSV if os.path.exists(ENHANCED_DB_CSV) else "cleaned_keiba_data.csv"
-    if os.path.exists(target_csv) and os.path.getsize(target_csv) > 0:
+    if os.path.exists(ML_TARGET_CSV) and os.path.getsize(ML_TARGET_CSV) > 0:
         try:
-            df = pd.read_csv(target_csv, low_memory=False, dtype={'race_id': str}, encoding='utf-8-sig')
+            return pd.read_csv(ML_TARGET_CSV, low_memory=False, dtype={'race_id': str}, encoding='utf-8-sig')
         except Exception:
             try:
-                df = pd.read_csv(target_csv, low_memory=False, dtype={'race_id': str}, encoding='cp932')
+                return pd.read_csv(ML_TARGET_CSV, low_memory=False, dtype={'race_id': str}, encoding='cp932')
             except Exception:
-                return pd.DataFrame()
-            
-        if 'time_seconds' not in df.columns and 'タイム' in df.columns:
-            def ts(t):
-                if pd.isna(t): return np.nan
-                p = str(t).strip().split(':')
-                if len(p) == 2: return float(p[0]) * 60 + float(p[1])
-                try: return float(p[0])
-                except Exception: return np.nan
-            df['time_seconds'] = df['タイム'].apply(ts)
-            
-        if '上り' in df.columns:
-            df['last_3f'] = pd.to_numeric(df['上り'], errors='coerce')
-        elif 'last_3f' not in df.columns:
-            df['last_3f'] = np.nan
-            
-        return df
+                pass
     return pd.DataFrame()
 
 def load_future_data():
@@ -93,9 +76,10 @@ def load_future_data():
             "01": "札幌", "02": "函館", "03": "福島", "04": "新潟", "05": "東京",
             "06": "中山", "07": "中京", "08": "京都", "09": "阪神", "10": "小倉"
         }
-        df['place_code'] = df['race_id'].str[4:6]
-        df['place_name'] = df['place_code'].map(PLACE_MAP_REV).fillna("不明")
-        df['r_num'] = df['race_id'].str[10:12].astype(int)
+        if 'race_id' in df.columns:
+            df['place_code'] = df['race_id'].str[4:6]
+            df['place_name'] = df['place_code'].map(PLACE_MAP_REV).fillna("不明")
+            df['r_num'] = df['race_id'].str[10:12].astype(int)
         
         if 'race_name' not in df.columns: df['race_name'] = ""
         df['day_label'] = df['date'] if 'date' in df.columns else "不明"
@@ -111,7 +95,6 @@ def load_history_data():
                 df = pd.read_csv(HISTORY_CSV, dtype={'race_id': str, 'honmei_umaban': str, 'partners': str}, encoding='cp932')
             except Exception:
                 return pd.DataFrame()
-        
         if 'partners' not in df.columns:
             df['partners'] = ""
         return df
@@ -123,7 +106,7 @@ df_future = load_future_data()
 df_history = load_history_data()
 
 # ==========================================
-# 2. 出馬表自動取得機能
+# 2. スクレイパー (出馬表の自動上書き)
 # ==========================================
 def get_target_dates():
     today = datetime.now()
@@ -136,29 +119,34 @@ def run_scraper(p_text, p_bar):
     target_dates = get_target_dates()
     all_race_ids, id_to_date = [], {}
     session = requests.Session()
-    session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer": "https://race.netkeiba.com/"})
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://race.netkeiba.com/"
+    })
 
-    p_text.text("📅 開催日を確認中...")
+    p_text.text(f"📅 検索対象日: {target_dates}")
     for date_str in target_dates:
-        for url in [f"https://race.netkeiba.com/top/race_list_sub.html?kaisai_date={date_str}", f"https://race.netkeiba.com/top/race_list.html?kaisai_date={date_str}"]:
-            try:
-                res = session.get(url, timeout=10)
-                if res.status_code == 200:
-                    res.encoding = 'utf-8'
-                    found_ids = re.findall(r'race_id=["\']?(\d{12})["\']?', res.text)
-                    for rid in found_ids:
-                        if rid not in all_race_ids:
-                            all_race_ids.append(rid)
-                            id_to_date[rid] = date_str
-            except Exception: pass
-            time.sleep(1)
+        url = f"https://race.netkeiba.com/top/race_list_sub.html?kaisai_date={date_str}"
+        try:
+            res = session.get(url, timeout=10)
+            if res.status_code == 200:
+                found_ids = re.findall(r'race_id=["\']?(\d{12})["\']?', res.text)
+                for rid in found_ids:
+                    if rid not in all_race_ids:
+                        all_race_ids.append(rid)
+                        id_to_date[rid] = date_str
+        except: pass
+        time.sleep(1)
 
-    all_race_ids.sort()
-    if not all_race_ids: return False
+    if not all_race_ids:
+        st.sidebar.error(f"❌ レースIDが1件も見つかりませんでした。\n検索した日付: {target_dates}\n（netkeibaの仕様変更か、対象日のレース情報がまだ公開されていません）")
+        return False
 
     race_data_list = []
     weekdays = ["月", "火", "水", "木", "金", "土", "日"]
     total = len(all_race_ids)
+    
+    st.sidebar.info(f"✅ 対象レースを {total}件 発見しました！取得を開始します。")
 
     for i, race_id in enumerate(all_race_ids):
         p_text.text(f"📥 出馬表を取得中... ({i+1}/{total} レース)")
@@ -172,23 +160,17 @@ def run_scraper(p_text, p_bar):
                 display_date = f"{datetime.strptime(d_str, '%Y%m%d').month}月{datetime.strptime(d_str, '%Y%m%d').day}日({weekdays[datetime.strptime(d_str, '%Y%m%d').weekday()]})" if d_str else "不明"
                 
                 r_name_elem = soup.find(class_="RaceName") or soup.find(class_="RaceList_Item02")
-                if r_name_elem:
-                    main_name_span = r_name_elem.find("span", class_="RaceName_main")
-                    r_name = clean_text(main_name_span.text) if main_name_span else clean_text(r_name_elem.text)
-                else:
-                    r_name = ""
+                r_name = clean_text(r_name_elem.find("span", class_="RaceName_main").text) if r_name_elem and r_name_elem.find("span", class_="RaceName_main") else (clean_text(r_name_elem.text) if r_name_elem else "")
 
-                race_data01 = soup.find(class_="RaceData01")
                 surface, distance, condition = "不明", np.nan, "不明"
+                race_data01 = soup.find(class_="RaceData01")
                 if race_data01:
                     rd_text = race_data01.text
                     if "芝" in rd_text: surface = "芝"
                     elif "ダ" in rd_text: surface = "ダート"
                     elif "障" in rd_text: surface = "障害"
-
                     dist_match = re.search(r'(\d+)m', rd_text)
                     if dist_match: distance = float(dist_match.group(1))
-
                     if "良" in rd_text: condition = "良"
                     elif "稍" in rd_text: condition = "稍重"
                     elif "重" in rd_text: condition = "重"
@@ -205,11 +187,11 @@ def run_scraper(p_text, p_bar):
                             odds_elem = row.find(class_=re.compile(r'Popular_Txt|Odds'))
                             if odds_elem:
                                 try: odds_val = float(clean_text(odds_elem.text))
-                                except Exception: pass
+                                except: pass
                             pop_elem = row.find(class_=re.compile(r'Popular_Num'))
                             if pop_elem:
                                 try: pop_val = float(clean_text(pop_elem.text))
-                                except Exception: pass
+                                except: pass
 
                             race_data_list.append({
                                 "race_id": str(race_id), "date": display_date, "race_name": r_name,
@@ -221,12 +203,15 @@ def run_scraper(p_text, p_bar):
                                 "surface": surface, "distance": distance, "condition": condition
                             })
             time.sleep(random.uniform(0.5, 1.0))
-        except Exception: pass
+        except: pass
 
     if race_data_list:
         pd.DataFrame(race_data_list).to_csv(FUTURE_CSV, index=False, encoding='utf-8-sig')
+        st.sidebar.info(f"✅ {len(race_data_list)}頭のデータを抽出・保存しました。")
         return True
-    return False
+    else:
+        st.sidebar.error("❌ レースIDは見つかりましたが、出馬表データが1件も抽出できませんでした。")
+        return False
 
 # ==========================================
 # サイドバー UI
@@ -234,21 +219,39 @@ def run_scraper(p_text, p_bar):
 st.sidebar.header("🔄 画面の更新")
 if st.sidebar.button("🔄 最新の情報にリロード", use_container_width=True):
     st.cache_data.clear()
+    st.cache_resource.clear()
     st.rerun()
 
 st.sidebar.markdown("---")
 st.sidebar.header("📥 今週の出馬表取得")
 if st.sidebar.button("🌐 出馬表を自動取得する", use_container_width=True):
-    with st.spinner("出馬表データを取得しています（約1分）..."):
+    with st.spinner("出馬表データを取得しています..."):
         p_text = st.sidebar.empty()
         p_bar = st.sidebar.progress(0)
-        if run_scraper(p_text, p_bar):
-            st.cache_data.clear()
-            st.sidebar.success(f"✅ 出馬表を取得しました！（更新: {datetime.now().strftime('%H:%M:%S')}）")
-            time.sleep(1.5)
-            st.rerun()
-        else:
-            st.sidebar.error("❌ データの取得に失敗しました。")
+        
+        # ファイルがExcel等で開かれていて上書きロックされていないかチェック
+        try:
+            with open(FUTURE_CSV, 'a'): pass
+        except PermissionError:
+            st.sidebar.error("❌ future_races.csv がExcel等で開かれています。閉じてから再度お試しください。")
+            st.stop()
+
+        try:
+            success = run_scraper(p_text, p_bar)
+            if success:
+                try:
+                    subprocess.run(["git", "add", FUTURE_CSV], check=True, capture_output=True)
+                    subprocess.run(["git", "commit", "-m", "Auto-update future_races.csv"], check=True, capture_output=True)
+                    subprocess.run(["git", "push"], check=True, capture_output=True)
+                except Exception as git_e:
+                    st.sidebar.warning(f"⚠️ ファイルは保存されましたが、Gitへの送信はスキップされました。")
+                
+                st.cache_data.clear()
+                st.sidebar.success(f"✅ 出馬表を取得・上書きしました！（保存先: {os.path.abspath(FUTURE_CSV)}）")
+                time.sleep(2.0)
+                st.rerun()
+        except Exception as e:
+            st.sidebar.error(f"❌ スクレイピング中に致命的なエラーが発生しました: {e}")
 
 st.sidebar.markdown("---")
 st.sidebar.header("🏁 実戦結果の検証")
@@ -262,9 +265,7 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                     try:
                         axis = str(int(row['honmei_umaban']))
                         partners = [str(int(p.strip())) for p in str(row.get('partners', '')).split(',') if p.strip().isdigit()]
-                        
-                        payout_found = False
-                        total_payout = 0
+                        payout_found, total_payout = False, 0
                         
                         for url in [f"https://race.netkeiba.com/race/result.html?race_id={str(row['race_id'])}", f"https://db.netkeiba.com/race/{str(row['race_id'])}/"]:
                             res = requests.get(url, headers=headers, timeout=5)
@@ -276,19 +277,13 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                                 if not th: continue
                                 kind = th.text.strip()
                                 if kind not in ["単勝", "馬連", "ワイド", "三連複", "三連単"]: continue
-                                
                                 tds = tr.find_all("td")
                                 if len(tds) < 2: continue
                                 
                                 payout_found = True
-                                
                                 for br in tds[0].find_all('br'): br.replace_with('\n')
-                                for ul in tds[0].find_all('ul'): ul.insert_after('\n')
                                 for div in tds[0].find_all('div'): div.insert_after('\n')
-                                
                                 for br in tds[1].find_all('br'): br.replace_with('\n')
-                                for ul in tds[1].find_all('ul'): ul.insert_after('\n')
-                                for div in tds[1].find_all('div'): div.insert_after('\n')
                                 
                                 win_lines = [re.sub(r'\s+', '', line) for line in tds[0].get_text().split('\n') if line.strip()]
                                 amt_lines = [re.sub(r'\D', '', line) for line in tds[1].get_text().split('\n') if line.strip()]
@@ -298,91 +293,77 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                                     amt = int(a_str)
                                     w_nums = [str(int(n)) for n in re.split(r'[-→=]', w_str) if n.isdigit()]
                                     
-                                    if kind == "単勝" and len(w_nums) == 1:
-                                        if w_nums[0] == axis: total_payout += amt
-                                    elif kind == "馬連" and len(w_nums) == 2:
-                                        if axis in w_nums and any(p in w_nums for p in partners): total_payout += amt
-                                    elif kind == "ワイド" and len(w_nums) == 2:
-                                        if axis in w_nums and any(p in w_nums for p in partners): total_payout += amt
-                                    elif kind == "三連複" and len(w_nums) == 3:
-                                        if axis in w_nums and len(set(w_nums).intersection(set(partners))) >= 2: total_payout += amt
-                                    elif kind == "三連単" and len(w_nums) == 3:
-                                        if axis in w_nums and len(set(w_nums).intersection(set(partners))) >= 2: total_payout += amt
+                                    if kind == "単勝" and len(w_nums) == 1 and w_nums[0] == axis: total_payout += amt
+                                    elif kind in ["馬連", "ワイド"] and len(w_nums) == 2 and axis in w_nums and any(p in w_nums for p in partners): total_payout += amt
+                                    elif kind in ["三連複", "三連単"] and len(w_nums) == 3 and axis in w_nums and len(set(w_nums).intersection(set(partners))) >= 2: total_payout += amt
                             
                             if payout_found:
                                 df_history.at[idx, 'result_pay'] = total_payout
                                 updated = True
                                 break
-                    except Exception: pass
+                    except: pass
                     time.sleep(1)
             if updated: df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig', errors='replace')
         st.cache_data.clear()
-        st.success("✅ 実戦結果（全券種）を最新化しました！")
+        st.success("✅ 実戦結果を最新化しました！")
         time.sleep(1.5)
         st.rerun()
-
-st.sidebar.markdown("---")
-st.sidebar.header("🧠 AIの進化（再学習）")
-if st.sidebar.button("🚀 最新データ取得＆AI再学習", type="primary", use_container_width=True):
-    with st.spinner("過去データの取得とAIの再学習を実行しています...（数分かかります）"):
-        try:
-            if os.path.exists("scrape_real_database.py"):
-                st.sidebar.info("📥 過去レースのデータを収集しています...")
-                subprocess.run(["python", "scrape_real_database.py"], check=True)
-            if os.path.exists("train_lightgbm.py"):
-                st.sidebar.info("🧠 新しいデータでAIの脳みそを再構築しています...")
-                subprocess.run(["python", "train_lightgbm.py"], check=True)
-            st.cache_resource.clear()
-            st.cache_data.clear()
-            st.sidebar.success("✅ AIのアップデートが完了しました！新しい脳みそで予想を開始します。")
-            time.sleep(3)
-            st.rerun()
-        except subprocess.CalledProcessError as e:
-            st.sidebar.error(f"❌ 処理中にエラーが発生しました。\nターミナルのログを確認してください。")
-        except Exception as e:
-            st.sidebar.error(f"❌ 予期せぬエラー: {e}")
 
 st.sidebar.markdown("---")
 st.sidebar.header("🗑️ 履歴の完全リセット")
 if st.sidebar.button("💥 ゴミ予想履歴を完全消去", type="primary", use_container_width=True):
     try:
-        if os.path.exists(HISTORY_CSV):
-            os.remove(HISTORY_CSV)
+        if os.path.exists(HISTORY_CSV): os.remove(HISTORY_CSV)
         st.cache_data.clear()
-        st.sidebar.success("✅ 履歴データを物理的に完全消去しました！")
+        st.sidebar.success("✅ 履歴データを消去しました！")
         time.sleep(1.5)
         st.rerun()
-    except Exception as e:
-        st.sidebar.error(f"消去エラー: {e}")
+    except: pass
+
 
 # ==========================================
-# 3. 🧠 本格予想ロジック
+# 3. 🔥 新AIモデルへのデータ結合 ＋ 予想出力 🔥
 # ==========================================
 def calculate_race_scores(race_id_target, target_df):
-    if target_df.empty or model_data is None:
-        return None
+    if target_df.empty or model_data is None: return None
 
     race_df = target_df[target_df['race_id'].astype(str) == str(race_id_target)].copy()
-    if race_df.empty:
-        return None
+    if race_df.empty: return None
 
-    features = ['枠番', '馬番', '斤量', 'time_seconds', 'sex_code', 'age', 'horse_weight', 'weight_change', 'distance', 'surface_code', 'condition_code', 'jockey_win_rate', 'jockey_track_win_rate']
-    if isinstance(model_data, dict):
-        model = model_data.get('model')
-        if 'features' in model_data: features = model_data['features']
-    else:
-        model = model_data
+    features = model_data.get('features', [])
+    model = model_data.get('model')
 
     if not df_past.empty and '馬名' in df_past.columns:
-        agg_dict = {}
-        if 'time_seconds' in df_past.columns: agg_dict['time_seconds'] = 'mean'
-        if 'last_3f' in df_past.columns: agg_dict['last_3f'] = 'mean'
-        if 'horse_weight' in df_past.columns: agg_dict['horse_weight'] = 'mean'
-        if 'weight_change' in df_past.columns: agg_dict['weight_change'] = 'mean'
+        agg_dict = {'is_win': ['sum', 'count']}
+        if '着順' in df_past.columns: agg_dict['着順'] = 'last'
+        if 'my_time_idx' in df_past.columns: agg_dict['my_time_idx'] = 'mean'
+        if 'my_last3f_idx' in df_past.columns: agg_dict['my_last3f_idx'] = 'mean'
+        if 'my_pace_idx' in df_past.columns: agg_dict['my_pace_idx'] = 'mean'
+        if 'my_start_idx' in df_past.columns: agg_dict['my_start_idx'] = 'mean'
+        
+        horse_stats = df_past.groupby('馬名').agg(agg_dict).reset_index()
+        new_cols = ['馬名', 'total_wins', 'total_runs']
+        if '着順' in df_past.columns: new_cols.append('prev_rank')
+        if 'my_time_idx' in df_past.columns: new_cols.append('horse_avg_time_idx')
+        if 'my_last3f_idx' in df_past.columns: new_cols.append('horse_avg_last3f_idx')
+        if 'my_pace_idx' in df_past.columns: new_cols.append('horse_avg_pace_idx')
+        if 'my_start_idx' in df_past.columns: new_cols.append('horse_avg_start_idx')
+        
+        horse_stats.columns = new_cols
+        horse_stats['horse_win_rate'] = np.where(horse_stats['total_runs'] > 0, horse_stats['total_wins'] / horse_stats['total_runs'], 0.0)
+        race_df = pd.merge(race_df, horse_stats, on='馬名', how='left')
 
-        if agg_dict:
-            horse_stats = df_past.groupby('馬名').agg(agg_dict).reset_index()
-            race_df = pd.merge(race_df, horse_stats, on='馬名', how='left')
+    if not df_past.empty and '騎手' in df_past.columns:
+        j_stats = df_past.groupby('騎手')['is_win'].mean().reset_index()
+        j_stats.rename(columns={'is_win': 'jockey_win_rate'}, inplace=True)
+        race_df = pd.merge(race_df, j_stats, on='騎手', how='left')
+        
+        if 'place_code' in race_df.columns and 'place_code' in df_past.columns:
+            jp_stats = df_past.groupby(['騎手', 'place_code'])['is_win'].mean().reset_index()
+            jp_stats.rename(columns={'is_win': 'jockey_track_win_rate'}, inplace=True)
+            race_df = pd.merge(race_df, jp_stats, on=['騎手', 'place_code'], how='left')
+        else:
+            race_df['jockey_track_win_rate'] = race_df['jockey_win_rate']
 
     for f in features:
         if f not in race_df.columns: race_df[f] = np.nan
@@ -390,54 +371,21 @@ def calculate_race_scores(race_id_target, target_df):
     if 'sex_code' in race_df.columns and race_df['sex_code'].dtype == object:
         race_df['sex_code'] = race_df['sex_code'].map({'牡': 0, '牝': 1, 'セ': 2}).fillna(0)
         
-    if isinstance(model_data, dict):
-        if 'le_surf' in model_data and 'surface' in race_df.columns:
-            le_surf = model_data['le_surf']
-            race_df['surface_code'] = race_df['surface'].map(lambda s: le_surf.transform([s])[0] if s in le_surf.classes_ else le_surf.transform(['不明'])[0])
-        if 'le_cond' in model_data and 'condition' in race_df.columns:
-            le_cond = model_data['le_cond']
-            race_df['condition_code'] = race_df['condition'].map(lambda c: le_cond.transform([c])[0] if c in le_cond.classes_ else le_cond.transform(['不明'])[0])
-
-    race_df['jockey_win_rate'] = 0.0
-    race_df['jockey_track_win_rate'] = 0.0
-
-    if not df_past.empty and '騎手' in df_past.columns and '着順' in df_past.columns and '騎手' in race_df.columns:
-        df_past['is_win'] = (pd.to_numeric(df_past['着順'], errors='coerce') == 1).astype(int)
-        
-        j_stats = df_past.groupby('騎手')['is_win'].mean().reset_index()
-        j_stats.rename(columns={'is_win': 'calc_j_win'}, inplace=True)
-        race_df = pd.merge(race_df, j_stats, on='騎手', how='left')
-        if 'calc_j_win' in race_df.columns:
-            race_df['jockey_win_rate'] = race_df['calc_j_win'].fillna(0.0)
-            
-        if 'place_name' not in df_past.columns and 'place' in df_past.columns:
-            df_past['place_name'] = df_past['place']
-            
-        if 'place_name' in df_past.columns and 'place_name' in race_df.columns:
-            j_p_stats = df_past.groupby(['騎手', 'place_name'])['is_win'].mean().reset_index()
-            j_p_stats.rename(columns={'is_win': 'calc_jp_win'}, inplace=True)
-            race_df = pd.merge(race_df, j_p_stats, on=['騎手', 'place_name'], how='left')
-            if 'calc_jp_win' in race_df.columns:
-                race_df['jockey_track_win_rate'] = race_df['calc_jp_win'].fillna(0.0)
-            else:
-                race_df['jockey_track_win_rate'] = race_df['jockey_win_rate']
-        else:
-            race_df['jockey_track_win_rate'] = race_df['jockey_win_rate']
+    if 'le_surf' in model_data and 'surface' in race_df.columns:
+        le_surf = model_data['le_surf']
+        race_df['surface_code'] = race_df['surface'].map(lambda s: le_surf.transform([s])[0] if s in le_surf.classes_ else le_surf.transform(['不明'])[0])
+    if 'le_cond' in model_data and 'condition' in race_df.columns:
+        le_cond = model_data['le_cond']
+        race_df['condition_code'] = race_df['condition'].map(lambda c: le_cond.transform([c])[0] if c in le_cond.classes_ else le_cond.transform(['不明'])[0])
 
     X = race_df[features].copy()
     X = X.apply(pd.to_numeric, errors='coerce')
-    
-    X = X.fillna(X.mean())
-    if 'time_seconds' in X.columns: X['time_seconds'] = X['time_seconds'].fillna(100.0)
-    X = X.fillna(0)
+    X = X.fillna(X.mean()).fillna(0)
 
     try:
-        if hasattr(model, "predict_proba"):
-            prob = model.predict_proba(X)[:, 1]
-        else:
-            prob = model.predict(X)
-    except Exception:
-        return None
+        if hasattr(model, "predict_proba"): prob = model.predict_proba(X)[:, 1]
+        else: prob = model.predict(X)
+    except Exception: return None
 
     s = prob.sum()
     race_df['win_prob'] = prob / s if s > 0 else 1.0 / len(race_df)
@@ -487,9 +435,7 @@ with tab_forecast:
                     mark = markers.get(rid, "")
                     
                     label = f"{r}R {mark}".strip()
-                    if rname:
-                        short_name = rname if len(rname) <= 8 else rname[:7] + "…"
-                        label = f"{r}R {short_name} {mark}".strip()
+                    if rname: label = f"{r}R {rname[:7]}… {mark}".strip()
                         
                     btn_type = "primary" if "★" in mark else "secondary"
                     if col.button(label, key=f"btn_{rid}", use_container_width=True, type=btn_type):
@@ -499,7 +445,6 @@ with tab_forecast:
         st.markdown("---")
         target_id = st.session_state['selected_race_id']
         target_race_info = df_future[df_future['race_id'] == target_id].iloc[0]
-        
         rname = target_race_info.get('race_name', "")
         race_display_name = f"{target_race_info['place_name']} {target_race_info['r_num']}R 【{rname}】" if rname else f"{target_race_info['place_name']} {target_race_info['r_num']}R"
             
@@ -516,96 +461,79 @@ with tab_forecast:
                 st.stop()
 
             honmei_row = scored_df.iloc[0]
-            partners_df = scored_df.iloc[1:6]
-            
             honmei_umaban = int(honmei_row['馬番'])
             honmei_name = honmei_row['馬名']
-            partner_nums = partners_df['馬番'].astype(int).tolist()
-            partners_str = ",".join(map(str, partner_nums))
+            partners_str = ",".join(map(str, scored_df.iloc[1:6]['馬番'].astype(int).tolist()))
             
             if df_history.empty or str(target_id) not in df_history['race_id'].astype(str).values:
-                new_record = pd.DataFrame([{
-                    'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    'race_id': str(target_id),
-                    'race_name': race_display_name,
-                    'honmei_umaban': honmei_umaban,
-                    'partners': partners_str,
-                    'honmei_name': honmei_name,
-                    'result_pay': ""
-                }])
+                new_record = pd.DataFrame([{'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'race_id': str(target_id), 'race_name': race_display_name, 'honmei_umaban': honmei_umaban, 'partners': partners_str, 'honmei_name': honmei_name, 'result_pay': ""}])
                 df_history = pd.concat([df_history, new_record], ignore_index=True)
                 df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig')
+                try:
+                    subprocess.run(["git", "add", HISTORY_CSV], check=True, capture_output=True)
+                    subprocess.run(["git", "commit", "-m", "Auto-update history"], check=True, capture_output=True)
+                    subprocess.run(["git", "push"], check=True, capture_output=True)
+                except: pass
 
             table_summary = []
             for _, row in scored_df.iterrows():
-                last_3f_val = f"{row['last_3f']:.1f}" if pd.notna(row.get('last_3f')) else "データなし"
-                
-                odds = row.get('単勝', 0)
-                if pd.isna(odds): odds = 0.0
-                pop = row.get('人気', '-')
-                if pd.isna(pop): pop = '-'
-                
+                odds = row.get('単勝', 0) if pd.notna(row.get('単勝')) else 0.0
+                pop = row.get('人気', '-') if pd.notna(row.get('人気')) else '-'
                 j_win = row.get('jockey_win_rate', 0.0)
-                jockey_name = row.get('騎手', '不明')
-                if j_win == 0.0:
-                    j_info = f"過去データなし(要検索)"
-                else:
-                    j_info = f"勝率{j_win*100:.1f}%"
-                
-                win_prob = row['win_prob']
-                ev = (win_prob * odds) if odds > 0 else 0.0
+                j_info = "過去データなし(要検索)" if j_win == 0.0 else f"勝率{j_win*100:.1f}%"
+                ev = (row['win_prob'] * odds) if odds > 0 else 0.0
                 
                 table_summary.append(
                     f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | "
-                    f"騎手:{jockey_name}({j_info}) | "
-                    f"単勝オッズ:{odds}倍 ({pop}人気) | "
-                    f"純粋勝率:{win_prob*100:.1f}% | 🎯単勝期待値:{ev:.2f} | "
+                    f"騎手:{row.get('騎手', '不明')}({j_info}) | "
+                    f"オッズ:{odds}倍 ({pop}人気) | "
+                    f"勝率:{row['win_prob']*100:.1f}% | 🎯期待値:{ev:.2f} | "
                     f"AIスコア:{row['score']:3d}"
                 )
-            prompt_data = "\n".join(table_summary)
 
             system_instruction = f"""
-あなたはプロの競馬分析AI「勝ちぱかくん」です。以下の絶対ルールに従い、冷酷にバリュー投資（期待値買い）を遂行してください。
+あなたはプロの競馬分析AI「勝ちぱかくん」です。以下の絶対ルールに従い、レースの性質を読み切り最適な馬券戦略を遂行してください。
 
 【絶対遵守事項】
-1. 前置き、挨拶、言い訳は一切禁止。即座に出力フォーマットに従うこと。
-2. データ内の【🎯単勝期待値（純粋勝率 × 実際のオッズ）】を最重要視してください。
-3. 期待値が1.0未満の過剰人気馬は評価を大きく下げ、期待値が1.0を超える美味しい穴馬を本命（◎）や穴（☆）に抜擢してください。
-4. **【超重要】提供されたデータ内で騎手の成績が「過去データなし(要検索)」となっている場合（新人や短期免許の外国人騎手など）は、必ずあなたが持つWeb検索機能を利用して、その騎手の最新の成績・評判・特徴を調べ、見解に反映させてください。**
-5. トリガミ（的中してもマイナス収支になる買い目）は完全に排除してください。
+1. 挨拶や前置きは一切不要。
+2. データ内の「純粋勝率」と「AIスコア」の分布を見て、そのレースが「堅い」か「波乱（混戦）」かを判定すること。
+3. 【堅いレースの場合】: 期待値が1.0未満（過剰人気）でも、勝率・スコアが他を圧倒している馬がいれば素直に本命（◎）とし、相手を極限まで絞って少点数で確実に的中を狙う。
+4. 【波乱レースの場合】: スコアが拮抗している場合は【🎯期待値】を最重要視し、過剰人気を切り、期待値1.0超えの美味しい穴馬を本命（◎）や穴（☆）に抜擢して高配当を狙う。
+5. 騎手データが「過去データなし(要検索)」の場合は、必ずWeb検索機能を利用して最新の実績や評判を調べ見解に反映する。
+6. いかなる戦略でも、トリガミ（的中してもマイナス）は完全に排除した買い目を構築する。
 
 出力フォーマット：
 ---
 ### 📊 1. 出走馬 期待値＆データ一覧
-（全出走馬の【馬番 / 馬名 / 騎手 / オッズ / 純粋勝率 / 期待値 / AIスコア】をきれいなMarkdownテーブルで出力）
+（Markdownテーブルで出力）
 
-### 🌪️ 2. レース展開＆バリュー分析
-* **馬場・展開:** （想定ペース）
-* **バリュー評価と騎手情報:** （過剰人気馬の指摘、美味しい穴馬の指摘。検索で補完した騎手情報があればここに記載）
+### 🌪️ 2. レース波乱度と展開分析
+* **【レース判定】:** 「堅実決着」または「波乱（混戦）」とその理由
+* **【展開・バリュー評価】:** （判定に基づいた過剰人気馬や狙い目の穴馬の指摘）
 
 ### 🎯 3. 勝ちぱかくんの印と詳細見解
-* **◎（本命）:** 〇番（馬名） - （期待値面での抜擢理由。騎手の手腕も加味すること）
-* **◯（対抗）:** 〇番（馬名） - （評価理由）
-* **▲（単穴）:** 〇番（馬名） - （逆転要素）
-* **△（連下）:** 〇番（馬名）、〇番（馬名） - （ヒモ候補）
-* **☆（穴馬）:** 〇番（馬名） - （高配当要素）
+* **◎（本命）:** 〇番（馬名） - （レース判定に基づいた抜擢理由）
+* **◯（対抗）:** 〇番（馬名）
+* **▲（単穴）:** 〇番（馬名）
+* **△（連下）:** 〇番（馬名）、〇番（馬名）
+* **☆（穴馬）:** 〇番（馬名）
 
 ### 💡 4. 戦略的・推奨買い目（トリガミ完全排除）
+* **【戦略】:** （堅いので少点数で絞る、混戦なので手広く買う等）
 * **単勝:** ◎ (1点)
-* **馬連:** ◎ － ◯, ▲, △, ☆ (4〜5点)
-* **ワイド:** ◎ － ◯, ▲, ☆ (3点)
-* **三連複 (軸1頭流し):** ◎ － ◯, ▲, △, ☆ (10点)
-* **三連単 (1着固定流し / 軸1頭マルチ):** 1着:◎ → 2・3着:◯, ▲, △, ☆ (12〜60点)
-* **【資金配分と狙い目】:** (トリガミを避けるための買い方アドバイス)
+* **馬連:** ◎ － ◯, ▲, △, ☆ (方針に合わせて点数を調整)
+* **ワイド:** ◎ － ◯, ▲, ☆ (方針に合わせて点数を調整)
+* **三連複:** ◎ － ◯, ▲, △, ☆ (方針に合わせて点数を調整)
+* **三連単:** 1着:◎ → 2・3着:◯, ▲, △, ☆ (方針に合わせて点数を調整)
 ---
 """
-            prompt = f"対象レース: {race_display_name}\n\n出走馬データ:\n{prompt_data}"
+            prompt = f"対象レース: {race_display_name}\n\n出走馬データ:\n{chr(10).join(table_summary)}"
 
-            with st.spinner("第1.5のAIが計算した期待値をもとに、GeminiがWeb検索も活用して買い目を構築中..."):
+            with st.spinner("第1.5のAIがレース波乱度を分析し、Gemini(PRO)が最適戦略を構築中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 try:
                     response = client.models.generate_content(
-                        model='gemini-2.5-flash',
+                        model='gemini-1.5-pro',
                         contents=prompt,
                         config=types.GenerateContentConfig(
                             system_instruction=system_instruction,
@@ -613,45 +541,25 @@ with tab_forecast:
                             tools=[{"googleSearch": {}}]
                         )
                     )
-                    
-                    res_text = response.text if response.text else ""
-                    if not res_text and response.candidates:
-                        for part in response.candidates[0].content.parts:
-                            if part.text:
-                                res_text += part.text
-                                
-                    if res_text:
-                        st.markdown(res_text)
-                    else:
-                        st.warning("⚠️ Geminiからの回答テキストを取得できませんでした。")
-                        
-                    st.success("📝 このレースの予想を実戦履歴に記録しました！")
-                except Exception as e:
-                    st.error(f"【APIエラー】: {e}")
+                    res_text = response.text if response.text else (response.candidates[0].content.parts[0].text if response.candidates else "")
+                    if res_text: st.markdown(res_text)
+                    else: st.warning("⚠️ 回答を取得できませんでした。")
+                    st.success("📝 実戦履歴に記録しました！")
+                except Exception as e: st.error(f"【APIエラー】: {e}")
 
 with tab_dashboard:
     st.subheader("📈 実戦成績（単・連・ワイ・3複・3単 総合ベース）")
-    if df_history.empty:
-        st.info("まだ予想履歴がありません。")
+    if df_history.empty: st.info("まだ予想履歴がありません。")
     else:
         finished_races = df_history[pd.to_numeric(df_history['result_pay'], errors='coerce').notna()]
-        total_races = len(finished_races)
-        waiting_races = len(df_history) - total_races
-        st.markdown(f"**結果判明レース**: {total_races} 件 （結果待ち: {waiting_races} 件）")
-        
-        if total_races > 0:
+        total = len(finished_races)
+        st.markdown(f"**結果判明レース**: {total} 件 （結果待ち: {len(df_history) - total} 件）")
+        if total > 0:
             hits = len(finished_races[finished_races['result_pay'].astype(float) > 0])
             returns = finished_races['result_pay'].astype(float).sum()
-            invested = total_races * 5000  # 三連単含むので1レース5000円計算に変更
-            hit_rate = (hits / total_races) * 100
-            recovery_rate = (returns / invested) * 100
-            profit = returns - invested
-            
+            invested = total * 5000
             col1, col2, col3 = st.columns(3)
-            col1.metric("🎯 レース的中率 (いずれか的中)", f"{hit_rate:.1f}%", f"{hits} / {total_races} 的中")
-            delta_color = "normal" if recovery_rate >= 100 else "inverse"
-            col2.metric("💰 総合回収率", f"{recovery_rate:.1f}%", f"{recovery_rate - 100:.1f}%", delta_color=delta_color)
-            col3.metric("💴 累計収支 (1レース5000円計算)", f"{int(profit):,} 円")
-            
-        st.markdown("---")
+            col1.metric("🎯 レース的中率", f"{(hits/total)*100:.1f}%", f"{hits} / {total} 的中")
+            col2.metric("💰 総合回収率", f"{(returns/invested)*100:.1f}%", delta_color="normal" if returns >= invested else "inverse")
+            col3.metric("💴 累計収支", f"{int(returns - invested):,} 円")
         st.dataframe(df_history[['date', 'race_name', 'honmei_umaban', 'partners', 'honmei_name', 'result_pay']].sort_values(by='date', ascending=False), use_container_width=True)
