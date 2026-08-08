@@ -383,7 +383,7 @@ with tab_forecast:
         date_options = sorted(df_future['day_label'].unique())
         selected_date = st.radio("開催日", date_options, horizontal=True, label_visibility="collapsed")
         
-        day_df = df_future[df_future['day_label'] == selected_date]
+        day_df = df_future[day_df['day_label'] == selected_date]
         places = day_df['place_name'].unique()
         
         place_tabs = st.tabs([f"🏇 {p}" for p in places])
@@ -429,17 +429,6 @@ with tab_forecast:
                 st.error("出走頭数が少ない、またはデータが不足しているため予想をスキップします。")
                 st.stop()
 
-            # 📊 AI全頭スコア＆勝率の画面表示（エラー回避のため標準表示）
-            st.markdown("### 📊 AI分析スコア＆勝率一覧")
-            display_df = scored_df.copy()
-            display_df['AI勝率'] = (display_df['win_prob'] * 100).round(1).astype(str) + "%"
-            display_df['過去上がり3F'] = display_df['last_3f'].apply(lambda x: f"{x:.1f}秒" if pd.notna(x) else "データなし")
-            
-            show_cols = ['馬番', '馬名', '騎手', 'score', 'AI勝率', '過去上がり3F']
-            show_cols = [c for c in show_cols if c in display_df.columns]
-            
-            st.dataframe(display_df[show_cols], use_container_width=True)
-
             honmei_row = scored_df.iloc[0]
             partners_df = scored_df.iloc[1:6]
             
@@ -460,46 +449,50 @@ with tab_forecast:
                 }])
                 df_history = pd.concat([df_history, new_record], ignore_index=True)
                 df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig')
-            
-            partner_details = [f"{row['馬番']}番({row['馬名']})" for _, row in partners_df.iterrows()]
-            partner_display_str = ", ".join(partner_details)
 
-            st.info(f"**【推奨 軸馬 (1頭)】**\n* ◎ {honmei_umaban}番 {honmei_name}")
-            st.warning(f"**【相手 (5頭)】**\n* {partner_display_str}")
-            st.success("**📝 買い目フォーマット (計21点 = 2,100円推奨):**\n"
-                       f"単勝: **{honmei_umaban}** (1点)\n"
-                       f"馬連・ワイド: **{honmei_umaban}** － **{', '.join(map(str, partner_nums))}** (各5点)\n"
-                       f"三連複: **{honmei_umaban}** － **{', '.join(map(str, partner_nums))}** (1頭軸流し 10点)")
-
+            # Geminiへのプロンプト設定
             table_summary = []
             for _, row in scored_df.iterrows():
                 last_3f_val = f"{row['last_3f']:.1f}" if pd.notna(row.get('last_3f')) else "データなし"
                 table_summary.append(
-                    f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | 騎手:{row.get('騎手', '不明')} | "
-                    f"score:{row['score']:3d} | AI勝率予想:{row['win_prob']*100:.1f}% | 過去上がり3F:{last_3f_val}秒"
+                    f"枠:{row.get('枠番','')} | 馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | 騎手:{row.get('騎手', '不明')} | "
+                    f"斤量:{row.get('斤量','')} | AI_score:{row['score']:3d} | 勝率予測:{row['win_prob']*100:.1f}% | 過去上がり3F:{last_3f_val}秒"
                 )
             prompt_data = "\n".join(table_summary)
 
             system_instruction = f"""
-あなたはプロの競馬分析AI「勝ちぱかくん」です。
-提供されたデータ（scoreおよび過去の上がり3F実績）を最優先基準とし、世間の単勝オッズや人気だけに流されず、純粋なデータ分析に基づいてシンプルに印と買い目のみを出力してください。
+あなたは競馬分析AI「勝ちぱかくん」です。
+Google Web検索をフル活用し、{race_display_name}の直前馬場状態、天候、オッズ傾向、騎手相性、展開予想をリアルタイム検索・分析してください。
+事前に計算されたAI指数（AI_score）をベースとしつつ、直前データや展開を加味して本格的な見解と戦略的な買い目を提示してください。
 
-1. Web検索を使用し、{race_display_name}の直前情報（馬場状態、天候など）を最終確認してください。
-2. 印ルール: score上位から【◎】【◯】【▲】【△】【☆】
-3. 長文解説は一切不要。結果と推奨買い目のみを出力。
+出力フォーマットは以下を厳密に守ってください。
 
-### 1. 【全頭 データ一覧】
-| 馬番 | 馬名 | 騎手 | score | AI勝率予想 | 平均上がり3F |
-### 2. 【勝ちぱかくんの印】
-◎：〇番（馬名）
-◯：〇番（馬名）
-▲：〇番（馬名）
-△：〇番（馬名）
-☆：〇番（馬名）
+---
+### 📊 1. 出走馬データ＆AI分析一覧
+（全出走馬の【枠 / 馬番 / 馬名 / 騎手 / AIスコア / 予想勝率】をきれいなMarkdownテーブルで出力してください）
+
+### 🌪️ 2. レース展開＆馬場・直前分析
+* **馬場・トラックバイアス:** （最新の馬場状態・内有利/外有利などを記述）
+* **展開予想:** （逃げ・先行馬の同型関係と想定ペースを記述）
+
+### 🎯 3. 勝ちぱかくんの印と詳細見解
+* **◎（本命）:** 〇番（馬名） - （なぜ本命なのか、強みやAIスコア根拠、展開上の利点を解説）
+* **◯（対抗）:** 〇番（馬名） - （対抗評価の理由）
+* **▲（単穴）:** 〇番（馬名） - （逆転要素や評価ポイント）
+* **△（連下）:** 〇番（馬名）、〇番（馬名） - （ヒモ候補としての理由）
+* **☆（穴馬）:** 〇番（馬名） - （高配当を狙える穴要素・展開利）
+
+### 💡 4. 戦略的・推奨買い目
+* **単勝:** ◎ (1点)
+* **馬連:** ◎ － ◯, ▲, △, ☆ (4〜5点)
+* **ワイド:** ◎ － ◯, ▲, ☆ (3点)
+* **三連複 (軸1頭流し):** ◎ － ◯, ▲, △, ☆ (6〜10点)
+* **【勝ちぱかポイント】:** (このレースで勝負する際の資金配分や狙い目のアドバイス)
+---
 """
-            prompt = f"以下のレース（ID: {target_id}、{race_display_name}）の出走馬データです。\n{prompt_data}"
+            prompt = f"以下のレース（ID: {target_id}、{race_display_name}）の基本データです。Web検索を行って直前情報を取り込み、上記フォーマットに沿って分析・出力してください。\n\n{prompt_data}"
 
-            with st.spinner("最新リアルタイム情報とあわせて解析中..."):
+            with st.spinner("最新の直前情報（馬場・天候・オッズ）を検索・多角分析中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 try:
                     response = client.models.generate_content(
