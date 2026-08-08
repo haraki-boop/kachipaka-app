@@ -383,7 +383,7 @@ with tab_forecast:
         date_options = sorted(df_future['day_label'].unique())
         selected_date = st.radio("開催日", date_options, horizontal=True, label_visibility="collapsed")
         
-        day_df = df_future[day_df['day_label'] == selected_date]
+        day_df = df_future[df_future['day_label'] == selected_date]
         places = day_df['place_name'].unique()
         
         place_tabs = st.tabs([f"🏇 {p}" for p in places])
