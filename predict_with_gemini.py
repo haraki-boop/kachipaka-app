@@ -223,67 +223,69 @@ if st.sidebar.button("🌐 出馬表を自動取得する", use_container_width=
 st.sidebar.markdown("---")
 st.sidebar.header("🏁 実戦結果の検証")
 if st.sidebar.button("🏆 終了したレースの配当を取得", use_container_width=True):
-    with st.spinner("🏁 実際の着順と全券種の配当を計算中..."):
+    with st.spinner("🏁 実際の着順と全券種の配当をリアルタイム検索中..."):
         if not df_history.empty:
             updated = False
             headers = {"User-Agent": "Mozilla/5.0"}
             for idx, row in df_history.iterrows():
                 if pd.isna(row['result_pay']) or str(row['result_pay']).strip() == "":
                     try:
-                        res = requests.get(f"https://db.netkeiba.com/race/{str(row['race_id'])}/", headers=headers, timeout=5)
-                        res.encoding = 'utf-8'
-                        soup = BeautifulSoup(res.text, "html.parser")
-                        
                         axis = str(int(row['honmei_umaban']))
                         partners = [str(int(p.strip())) for p in str(row.get('partners', '')).split(',') if p.strip().isdigit()]
                         
-                        rt = soup.find("table", class_="race_table_01")
-                        r1, r2, r3 = None, None, None
-                        if rt:
-                            rows = rt.find_all("tr")[1:]
-                            ranks = [r.find_all("td")[2].text.strip() for r in rows if r.find_all("td")[0].text.strip().isdigit()]
-                            if len(ranks) >= 3:
-                                r1, r2, r3 = ranks[0], ranks[1], ranks[2]
-
-                        if not r1: continue
-                        top3 = {r1, r2, r3}
-                        top2 = {r1, r2}
-                        
-                        hit_tansho = (axis == r1)
-                        hit_umaren = (axis in top2) and any(p in top2 for p in partners)
-                        hit_sanrenpuku = (axis in top3) and (len([p for p in partners if p in top3]) >= 2)
-                        
+                        payout_found = False
                         total_payout = 0
-                        for table in soup.find_all("table", summary="払い戻し"):
-                            for tr in table.find_all("tr"):
+                        
+                        # 直近レース(race.netkeiba)と過去DB(db.netkeiba)の両方をチェックして速報にも対応
+                        for url in [f"https://race.netkeiba.com/race/result.html?race_id={str(row['race_id'])}", f"https://db.netkeiba.com/race/{str(row['race_id'])}/"]:
+                            res = requests.get(url, headers=headers, timeout=5)
+                            res.encoding = 'EUC-JP' if 'db.netkeiba' in url else 'utf-8'
+                            soup = BeautifulSoup(res.text, "html.parser")
+                            
+                            for tr in soup.find_all("tr"):
                                 th = tr.find("th")
                                 if not th: continue
                                 kind = th.text.strip()
+                                if kind not in ["単勝", "馬連", "ワイド", "三連複", "三連単"]: continue
+                                
                                 tds = tr.find_all("td")
                                 if len(tds) < 2: continue
                                 
-                                win_texts = tds[0].get_text(separator=" ").split()
-                                amt_texts = tds[1].get_text(separator=" ").replace(',', '').replace('円', '').split()
+                                payout_found = True
                                 
-                                if kind == "単勝" and hit_tansho:
-                                    for w, a in zip(win_texts, amt_texts):
-                                        if w == axis: total_payout += int(a)
-                                elif kind == "馬連" and hit_umaren:
-                                    for w, a in zip(win_texts, amt_texts):
-                                        w_set = set(w.split('-'))
-                                        if axis in w_set and any(p in w_set for p in partners): total_payout += int(a)
-                                elif kind == "ワイド":
-                                    for w, a in zip(win_texts, amt_texts):
-                                        w_set = set(w.split('-'))
-                                        if axis in w_set and any(p in w_set for p in partners):
-                                            if w_set.issubset(top3): total_payout += int(a)
-                                elif kind == "三連複" and hit_sanrenpuku:
-                                    for w, a in zip(win_texts, amt_texts):
-                                        w_set = set(w.split('-'))
-                                        if axis in w_set and len(w_set.intersection(set(partners))) >= 2: total_payout += int(a)
-
-                        df_history.at[idx, 'result_pay'] = total_payout
-                        updated = True
+                                # HTMLのリスト構造を改行に変換してパースを完全安定化
+                                for br in tds[0].find_all('br'): br.replace_with('\n')
+                                for ul in tds[0].find_all('ul'): ul.insert_after('\n')
+                                for div in tds[0].find_all('div'): div.insert_after('\n')
+                                
+                                for br in tds[1].find_all('br'): br.replace_with('\n')
+                                for ul in tds[1].find_all('ul'): ul.insert_after('\n')
+                                for div in tds[1].find_all('div'): div.insert_after('\n')
+                                
+                                win_lines = [re.sub(r'\s+', '', line) for line in tds[0].get_text().split('\n') if line.strip()]
+                                amt_lines = [re.sub(r'\D', '', line) for line in tds[1].get_text().split('\n') if line.strip()]
+                                
+                                for w_str, a_str in zip(win_lines, amt_lines):
+                                    if not a_str.isdigit(): continue
+                                    amt = int(a_str)
+                                    # ハイフンや矢印で数字を分割（10-05や10→05）
+                                    w_nums = [str(int(n)) for n in re.split(r'[-→=]', w_str) if n.isdigit()]
+                                    
+                                    if kind == "単勝" and len(w_nums) == 1:
+                                        if w_nums[0] == axis: total_payout += amt
+                                    elif kind == "馬連" and len(w_nums) == 2:
+                                        if axis in w_nums and any(p in w_nums for p in partners): total_payout += amt
+                                    elif kind == "ワイド" and len(w_nums) == 2:
+                                        if axis in w_nums and any(p in w_nums for p in partners): total_payout += amt
+                                    elif kind == "三連複" and len(w_nums) == 3:
+                                        if axis in w_nums and len(set(w_nums).intersection(set(partners))) >= 2: total_payout += amt
+                                    elif kind == "三連単" and len(w_nums) == 3:
+                                        if axis in w_nums and len(set(w_nums).intersection(set(partners))) >= 2: total_payout += amt
+                            
+                            if payout_found:
+                                df_history.at[idx, 'result_pay'] = total_payout
+                                updated = True
+                                break # 1つのURLで結果が取れたらループを抜ける
                     except Exception: pass
                     time.sleep(1)
             if updated: df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig', errors='replace')
@@ -340,19 +342,15 @@ def calculate_race_scores(race_id_target, target_df):
     if 'sex_code' in race_df.columns and race_df['sex_code'].dtype == object:
         race_df['sex_code'] = race_df['sex_code'].map({'牡': 0, '牝': 1, 'セ': 2}).fillna(0)
 
-    # =============== 🚨 修正箇所 🚨 ===============
-    # 欠損値（NaN）を0ではなく、平均値で埋めることでAIのバグ暴走を防止
+    # 欠損値を平均値で埋めることでAIのバグ暴走を防止
     X = race_df[features].copy()
     X = X.apply(pd.to_numeric, errors='coerce')
     if '単勝' in X.columns: X['単勝'] = X['単勝'].fillna(10.0)
     if '人気' in X.columns: X['人気'] = X['人気'].fillna(5.0)
     
-    # 欠損値を列ごとの平均値で補完
     X = X.fillna(X.mean())
-    # 平均も取れない場合（全データ空など）の安全対策
     if 'time_seconds' in X.columns: X['time_seconds'] = X['time_seconds'].fillna(100.0)
     X = X.fillna(0)
-    # ==============================================
 
     try:
         if hasattr(model, "predict_proba"):
@@ -543,7 +541,7 @@ with tab_dashboard:
         if total_races > 0:
             hits = len(finished_races[finished_races['result_pay'].astype(float) > 0])
             returns = finished_races['result_pay'].astype(float).sum()
-            invested = total_races * 2100
+            invested = total_races * 5000  # 三連単含むので1レース5000円計算に変更
             hit_rate = (hits / total_races) * 100
             recovery_rate = (returns / invested) * 100
             profit = returns - invested
@@ -552,7 +550,7 @@ with tab_dashboard:
             col1.metric("🎯 レース的中率 (いずれか的中)", f"{hit_rate:.1f}%", f"{hits} / {total_races} 的中")
             delta_color = "normal" if recovery_rate >= 100 else "inverse"
             col2.metric("💰 総合回収率", f"{recovery_rate:.1f}%", f"{recovery_rate - 100:.1f}%", delta_color=delta_color)
-            col3.metric("💴 累計収支 (1点100円計算)", f"{int(profit):,} 円")
+            col3.metric("💴 累計収支 (1レース5000円計算)", f"{int(profit):,} 円")
             
         st.markdown("---")
         st.dataframe(df_history[['date', 'race_name', 'honmei_umaban', 'partners', 'honmei_name', 'result_pay']].sort_values(by='date', ascending=False), use_container_width=True)
