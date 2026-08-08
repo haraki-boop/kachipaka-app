@@ -497,11 +497,12 @@ with tab_forecast:
 """
             prompt = f"対象レース: {race_display_name}\n\n出走馬データ:\n{chr(10).join(table_summary)}"
 
-            with st.spinner("AIがレース波乱度を分析し、Geminiが最適戦略を構築中..."):
+            with st.spinner("AIがレース波乱度を分析し、Gemini(3.6 Flash)が最適戦略を構築中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 try:
+                    # 利用可能モデル内で最も高速かつ高精度な gemini-3.6-flash を指定
                     response = client.models.generate_content(
-                        model='gemini-1.5-pro-latest',
+                        model='gemini-3.6-flash',
                         contents=prompt,
                         config=types.GenerateContentConfig(
                             system_instruction=system_instruction,
