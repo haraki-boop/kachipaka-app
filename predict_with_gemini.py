@@ -139,7 +139,7 @@ def run_scraper(p_text, p_bar):
         time.sleep(1)
 
     if not all_race_ids:
-        st.sidebar.error(f"❌ レースIDが1件も見つかりませんでした。\n検索した日付: {target_dates}\n（netkeibaの仕様変更か、対象日のレース情報がまだ公開されていません）")
+        st.sidebar.error(f"❌ レースIDが1件も見つかりませんでした。")
         return False
 
     race_data_list = []
@@ -206,12 +206,10 @@ def run_scraper(p_text, p_bar):
         except: pass
 
     if race_data_list:
+        # 余計なGit処理を外し、確実にローカルにCSVを保存する元の仕様に戻しました
         pd.DataFrame(race_data_list).to_csv(FUTURE_CSV, index=False, encoding='utf-8-sig')
-        st.sidebar.info(f"✅ {len(race_data_list)}頭のデータを抽出・保存しました。")
         return True
-    else:
-        st.sidebar.error("❌ レースIDは見つかりましたが、出馬表データが1件も抽出できませんでした。")
-        return False
+    return False
 
 # ==========================================
 # サイドバー UI
@@ -228,29 +226,17 @@ if st.sidebar.button("🌐 出馬表を自動取得する", use_container_width=
     with st.spinner("出馬表データを取得しています..."):
         p_text = st.sidebar.empty()
         p_bar = st.sidebar.progress(0)
-        
-        try:
-            with open(FUTURE_CSV, 'a'): pass
-        except PermissionError:
-            st.sidebar.error("❌ future_races.csv がExcel等で開かれています。閉じてから再度お試しください。")
-            st.stop()
-
         try:
             success = run_scraper(p_text, p_bar)
             if success:
-                try:
-                    subprocess.run(["git", "add", FUTURE_CSV], check=True, capture_output=True)
-                    subprocess.run(["git", "commit", "-m", "Auto-update future_races.csv"], check=True, capture_output=True)
-                    subprocess.run(["git", "push"], check=True, capture_output=True)
-                except Exception as git_e:
-                    st.sidebar.warning(f"⚠️ ファイルは保存されましたが、Gitへの送信はスキップされました。")
-                
                 st.cache_data.clear()
-                st.sidebar.success(f"✅ 出馬表を取得・上書きしました！（保存先: {os.path.abspath(FUTURE_CSV)}）")
-                time.sleep(2.0)
+                st.sidebar.success(f"✅ 出馬表を取得・保存しました！")
+                time.sleep(1.5)
                 st.rerun()
+            else:
+                st.sidebar.error("❌ データが取得できませんでした。")
         except Exception as e:
-            st.sidebar.error(f"❌ スクレイピング中に致命的なエラーが発生しました: {e}")
+            st.sidebar.error(f"❌ エラーが発生しました: {e}")
 
 st.sidebar.markdown("---")
 st.sidebar.header("🏁 実戦結果の検証")
@@ -358,14 +344,11 @@ def calculate_race_scores(race_id_target, target_df):
         race_df = pd.merge(race_df, j_stats, on='騎手', how='left')
         
         if 'place_code' in race_df.columns and 'place_code' in df_past.columns:
-            # 💡 型の不一致エラーを防ぐために文字列に統一
             race_df['place_code'] = race_df['place_code'].astype(str)
             df_past['place_code'] = df_past['place_code'].astype(str)
-            
             jp_stats = df_past.groupby(['騎手', 'place_code'])['is_win'].mean().reset_index()
             jp_stats.rename(columns={'is_win': 'jockey_track_win_rate'}, inplace=True)
             jp_stats['place_code'] = jp_stats['place_code'].astype(str)
-            
             race_df = pd.merge(race_df, jp_stats, on=['騎手', 'place_code'], how='left')
         else:
             race_df['jockey_track_win_rate'] = race_df['jockey_win_rate']
@@ -400,16 +383,28 @@ def calculate_race_scores(race_id_target, target_df):
 
     return race_df.sort_values(by='score', ascending=False).reset_index(drop=True)
 
+# 💡 ボタンを一目で【穴】か【堅】かわかるように修正
 def get_all_markers():
     markers = {}
     if df_future.empty: return markers
     for rid in df_future['race_id'].unique():
         sdf = calculate_race_scores(rid, df_future)
-        if sdf is not None and len(sdf) >= 6:
+        if sdf is not None and len(sdf) >= 5:
             sc = sdf['score'].tolist()
-            if sc[0] >= 108 and (sc[0] - sc[1]) >= 4: markers[rid] = "★"
-            elif (sc[0] - sc[4]) <= 5: markers[rid] = "◎"
-            else: markers[rid] = ""
+            
+            # 堅い vs 穴の判定ロジック
+            if sc[0] >= 105 and (sc[0] - sc[2]) >= 10:
+                race_type = "【堅】"
+            elif (sc[0] - sc[4]) <= 7:
+                race_type = "【穴】"
+            else:
+                race_type = "【普】"
+
+            if sc[0] >= 108 and (sc[0] - sc[1]) >= 4: mark = "★"
+            elif (sc[0] - sc[4]) <= 5: mark = "◎"
+            else: mark = ""
+            
+            markers[rid] = f"{race_type} {mark}".strip()
     return markers
 markers = get_all_markers()
 
@@ -440,13 +435,12 @@ with tab_forecast:
                     mark = markers.get(rid, "")
                     
                     label = f"{r}R {mark}".strip()
-                    if rname: label = f"{r}R {rname[:7]}… {mark}".strip()
+                    if rname: label = f"{r}R {rname[:5]}… {mark}".strip()
                         
-                    btn_type = "primary" if "★" in mark else "secondary"
+                    btn_type = "primary" if "【堅】" in mark or "★" in mark else "secondary"
                     if col.button(label, key=f"btn_{rid}", use_container_width=True, type=btn_type):
                         st.session_state['selected_race_id'] = rid
 
-    # 💡 データの空エラーを防ぐ安全装置を追加
     if st.session_state['selected_race_id'] and not df_future.empty and 'race_id' in df_future.columns:
         st.markdown("---")
         target_id = st.session_state['selected_race_id']
@@ -475,11 +469,6 @@ with tab_forecast:
                 new_record = pd.DataFrame([{'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'race_id': str(target_id), 'race_name': race_display_name, 'honmei_umaban': honmei_umaban, 'partners': partners_str, 'honmei_name': honmei_name, 'result_pay': ""}])
                 df_history = pd.concat([df_history, new_record], ignore_index=True)
                 df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig')
-                try:
-                    subprocess.run(["git", "add", HISTORY_CSV], check=True, capture_output=True)
-                    subprocess.run(["git", "commit", "-m", "Auto-update history"], check=True, capture_output=True)
-                    subprocess.run(["git", "push"], check=True, capture_output=True)
-                except: pass
 
             table_summary = []
             for _, row in scored_df.iterrows():
@@ -497,6 +486,7 @@ with tab_forecast:
                     f"AIスコア:{row['score']:3d}"
                 )
 
+            # 💡 【重要】最強の二刀流ロジック（穴と堅実のバランス）に完全復元
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」です。以下の絶対ルールに従い、レースの性質を読み切り最適な馬券戦略を遂行してください。
 
@@ -535,11 +525,12 @@ with tab_forecast:
 """
             prompt = f"対象レース: {race_display_name}\n\n出走馬データ:\n{chr(10).join(table_summary)}"
 
-            with st.spinner("第1.5のAIがレース波乱度を分析し、Gemini(PRO)が最適戦略を構築中..."):
+            with st.spinner("AIがレース波乱度を分析し、Geminiが最適戦略を構築中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 try:
+                    # 💡 APIエラー修正（gemini-1.5-pro-latestに変更）
                     response = client.models.generate_content(
-                        model='gemini-1.5-pro',
+                        model='gemini-1.5-pro-latest',
                         contents=prompt,
                         config=types.GenerateContentConfig(
                             system_instruction=system_instruction,
