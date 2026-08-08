@@ -441,7 +441,7 @@ with tab_forecast:
                     if col.button(label, key=f"btn_{rid}", use_container_width=True, type=btn_type):
                         st.session_state['selected_race_id'] = rid
 
-    if st.session_state['selected_race_id']:
+    if st.session_state['selected_race_id'] and not df_future.empty and 'race_id' in df_future.columns:
         st.markdown("---")
         target_id = st.session_state['selected_race_id']
         target_race_info = df_future[df_future['race_id'] == target_id].iloc[0]
