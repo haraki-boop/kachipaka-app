@@ -119,8 +119,6 @@ def get_target_dates():
 def clean_text(text):
     return re.sub(r'\s+', ' ', re.sub(r'[\r\n\t]+', ' ', text)).strip() if text else ""
 
-# 🚨 G1/G2/G3の判定・付与ロジックを完全削除しました 🚨
-
 def run_scraper(p_text, p_bar):
     target_dates = get_target_dates()
     all_race_ids, id_to_date = [], {}
@@ -160,7 +158,6 @@ def run_scraper(p_text, p_bar):
                 d_str = id_to_date.get(race_id, "")
                 display_date = f"{datetime.strptime(d_str, '%Y%m%d').month}月{datetime.strptime(d_str, '%Y%m%d').day}日({weekdays[datetime.strptime(d_str, '%Y%m%d').weekday()]})" if d_str else "不明"
                 
-                # 🚨 単純なレース名のみを取得するように変更 🚨
                 r_name_elem = soup.find(class_="RaceName") or soup.find(class_="RaceList_Item02")
                 if r_name_elem:
                     main_name_span = r_name_elem.find("span", class_="RaceName_main")
@@ -295,13 +292,12 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
         time.sleep(1.5)
         st.rerun()
 
-# 🚨 【完全強制消去】: ゴミファイル自体を物理的に抹消する
 st.sidebar.markdown("---")
 st.sidebar.header("🗑️ 履歴の完全リセット")
 if st.sidebar.button("💥 ゴミ予想履歴を完全消去", type="primary", use_container_width=True):
     try:
         if os.path.exists(HISTORY_CSV):
-            os.remove(HISTORY_CSV) # ファイルそのものを破壊・消去
+            os.remove(HISTORY_CSV)
         st.cache_data.clear()
         st.sidebar.success("✅ 履歴データを物理的に完全消去しました！")
         time.sleep(1.5)
@@ -470,7 +466,7 @@ with tab_forecast:
 【絶対遵守事項】
 1. 前置き、挨拶、謝罪、日付やレース名に関する言い訳、検索に関するコメントは一切禁止します。直ちに下記のフォーマット通り出力してください。
 2. 提供された【出走馬データ＆AI_score】を絶対的な分析根拠としてください。
-3. 印（◎◯▲△☆）と見解、推奨買い目を明確に記述してください。
+3. 印（◎◯▲△☆）と見解、推奨買い目（三連単を含む）を明確に記述してください。
 
 出力フォーマット：
 ---
@@ -492,8 +488,9 @@ with tab_forecast:
 * **単勝:** ◎ (1点)
 * **馬連:** ◎ － ◯, ▲, △, ☆ (4〜5点)
 * **ワイド:** ◎ － ◯, ▲, ☆ (3点)
-* **三連複 (軸1頭流し):** ◎ － ◯, ▲, △, ☆ (6〜10点)
-* **【勝ちぱかポイント】:** (資金配分や狙い目のアドバイス)
+* **三連複 (軸1頭流し):** ◎ － ◯, ▲, △, ☆ (10点)
+* **三連単 (1着固定流し / 軸1頭マルチ):** 1着:◎ → 2・3着:◯, ▲, △, ☆ (12〜60点)
+* **【勝ちぱかポイント】:** (資金配分や高配当狙いのポイント)
 ---
 """
             prompt = f"対象レース: {race_display_name}\n\n出走馬データ:\n{prompt_data}"
@@ -526,7 +523,7 @@ with tab_forecast:
                     st.error(f"【APIエラー】: {e}")
 
 with tab_dashboard:
-    st.subheader("📈 実戦成績（単・連・ワイ・3複 総合ベース）")
+    st.subheader("📈 実戦成績（単・連・ワイ・3複・3単 総合ベース）")
     if df_history.empty:
         st.info("まだ予想履歴がありません。")
     else:
