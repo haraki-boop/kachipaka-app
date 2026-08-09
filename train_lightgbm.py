@@ -18,11 +18,14 @@ def main():
     except:
         df = pd.read_csv(INPUT_CSV, low_memory=False, encoding='cp932')
 
-    if '着順' not in df.columns:
-        print("Error: Target variable '着順' not found.")
-        return
+    if 'is_win' not in df.columns:
+        if '着順' in df.columns:
+            df['is_win'] = (pd.to_numeric(df['着順'], errors='coerce') == 1).astype(int)
+        else:
+            print("Error: Target variable not found.")
+            return
 
-    # オッズと人気を学習項目から完全排除
+    # 特徴量（オッズや人気は含まず、純粋な能力指標のみで1着確率を二値分類する）
     features = [
         '馬番', '斤量', 'my_time_idx', 'my_last3f_idx', 
         'my_pace_idx', 'my_start_idx', 'jockey_win_power'
@@ -34,9 +37,9 @@ def main():
     use_features = [f for f in features if f in df.columns]
     print(f"Selected Features: {use_features}")
 
-    df_clean = df.dropna(subset=use_features + ['着順']).copy()
+    df_clean = df.dropna(subset=use_features + ['is_win']).copy()
     X = df_clean[use_features].apply(pd.to_numeric, errors='coerce').fillna(0)
-    y = df_clean['着順'] # 着順予測(Regression)に変更
+    y = df_clean['is_win']
 
     if len(X) < 100:
         print("Error: Not enough data for training.")
@@ -46,10 +49,10 @@ def main():
     
     train_data = lgb.Dataset(X, label=y)
     params = {
-        'objective': 'regression', # 回帰問題
-        'metric': 'rmse',
+        'objective': 'binary',
+        'metric': 'binary_logloss',
         'boosting_type': 'gbdt',
-        'learning_rate': 0.05,
+        'learning_rate': 0.03,
         'num_leaves': 31,
         'verbose': -1,
         'seed': 42
@@ -58,7 +61,7 @@ def main():
     model = lgb.train(
         params, 
         train_data, 
-        num_boost_round=150
+        num_boost_round=100
     )
 
     save_data = {'model': model, 'features': use_features}
