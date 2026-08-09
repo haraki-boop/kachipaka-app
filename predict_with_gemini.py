@@ -264,8 +264,6 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                         for tr in soup.find_all("tr"):
                             th = tr.find("th")
                             if not th: continue
-                            
-                            # 【重要修正】3連複・3連単の表記ブレを統一して拾い上げる
                             kind = th.text.strip().replace("3連", "三連")
                             if kind not in payouts: continue
                             
@@ -303,11 +301,9 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                                     if axis in w_nums[:2] and any(p in w_nums[:2] for p in partners):
                                         payouts['ワイド'] += amt
                                 elif kind == "三連複" and len(w_nums) >= 3:
-                                    # 三連複は◎1頭軸流し
                                     if axis in w_nums[:3] and len(set(w_nums[:3]).intersection(set(partners))) >= 2:
                                         payouts['三連複'] += amt
                                 elif kind == "三連単" and len(w_nums) >= 3:
-                                    # 【重要修正】三連単は◎・◯の2頭軸マルチとして厳密に判定
                                     if len(partners) >= 2 and axis in w_nums[:3] and partners[0] in w_nums[:3]:
                                         if len(set(w_nums[:3]).intersection(set(partners))) >= 2:
                                             payouts['三連単'] += amt
@@ -413,9 +409,9 @@ def calculate_race_scores(race_id_target, target_df):
     s = prob.sum()
     race_df['win_prob'] = prob / s if s > 0 else 1.0 / len(race_df)
     
-    mp = race_df['win_prob'].mean()
-    rs = 100 + ((race_df['win_prob'] - mp) / mp) * 35 if mp > 0 else 100
-    race_df['score'] = np.clip(rs, 50, 120).round().astype(int)
+    # 【最重要修正】スコアの上限を150点に引き上げ、純粋な勝率からスコアを計算（同点を完全に防止）
+    rs = 40 + (race_df['win_prob'] * 400)
+    race_df['score'] = np.clip(rs, 30, 150).round().astype(int)
 
     if '人気' in race_df.columns:
         race_df['人気_sort'] = pd.to_numeric(race_df['人気'], errors='coerce').fillna(999)
@@ -423,6 +419,7 @@ def calculate_race_scores(race_id_target, target_df):
     
     return race_df.sort_values(by='score', ascending=False).reset_index(drop=True)
 
+# 【修正】バラけた点数に合わせてマーカー判定（【堅】【普】【穴】）のしきい値を調整
 def get_all_markers():
     markers = {}
     if df_future.empty: return markers
@@ -435,16 +432,19 @@ def get_all_markers():
             top3_diff = sc[0] - sc[2]
             top5_diff = sc[0] - sc[4]
 
-            if sc[0] >= 110 and (top_diff >= 6 or top3_diff >= 12):
+            # 1位が110点以上で、2位と18点以上離れているか、3位と30点以上離れていれば【堅】
+            if sc[0] >= 110 and (top_diff >= 18 or top3_diff >= 30):
                 race_type = "【堅】"
-            elif top5_diff <= 8 or top_diff <= 1:
+            # 1位の点数が低すぎるか、1〜5位までが団子状態なら【穴】
+            elif sc[0] < 95 or (top_diff <= 7 and top5_diff <= 25):
                 race_type = "【穴】"
+            # それ以外はすべて【普】
             else:
                 race_type = "【普】"
 
-            if sc[0] >= 115 and top_diff >= 5:
+            if sc[0] >= 115 and top_diff >= 15:
                 mark = "★"
-            elif top5_diff <= 5:
+            elif top5_diff <= 10:
                 mark = "◎"
             else:
                 mark = ""
