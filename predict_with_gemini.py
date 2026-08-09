@@ -345,7 +345,6 @@ def calculate_race_scores(race_id_target, target_df):
         
         horse_stats = df_past.groupby('馬名').agg(agg_dict).reset_index()
         
-        # 【修正】AIが勉強した時の名前と完全に一致させる
         new_cols = ['馬名', 'total_wins', 'total_runs']
         if 'my_time_idx' in df_past.columns: new_cols.append('my_time_idx')
         if 'my_last3f_idx' in df_past.columns: new_cols.append('my_last3f_idx')
@@ -362,7 +361,6 @@ def calculate_race_scores(race_id_target, target_df):
     else:
         race_df['jockey_win_power'] = 0.0
 
-    # 【修正】データがない馬（初出走など）を0ではなく平均値50で補完する
     for f in features:
         if f not in race_df.columns:
             race_df[f] = 50.0 if 'idx' in f else 0.0
@@ -399,7 +397,6 @@ def calculate_race_scores(race_id_target, target_df):
     rs = 100 + ((race_df['win_prob'] - mp) / mp) * 35 if mp > 0 else 100
     race_df['score'] = np.clip(rs, 50, 120).round().astype(int)
 
-    # 【修正】同点スコアになった場合のタイブレーカー（人気）を追加
     if '人気' in race_df.columns:
         race_df['人気_sort'] = pd.to_numeric(race_df['人気'], errors='coerce').fillna(999)
         return race_df.sort_values(by=['score', '人気_sort'], ascending=[False, True]).reset_index(drop=True)
@@ -532,7 +529,9 @@ with tab_forecast:
 出力フォーマット：
 ---
 ### 📊 1. 出走馬 期待値＆データ一覧
-（Markdownテーブルで出力してください。絶対にコードブロック「```」で囲まないでください。）
+（※提供データを元に、必ず以下のカラム構成のMarkdownテーブルを出力してください。「評価」カラムには印（◎◯▲△☆）とシンプルな一言（例：能力上位、展開有利など）のみを記載し、過激な煽り文句は絶対に使用しないでください。絶対にコードブロック「```」で囲まないこと）
+| 馬番 | 馬名 | 騎手 | 推定オッズ | 純粋勝率 | 🎯期待値 | AIスコア | 評価 |
+|:---:|:---|:---|:---:|:---:|:---:|:---:|:---|
 
 ### 🌪️ 2. レース波乱度と展開分析
 * **【レース判定】:** 「堅実決着」または「波乱（混戦）」とその理由
@@ -564,7 +563,7 @@ with tab_forecast:
                         contents=prompt,
                         config=types.GenerateContentConfig(
                             system_instruction=system_instruction,
-                            temperature=0.7,
+                            temperature=0.0,
                             tools=[{"googleSearch": {}}]
                         )
                     )
@@ -589,7 +588,6 @@ with tab_dashboard:
             invested = 0
             for _, r in finished_races.iterrows():
                 p_len = len([x for x in str(r.get('partners', '')).split(',') if x.strip().isdigit()])
-                # 単勝(1) + 馬連(p_len) + ワイド(p_len) + 三連複(p_len*(p_len-1)/2) + 三連単2頭軸マルチ(6*(p_len-1))
                 pts = 1 + p_len + p_len + (p_len * (p_len - 1) / 2) + (6 * (p_len - 1)) if p_len >= 2 else 0
                 invested += pts * 100
                 
