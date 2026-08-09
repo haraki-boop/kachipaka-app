@@ -1,15 +1,13 @@
 import os
 import re
 import time
-import random
 import requests
-import json
 import pandas as pd
 import numpy as np
 import joblib
 import streamlit as st
 from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
+from datetime import datetime
 from google import genai
 from google.genai import types
 
@@ -54,12 +52,16 @@ def load_model():
 def load_past_data():
     if os.path.exists(ML_TARGET_CSV) and os.path.getsize(ML_TARGET_CSV) > 0:
         try:
-            return pd.read_csv(ML_TARGET_CSV, low_memory=False, dtype={'race_id': str}, encoding='utf-8-sig')
+            df = pd.read_csv(ML_TARGET_CSV, low_memory=False, dtype={'race_id': str}, encoding='utf-8-sig')
         except Exception:
             try:
-                return pd.read_csv(ML_TARGET_CSV, low_memory=False, dtype={'race_id': str}, encoding='cp932')
+                df = pd.read_csv(ML_TARGET_CSV, low_memory=False, dtype={'race_id': str}, encoding='cp932')
             except Exception:
-                pass
+                return pd.DataFrame()
+        # 日付でソートして、最新のレースデータを後方に持ってくる
+        if 'date' in df.columns:
+            df = df.sort_values(by='date')
+        return df
     return pd.DataFrame()
 
 def load_future_data():
@@ -226,38 +228,27 @@ def calculate_race_scores(race_id_target, target_df):
     features = model_data.get('features', [])
     model = model_data.get('model')
 
+    # 【第1の脳の完全復活】過去データの「生涯平均」をやめ、最新(直近)の指数・着順をマージする
     if not df_past.empty and '馬名' in df_past.columns:
-        df_past['is_win'] = (pd.to_numeric(df_past['着順'], errors='coerce') == 1).astype(int)
-        agg_dict = {'is_win': ['sum', 'count']}
-        if 'my_time_idx' in df_past.columns: agg_dict['my_time_idx'] = 'mean'
-        if 'my_last3f_idx' in df_past.columns: agg_dict['my_last3f_idx'] = 'mean'
+        # 馬名ごとに最も新しいデータを1行だけ残す（日付けでソート済み前提）
+        latest_past = df_past.drop_duplicates(subset=['馬名'], keep='last').copy()
         
-        horse_stats = df_past.groupby('馬名').agg(agg_dict).reset_index()
-        new_cols = ['馬名', 'total_wins', 'total_runs']
-        if 'my_time_idx' in df_past.columns: new_cols.append('my_time_idx')
-        if 'my_last3f_idx' in df_past.columns: new_cols.append('my_last3f_idx')
-        horse_stats.columns = new_cols
-        race_df = pd.merge(race_df, horse_stats, on='馬名', how='left')
+        # 出馬表(race_df)に存在しない過去特徴量カラムのみを結合
+        cols_to_merge = [c for c in latest_past.columns if c not in race_df.columns or c == '馬名']
+        race_df = pd.merge(race_df, latest_past[cols_to_merge], on='馬名', how='left')
 
-    if not df_past.empty and '騎手' in df_past.columns:
-        j_stats = df_past.groupby('騎手')['is_win'].mean().reset_index()
-        j_stats.rename(columns={'is_win': 'jockey_win_power'}, inplace=True)
-        race_df = pd.merge(race_df, j_stats, on='騎手', how='left')
-    else:
-        race_df['jockey_win_power'] = 0.0
-
+    # 特徴量の欠損補完（指数等は50点、その他は0で埋める）
     for f in features:
         if f not in race_df.columns:
-            race_df[f] = 50.0 if 'idx' in f else 0.0
+            race_df[f] = 50.0 if 'idx' in f or '指数' in f else 0.0
             
-    if 'my_time_idx' in race_df.columns: race_df['my_time_idx'] = race_df['my_time_idx'].fillna(50.0)
-    if 'my_last3f_idx' in race_df.columns: race_df['my_last3f_idx'] = race_df['my_last3f_idx'].fillna(50.0)
-    if 'jockey_win_power' in race_df.columns: race_df['jockey_win_power'] = race_df['jockey_win_power'].fillna(0.0)
     if 'sex_code' in race_df.columns and race_df['sex_code'].dtype == object:
         race_df['sex_code'] = race_df['sex_code'].map({'牡': 0, '牝': 1, 'セ': 2}).fillna(0)
         
     X = race_df[features].copy()
-    X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
+    
+    # タイムや着順などの文字列を含む可能性のあるデータを強制的に数値化
+    X = X.apply(lambda x: pd.to_numeric(x, errors='coerce')).fillna(50.0)
 
     try:
         if hasattr(model, "predict_proba"):
@@ -266,7 +257,7 @@ def calculate_race_scores(race_id_target, target_df):
             prob = model.predict(X)
     except Exception: return None
 
-    # 【第1の脳】純粋な勝率とAIスコアの算出
+    # 【第1の脳】純粋な勝率（モデルの推論）とAIスコアの算出
     s = prob.sum()
     race_df['win_prob'] = prob / s if s > 0 else 1.0 / len(race_df)
     rs = 40 + (race_df['win_prob'] * 400)
@@ -289,7 +280,7 @@ def calculate_race_scores(race_id_target, target_df):
 
 
 # ==========================================
-# 4. マーカー判定 (シンプル化)
+# 4. マーカー判定 (シンプル・正確化)
 # ==========================================
 def get_all_markers():
     markers = {}
@@ -302,8 +293,9 @@ def get_all_markers():
                 markers[rid] = "【🐣新馬】"
                 continue
 
+            # 第5の脳の期待値が極端に高い馬がいる場合のみ妙味あり
             max_ev = sdf['ev_brain5'].max()
-            if max_ev > 2.0:
+            if max_ev > 1.5:  
                 markers[rid] = "【🔥妙味あり】"
             else:
                 markers[rid] = "【普】"
@@ -368,12 +360,11 @@ with tab_forecast:
             disp_df['人気'] = disp_df['人気'].apply(lambda x: f"{int(x)}人気" if pd.notnull(x) and x!=999 else "-")
             disp_df['純粋勝率(1の脳)'] = disp_df['win_prob'].apply(lambda x: f"{x*100:.1f}%")
             disp_df['期待値(5の脳)'] = disp_df['ev_brain5'].apply(lambda x: f"{x:.2f}" if x>0 else "-")
-            disp_df['騎手(勝率)'] = disp_df.apply(lambda r: f"{r.get('騎手','')} ({r.get('jockey_win_power',0)*100:.1f}%)", axis=1)
             
-            show_cols = ['馬番', '馬名', '騎手(勝率)', '単勝オッズ', '人気', '純粋勝率(1の脳)', '期待値(5の脳)', 'score_brain1']
+            show_cols = ['馬番', '馬名', '単勝オッズ', '人気', '純粋勝率(1の脳)', '期待値(5の脳)', 'score_brain1']
             if is_newcomer:
-                st.info("🐣 新馬戦のため、過去データに基づくAIスコアは参考値（または無効）です。")
-                show_cols = ['馬番', '馬名', '騎手(勝率)', '単勝オッズ', '人気']
+                st.info("🐣 新馬戦のため、過去データによるベースAIスコアは参考値です。Geminiの自力予想に委ねます。")
+                show_cols = ['馬番', '馬名', '単勝オッズ', '人気']
                 
             st.dataframe(disp_df[show_cols], use_container_width=True, hide_index=True)
         
@@ -395,24 +386,29 @@ with tab_forecast:
                     f"純粋スコア(1の脳):{row.get('score_brain1', 0)} | 期待値(5の脳):{row.get('ev_brain5', 0):.2f}"
                 )
 
-            # --- プロンプト構築（最強黄金パターン：1の脳→5の脳→Gemini） ---
+            # --- 最強プロンプト構築（枠順と4大情報の役割分担） ---
             system_instruction = """
 あなたはプロの競馬分析AI「勝ちぱかくん」の最終意思決定者（Gemini脳）です。
 提供されるデータは以下の2つの脳（システム）から出力されたものです。
 
-・【第1の脳】：オッズや人気を排除し、過去データから純粋な「馬の強さ（勝率）」を評価したAIスコア。
-・【第5の脳】：第1の脳の勝率に、現在のオッズと人気を掛け合わせ、馬券的価値（期待値）を算出したデータ。
+・【第1の脳】：オッズや人気を排除し、過去データ（タイム指数・前走着順・過去の枠順統計など）から純粋な「馬の強さ（勝率）」を算出したAIスコア。
+・【第5の脳】：第1の脳の勝率に現在のオッズを掛け合わせ、馬券的価値（期待値）を算出したデータ。
+
+【Geminiが検索・分析すべき4大チェック項目】
+AIスコア（統計）には含まれていない、当日の「生きた情報」をWeb検索ツールで調べ、補完してください。
+1. 今日の天候と馬場状態（良馬場か、時計のかかる道悪か）
+2. 当日のトラックバイアス（※枠の統計的有利不利は第1の脳が計算済みのため、今日の馬場がイン有利か外差し有利かという『当日の偏り』だけを調べてください）
+3. 直前の調教評価と陣営コメント（勝負気配、やる気、馬具の変更など）
+4. 展開予想（出走馬の脚質とスコアを元にしたペース予想）
 
 【あなたのミッションと絶対ルール】
-1. 検索ツールを使用して「今日の馬場状態」「騎手のバイアス」「厩舎の勝負気配」などをリアルタイム補完してください。
-2. LLM（あなた）は無難な上位人気馬を過大評価する傾向があるため、それを自覚し、【第5の脳】が弾き出した「期待値の高い中穴（4〜8番人気）」を絶対に無視せず、積極的に買い目に組み込むよう「適正化」を行ってください。
-3. 2つの脳のデータと、検索したリアルタイム情報を統合し、最終的な印（◎◯▲△☆）と最も儲かる券種を提示してください。
-4. Markdownの表はシステム側で描画済みのため、あなたは**絶対に表を出力しないでください**。解説文と買い目のみを出力すること。
+- LLM（あなた）は無難な上位人気馬を過大評価する傾向があるため、それを自覚し、【第5の脳】が評価している「期待値の高い中穴（4〜8番人気）」を絶対に無視せず、プロとして自信を持って買い目に組み込むよう「適正化」を行ってください。
+- Markdownの表はシステム側で描画済みのため、あなたは**絶対に表を出力しないでください**。解説文と買い目のみを出力すること。
 
 【出力フォーマット】
 ---
 ### 🌪️ レース展開とリアルタイム情報の統合
-* （検索結果や馬場状態、ペース予想などのプロの分析）
+* （検索結果や、トラックバイアス・ペース予想などのプロの分析）
 
 ### 💥 勝ちぱかくんの最終ジャッジ（印と根拠）
 * **◎（本命）:** 〇〇番（馬名） - （抜擢理由。中穴を狙った場合はその期待値を強調）
@@ -427,7 +423,7 @@ with tab_forecast:
 """
             prompt = f"対象レース: {race_display_name}\n\n"
             if is_newcomer:
-                prompt += "【⚠️重要指示】このレースは「新馬戦」のため過去データが存在せず、第1・第5の脳のスコアは無効です。スコアは完全に無視し、Web検索で『血統』『調教タイム』を調査し、あなた自身の推理で予想を組み立ててください。\n\n"
+                prompt += "【⚠️重要指示】このレースは「新馬戦」のため過去データが存在せず、第1・第5の脳のスコアは無効です。スコアは無視し、Web検索で『血統適性』『追い切り（調教）タイム』を調査し、あなた自身の推理で予想を組み立ててください。\n\n"
             else:
                 prompt += "【指示】第1の脳（純粋な強さ）と第5の脳（期待値）のデータを読み解き、特に第5の脳が評価している「中穴馬」を拾い上げるプロンプト補助に従って、最終的な印を決定してください。\n\n"
                 
