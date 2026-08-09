@@ -268,7 +268,6 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                             
                             payout_found = True
                             
-                            # 【重要修正】HTMLタグの間に強制的にスペースとSPLITを差し込む
                             for br in tds[0].find_all('br'): br.replace_with(' _SPLIT_ ')
                             for ul in tds[0].find_all('ul'): ul.insert_after(' _SPLIT_ ')
                             for div in tds[0].find_all('div'): div.insert_after(' _SPLIT_ ')
@@ -276,7 +275,6 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                             for ul in tds[1].find_all('ul'): ul.insert_after(' _SPLIT_ ')
                             for div in tds[1].find_all('div'): div.insert_after(' _SPLIT_ ')
                             
-                            # separator=" " を指定することで、<li>10</li><li>12</li> が "10 12" として抽出される
                             w_items = tds[0].get_text(separator=" ").split('_SPLIT_')
                             a_items = tds[1].get_text(separator=" ").split('_SPLIT_')
                             
@@ -285,13 +283,11 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                                 if not amt_str.isdigit(): continue
                                 amt = int(amt_str)
                                 
-                                # 数字以外（- や → など）をすべてスペースに置換
                                 w_str_clean = re.sub(r'\D', ' ', w_str)
                                 w_nums = [str(int(n)) for n in w_str_clean.split() if n.isdigit()]
                                 
                                 if not w_nums: continue
 
-                                # 判定ロジック
                                 if kind == "単勝" and len(w_nums) >= 1 and w_nums[0] == axis:
                                     total_payout += amt
                                 elif kind in ["馬連", "ワイド"] and len(w_nums) >= 2:
@@ -512,7 +508,7 @@ with tab_forecast:
 1. 挨拶や前置きは一切不要。
 2. 【目標】: 「堅いレースは上位順当で手堅く」「波乱（混戦）レースは穴馬を抜擢」とレースの性質に応じてメリハリをつけ、「的中率25%・回収率115%」の黄金ラインを狙うこと。
 3. 【印の基本原則】: 印（◎本命、◯対抗、▲単穴）は、「AIスコア（純粋な実力値）」をベースにしつつも、実際の「オッズ」や「人気」を”適度に加味”して総合的に判断すること。過剰人気馬は評価を下げ、実力があるのにオッズが高い（妙味がある）馬を高く評価する。
-4. 【中穴（4〜6番人気）の確実なケア】: **ここが最重要です。** 三連複で3着に食い込む確率が非常に高い「4〜6番人気（オッズ5〜15倍程度）」の中穴馬が買い目から漏れないよう、AIスコアが極端に低くない限り、必ず1〜2頭は△や☆として買い目（三連複の相手など）に組み込むこと。大穴ばかりを狙って中穴を疎かにしてはならない。
+4. 【中穴（4〜6番人気）の確実なケア】: 三連複で3着に食い込む確率が非常に高い「4〜6番人気（オッズ5〜15倍程度）」の中穴馬が買い目から漏れないよう、AIスコアが極端に低くない限り、必ず1〜2頭は△や☆として買い目（三連複の相手など）に組み込むこと。大穴ばかりを狙って中穴を疎かにしてはならない。
 5. 【紐抜け防止】: AIスコアが120（最高評価）に達している馬は非常に能力が高いため、もし本命（◎）にしなくても必ず相手（紐）に含めること。
 6. いかなる戦略でも、トリガミ（的中してもマイナス）は完全に排除した買い目を構築する。
 7. 【最重要: 買い目の指定】
@@ -521,18 +517,21 @@ with tab_forecast:
 
 出力フォーマット：
 ---
-### 🌪️ 1. レース波乱度と展開分析
+### 📊 1. 出走馬 期待値＆データ一覧
+（※この項目はMarkdownテーブルを作成し、ユーザーがワンクリックでコピーできるように全体を ```markdown と ``` で囲んだコードブロックとして出力してください）
+
+### 🌪️ 2. レース波乱度と展開分析
 * **【レース判定】:** 「堅実決着」または「波乱（混戦）」とその理由
 * **【展開・バリュー評価】:** （AIスコアによる実力評価と、実際のオッズや期待値を加味した妙味の指摘）
 
-### 🎯 2. 勝ちぱかくんの印と詳細見解
+### 🎯 3. 勝ちぱかくんの印と詳細見解
 * **◎（本命）:** 〇番（馬名） - （抜擢理由）
 * **◯（対抗）:** 〇番（馬名）
 * **▲（単穴）:** 〇番（馬名）
 * **△（連下）:** 〇番（馬名）、〇番（馬名）
 * **☆（穴馬）:** 〇番（馬名）
 
-### 💡 3. 戦略的・推奨買い目（トリガミ完全排除）
+### 💡 4. 戦略的・推奨買い目（トリガミ完全排除）
 * **【戦略】:** （堅いので少点数で絞る、混戦なので手広く買う等）
 * **単勝:** ◎ (1点)
 * **馬連:** ◎ － ◯, ▲, △, ☆ (方針に合わせて点数を調整)
@@ -543,7 +542,7 @@ with tab_forecast:
 """
             prompt = f"対象レース: {race_display_name}\n\n出走馬データ:\n{chr(10).join(table_summary)}"
 
-            with st.spinner("AIがレース波乱度を分析し、Gemini(3.6 Flash)が最適戦略を構築中..."):
+            with st.spinner("AIがレース波今度を分析し、Gemini(3.6 Flash)が最適戦略を構築中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 try:
                     response = client.models.generate_content(
@@ -556,26 +555,7 @@ with tab_forecast:
                         )
                     )
                     res_text = response.text if response.text else (response.candidates[0].content.parts[0].text if response.candidates else "")
-                    
-                    if res_text:
-                        st.markdown(res_text)
-                        
-                        st.markdown("---")
-                        st.subheader("📋 出走馬 データ一覧（コピー・保存用）")
-                        st.caption("※表の右上にあるダウンロードアイコン(↓)からCSV保存が可能です。ドラッグ＆ドロップでコピーもできます。")
-                        
-                        display_df = scored_df.copy()
-                        display_df['馬番'] = display_df['馬番'].astype(int).astype(str).str.zfill(2)
-                        display_df['オッズ'] = display_df['単勝'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "-")
-                        display_df['人気'] = display_df['人気'].apply(lambda x: f"{int(x)}" if pd.notna(x) else "-")
-                        display_df['純粋勝率(%)'] = (display_df['win_prob'] * 100).round(1).apply(lambda x: f"{x:.1f}")
-                        display_df['期待値'] = (display_df['win_prob'] * display_df['単勝'].fillna(0)).round(2).apply(lambda x: f"{x:.2f}")
-                        display_df['騎手(勝率)'] = display_df.apply(lambda r: f"{r.get('騎手','-')} ({r.get('jockey_win_power',0)*100:.1f}%)", axis=1)
-                        
-                        disp_cols = ['馬番', '馬名', '騎手(勝率)', 'オッズ', '人気', '純粋勝率(%)', '期待値', 'score']
-                        out_df = display_df[disp_cols].rename(columns={'score': 'AIスコア'})
-                        st.dataframe(out_df.set_index('馬番'), use_container_width=True)
-                        
+                    if res_text: st.markdown(res_text)
                     else: st.warning("⚠️ 回答を取得できませんでした。")
                     st.success("📝 実戦履歴に記録しました！")
                 except Exception as e: st.error(f"【APIエラー】: {e}")
