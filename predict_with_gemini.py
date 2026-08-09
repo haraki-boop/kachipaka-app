@@ -107,7 +107,7 @@ df_future = load_future_data()
 df_history = load_history_data()
 
 # ==========================================
-# 2. スクレイパー関数 (BOTから呼び出し可能)
+# 2. スクレイパー関数
 # ==========================================
 def get_target_dates():
     today = datetime.now()
@@ -139,8 +139,7 @@ def run_scraper(p_text, p_bar):
         except: pass
         time.sleep(1)
 
-    if not all_race_ids:
-        return False
+    if not all_race_ids: return False
 
     race_data_list = []
     weekdays = ["月", "火", "水", "木", "金", "土", "日"]
@@ -156,8 +155,7 @@ def run_scraper(p_text, p_bar):
             if odds_res.status_code == 200:
                 odds_json = odds_res.json()
                 if 'data' in odds_json and 'odds' in odds_json['data'] and '1' in odds_json['data']['odds']:
-                    for umaban, vals in odds_json['data']['odds']['1'].items():
-                        odds_dict[str(int(umaban))] = float(vals[0])
+                    for umaban, vals in odds_json['data']['odds']['1'].items(): odds_dict[str(int(umaban))] = float(vals[0])
         except: pass
         if not odds_dict:
             try:
@@ -202,15 +200,12 @@ def run_scraper(p_text, p_bar):
                         if nm and ub.isdigit():
                             sa = clean_text(cols[4].text)
                             pop_val = np.nan
-                            
                             odds_val = odds_dict.get(str(int(ub)), np.nan)
-                            
                             if pd.isna(odds_val):
                                 odds_elem = row.find(class_=re.compile(r'Popular_Txt|Odds'))
                                 if odds_elem:
                                     try: odds_val = float(clean_text(odds_elem.text))
                                     except: pass
-                                    
                             pop_elem = row.find(class_=re.compile(r'Popular_Num'))
                             if pop_elem:
                                 try: pop_val = float(clean_text(pop_elem.text))
@@ -234,7 +229,7 @@ def run_scraper(p_text, p_bar):
     return False
 
 # ==========================================
-# サイドバー UI
+# サイドバー UI (配当取得ロジック超強化版)
 # ==========================================
 st.sidebar.header("🔄 画面の更新")
 if st.sidebar.button("🔄 最新の情報にリロード", use_container_width=True):
@@ -253,7 +248,8 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                 try:
                     axis = str(int(row['honmei_umaban']))
                     partners = [str(int(p.strip())) for p in str(row.get('partners', '')).split(',') if p.strip().isdigit()]
-                    payout_found, total_payout = False, 0
+                    payout_found = False
+                    total_payout = 0
                     
                     for url in [f"https://race.netkeiba.com/race/result.html?race_id={str(row['race_id'])}", f"https://db.netkeiba.com/race/{str(row['race_id'])}/"]:
                         res = requests.get(url, headers=headers, timeout=5)
@@ -265,43 +261,46 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                             if not th: continue
                             kind = th.text.strip()
                             if kind not in ["単勝", "馬連", "ワイド", "三連複", "三連単"]: continue
+                            
                             tds = tr.find_all("td")
                             if len(tds) < 2: continue
                             
                             payout_found = True
                             
-                            # HTML内の改行や<br>をスペースに変換
-                            for br in tds[0].find_all('br'): br.replace_with(' ')
-                            for div in tds[0].find_all('div'): div.insert_after(' ')
-                            for br in tds[1].find_all('br'): br.replace_with(' ')
+                            w_html = str(tds[0]).replace('<br/>', 'SPLIT').replace('<br>', 'SPLIT').replace('</div>', 'SPLIT')
+                            a_html = str(tds[1]).replace('<br/>', 'SPLIT').replace('<br>', 'SPLIT').replace('</div>', 'SPLIT')
                             
-                            # 改行や複数スペースで分割してリスト化
-                            w_lines = [x.strip() for x in re.split(r'\s+', tds[0].get_text()) if x.strip()]
-                            a_lines = [x.strip() for x in re.split(r'\s+', tds[1].get_text()) if x.strip()]
+                            w_soup = BeautifulSoup(w_html, "html.parser")
+                            a_soup = BeautifulSoup(a_html, "html.parser")
                             
-                            for w_str, a_str in zip(w_lines, a_lines):
-                                a_str_clean = re.sub(r'\D', '', a_str)
-                                if not a_str_clean.isdigit(): continue
-                                amt = int(a_str_clean)
+                            w_items = w_soup.get_text().split('SPLIT')
+                            a_items = a_soup.get_text().split('SPLIT')
+                            
+                            for w_str, a_str in zip(w_items, a_items):
+                                amt_str = re.sub(r'\D', '', a_str)
+                                if not amt_str.isdigit(): continue
+                                amt = int(amt_str)
                                 
-                                # 数字以外の文字（-, →, =など）をすべてスペースに置換してから分割
                                 w_str_clean = re.sub(r'\D', ' ', w_str)
                                 w_nums = [str(int(n)) for n in w_str_clean.split() if n.isdigit()]
                                 
                                 if not w_nums: continue
 
-                                if kind == "単勝" and len(w_nums) == 1 and w_nums[0] == axis:
+                                if kind == "単勝" and len(w_nums) >= 1 and w_nums[0] == axis:
                                     total_payout += amt
-                                elif kind in ["馬連", "ワイド"] and len(w_nums) >= 2 and axis in w_nums[:2] and any(p in w_nums[:2] for p in partners):
-                                    total_payout += amt
-                                elif kind in ["三連複", "三連単"] and len(w_nums) >= 3 and axis in w_nums[:3] and len(set(w_nums[:3]).intersection(set(partners))) >= 2:
-                                    total_payout += amt
+                                elif kind in ["馬連", "ワイド"] and len(w_nums) >= 2:
+                                    if axis in w_nums[:2] and any(p in w_nums[:2] for p in partners):
+                                        total_payout += amt
+                                elif kind in ["三連複", "三連単"] and len(w_nums) >= 3:
+                                    if axis in w_nums[:3] and len(set(w_nums[:3]).intersection(set(partners))) >= 2:
+                                        total_payout += amt
                         
                         if payout_found:
                             df_history.at[idx, 'result_pay'] = total_payout
                             updated = True
                             break
-                except: pass
+                except Exception as e: 
+                    pass
                 time.sleep(1)
             
             if updated: df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig', errors='replace')
@@ -503,12 +502,12 @@ with tab_forecast:
 【絶対遵守事項】
 1. 挨拶や前置きは一切不要。
 2. データ内の「純粋勝率」と「AIスコア」の分布を見て、そのレースが「堅い」か「波乱（混戦）」かを判定すること。
-3. 【堅いレースの場合】: 期待値が1.0未満（過剰人気）でも、勝率・スコアが他を圧倒している馬がいれば素直に本命（◎）とし、相手を極限まで絞って少点数で確実に的中を狙う。
-4. 【波乱レースの場合】: スコアが拮抗している場合は【🎯期待値】を最重要視し、過剰人気を切り、期待値1.0超えの美味しい穴馬を本命（◎）や穴（☆）に抜擢して高配当を狙う。
-5. 騎手データが「過去データなし(要検索)」の場合は、必ずWeb検索機能を利用して最新の実績や評判を調べ見解に反映する。
-6. いかなる戦略でも、トリガミ（的中してもマイナス）は完全に排除した買い目を構築する。
-7. 【最重要: 買い目の指定】三連複の買い目は、基本的に◎（本命）を1頭軸とした4〜5頭への流し（6点〜10点）をベースに構築すること。
-8. 【紐抜け防止】AIスコアが120（最高評価）に達している馬は非常に能力が高いため、本命（◎）にしない場合でも必ず相手（紐・△・☆など）には含めること。
+3. 【印の基本原則】: 印（◎本命、◯対抗、▲単穴）は、変にひねらず**「AIスコア」の高さに忠実に**評価して打つこと。
+4. 【期待値馬の扱い（△・☆）】: AIスコアが上位でなくても、【🎯期待値】が高い（美味しいオッズの）馬がいれば、それらを連下（△）や特注穴馬（☆）として確実に紐（相手）に抑えること。
+5. 【紐抜け防止】: AIスコアが120（最高評価）に達している馬は非常に能力が高いため、もし本命（◎）にしなくても必ず相手（紐）に含めること。
+6. 騎手データが「過去データなし(要検索)」の場合は、必ずWeb検索機能を利用して最新の実績や評判を調べ見解に反映する。
+7. いかなる戦略でも、トリガミ（的中してもマイナス）は完全に排除した買い目を構築する。
+8. 【最重要: 買い目の指定】三連複の買い目は、基本的に◎（本命）を1頭軸とした4〜5頭への流し（6点〜10点）をベースに構築すること。
 
 出力フォーマット：
 ---
