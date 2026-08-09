@@ -107,7 +107,129 @@ df_future = load_future_data()
 df_history = load_history_data()
 
 # ==========================================
-# サイドバー UI
+# 2. スクレイパー関数 (BOT実行用)
+# ==========================================
+def get_target_dates():
+    today = datetime.now()
+    return sorted(list(set([(today + timedelta(days=i)).strftime("%Y%m%d") for i in range(7) if (today + timedelta(days=i)).weekday() in [5, 6]])))
+
+def clean_text(text):
+    return re.sub(r'\s+', ' ', re.sub(r'[\r\n\t]+', ' ', text)).strip() if text else ""
+
+def run_scraper(p_text, p_bar):
+    target_dates = get_target_dates()
+    all_race_ids, id_to_date = [], {}
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://race.netkeiba.com/"
+    })
+
+    p_text.text(f"📅 検索対象日: {target_dates}")
+    for date_str in target_dates:
+        url = f"https://race.netkeiba.com/top/race_list_sub.html?kaisai_date={date_str}"
+        try:
+            res = session.get(url, timeout=10)
+            if res.status_code == 200:
+                found_ids = re.findall(r'race_id=["\']?(\d{12})["\']?', res.text)
+                for rid in found_ids:
+                    if rid not in all_race_ids:
+                        all_race_ids.append(rid)
+                        id_to_date[rid] = date_str
+        except: pass
+        time.sleep(1)
+
+    if not all_race_ids: return False
+
+    race_data_list = []
+    weekdays = ["月", "火", "水", "木", "金", "土", "日"]
+    total = len(all_race_ids)
+
+    for i, race_id in enumerate(all_race_ids):
+        p_text.text(f"📥 出馬表とオッズを取得中... ({i+1}/{total} レース)")
+        p_bar.progress((i + 1) / total)
+        
+        odds_dict = {}
+        try:
+            odds_res = session.get(f"https://race.netkeiba.com/api/api_get_jra_odds.html?race_id={race_id}&type=1&action=init", timeout=5)
+            if odds_res.status_code == 200:
+                odds_json = odds_res.json()
+                if 'data' in odds_json and 'odds' in odds_json['data'] and '1' in odds_json['data']['odds']:
+                    for umaban, vals in odds_json['data']['odds']['1'].items(): odds_dict[str(int(umaban))] = float(vals[0])
+        except: pass
+        if not odds_dict:
+            try:
+                odds_res = session.get(f"https://race.netkeiba.com/api/api_get_nar_odds.html?race_id={race_id}&type=1&action=init", timeout=5)
+                if odds_res.status_code == 200:
+                    odds_json = odds_res.json()
+                    if 'data' in odds_json and 'odds' in odds_json['data'] and '1' in odds_json['data']['odds']:
+                        for umaban, vals in odds_json['data']['odds']['1'].items():
+                            odds_dict[str(int(umaban))] = float(vals[0])
+            except: pass
+
+        try:
+            res = session.get(f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}", timeout=10)
+            if res.status_code == 200:
+                res.encoding = 'utf-8'
+                soup = BeautifulSoup(res.text, "html.parser")
+                d_str = id_to_date.get(race_id, "")
+                display_date = f"{datetime.strptime(d_str, '%Y%m%d').month}月{datetime.strptime(d_str, '%Y%m%d').day}日({weekdays[datetime.strptime(d_str, '%Y%m%d').weekday()]})" if d_str else "不明"
+                
+                r_name_elem = soup.find(class_="RaceName") or soup.find(class_="RaceList_Item02")
+                r_name = clean_text(r_name_elem.find("span", class_="RaceName_main").text) if r_name_elem and r_name_elem.find("span", class_="RaceName_main") else (clean_text(r_name_elem.text) if r_name_elem else "")
+
+                surface, distance, condition = "不明", np.nan, "不明"
+                race_data01 = soup.find(class_="RaceData01")
+                if race_data01:
+                    rd_text = race_data01.text
+                    if "芝" in rd_text: surface = "芝"
+                    elif "ダ" in rd_text: surface = "ダート"
+                    elif "障" in rd_text: surface = "障害"
+                    dist_match = re.search(r'(\d+)m', rd_text)
+                    if dist_match: distance = float(dist_match.group(1))
+                    if "良" in rd_text: condition = "良"
+                    elif "稍" in rd_text: condition = "稍重"
+                    elif "重" in rd_text: condition = "重"
+                    elif "不良" in rd_text: condition = "不良"
+
+                for row in soup.select("tr.HorseList"):
+                    cols = row.find_all("td")
+                    if len(cols) >= 7:
+                        nm = clean_text(cols[3].find("a").text) if cols[3].find("a") else clean_text(cols[3].text)
+                        ub = clean_text(cols[1].text)
+                        if nm and ub.isdigit():
+                            sa = clean_text(cols[4].text)
+                            pop_val = np.nan
+                            odds_val = odds_dict.get(str(int(ub)), np.nan)
+                            if pd.isna(odds_val):
+                                odds_elem = row.find(class_=re.compile(r'Popular_Txt|Odds'))
+                                if odds_elem:
+                                    try: odds_val = float(clean_text(odds_elem.text))
+                                    except: pass
+                            pop_elem = row.find(class_=re.compile(r'Popular_Num'))
+                            if pop_elem:
+                                try: pop_val = float(clean_text(pop_elem.text))
+                                except: pass
+
+                            race_data_list.append({
+                                "race_id": str(race_id), "date": display_date, "race_name": r_name,
+                                "枠番": clean_text(cols[0].text), "馬番": ub, "馬名": nm,
+                                "sex_code": sa[0] if sa else "", "age": sa[1:] if len(sa)>1 else "",
+                                "斤量": clean_text(cols[5].text),
+                                "騎手": clean_text(cols[6].find("a").text) if cols[6].find("a") else clean_text(cols[6].text),
+                                "単勝": odds_val, "人気": pop_val,
+                                "surface": surface, "distance": distance, "condition": condition
+                            })
+            time.sleep(random.uniform(0.3, 0.7))
+        except: pass
+
+    if race_data_list:
+        pd.DataFrame(race_data_list).to_csv(FUTURE_CSV, index=False, encoding='utf-8-sig')
+        return True
+    return False
+
+# ==========================================
+# サイドバー UI (配当取得ロジック超強化版)
 # ==========================================
 st.sidebar.header("🔄 画面の更新")
 if st.sidebar.button("🔄 最新の情報にリロード", use_container_width=True):
