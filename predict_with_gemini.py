@@ -429,15 +429,14 @@ def get_all_markers():
             top3_diff = sc[0] - sc[2]
             top5_diff = sc[0] - sc[4]
 
-            # 期待値の計算と【🔥狙い目】フラグの判定
+            # 【🔥狙い目】判定判定：AIスコア順位3位以内でありながら、実際の人気が4番人気以降の馬がいるか
             is_neraime = False
-            if '単勝' in sdf.columns and 'win_prob' in sdf.columns:
-                for _, r in sdf.iterrows():
-                    odds = pd.to_numeric(r.get('単勝', 0), errors='coerce')
-                    if pd.isna(odds): odds = 0
-                    ev = r['win_prob'] * odds
-                    # AIスコアが上位水準(50以上)で、期待値が1.5以上、かつオッズ15倍以上の穴馬がいれば狙い目
-                    if r['score'] >= 50 and ev >= 1.5 and odds >= 15.0:
+            if '人気' in sdf.columns and len(sdf) >= 3:
+                top3_df = sdf.iloc[:3]
+                for _, r in top3_df.iterrows():
+                    pop = pd.to_numeric(r.get('人気', 999), errors='coerce')
+                    if pd.isna(pop): pop = 999
+                    if pop >= 4:
                         is_neraime = True
                         break
 
@@ -491,7 +490,6 @@ with tab_forecast:
                     label = f"{r}R {mark}".strip()
                     if rname: label = f"{r}R {rname[:5]}… {mark}".strip()
                         
-                    # 狙い目レースはボタンの色を変えてアピール
                     btn_type = "primary" if ("【堅】" in mark or "★" in mark or "🔥" in mark) else "secondary"
                     if col.button(label, key=f"btn_{rid}", use_container_width=True, type=btn_type):
                         st.session_state['selected_race_id'] = rid
@@ -515,47 +513,38 @@ with tab_forecast:
                 st.error("出走頭数が少ない、またはデータが不足しているため予想をスキップします。")
                 st.stop()
 
-            # オッズと期待値(EV)を計算
-            scored_df['odds_num'] = pd.to_numeric(scored_df['単勝'], errors='coerce').fillna(0)
-            scored_df['ev'] = scored_df['win_prob'] * scored_df['odds_num']
-
-            # 本命はAIスコア1位
+            # --- 印と買い目の確定（AIスコア順位絶対主義） ---
+            # ◎ = AIスコア1位
             honmei_row = scored_df.iloc[0]
             honmei_umaban = int(honmei_row['馬番'])
             honmei_name = honmei_row['馬名']
             
-            # 相手馬5頭の抽出ロジック（人気保護 ＋ 高期待値穴馬 ＋ AIスコア）
-            other_df = scored_df.iloc[1:].copy()
-            other_df['人気_num'] = pd.to_numeric(other_df['人気'], errors='coerce').fillna(999)
-            
-            # 1. ヒモ抜け防止で1〜3番人気を必ず抽出
-            pop_df = other_df[other_df['人気_num'] <= 3.0]
-            
-            # 2. 期待値の高い穴馬(オッズ15倍以上でEV最上位)を抽出
-            sleeper_df = other_df[(~other_df['馬番'].isin(pop_df['馬番'])) & (other_df['odds_num'] >= 15.0)].sort_values('ev', ascending=False)
-            top_sleeper = sleeper_df.head(1) if not sleeper_df.empty and sleeper_df.iloc[0]['ev'] >= 1.0 else pd.DataFrame()
-            
-            # 3. 残りをAIスコア上位から抽出
-            exclude_umbans = pd.concat([pop_df['馬番'], top_sleeper['馬番']]) if not top_sleeper.empty else pop_df['馬番']
-            ai_df = other_df[~other_df['馬番'].isin(exclude_umbans)].sort_values('score', ascending=False)
-            
-            # 4. 全て合体させて上位5頭に絞り、再度AIスコア順（実力順）に並べ直す
-            partners_df = pd.concat([pop_df, top_sleeper, ai_df]).head(5).sort_values('score', ascending=False)
+            # 相手5頭 = AIスコア2位〜6位
+            partners_df = scored_df.iloc[1:6]
             partners_list = partners_df['馬番'].astype(int).tolist()
             partners_str = ",".join(map(str, partners_list))
             
+            # 【過小評価馬（真の狙い目）】の検出（AIスコア1〜3位の中で4番人気以降の馬）
+            neraime_horses = []
+            for rank_idx, r in scored_df.iloc[:3].iterrows():
+                pop = pd.to_numeric(r.get('人気', 999), errors='coerce')
+                if pd.isna(pop): pop = 999
+                if pop >= 4:
+                    mark_symbol = "◎" if rank_idx == 0 else ("◯" if rank_idx == 1 else "▲")
+                    neraime_horses.append(f"{mark_symbol} {int(r['馬番']):02d}番 {r['馬名']}（AIスコア{rank_idx+1}位 / 実際は{int(pop)}番人気）")
+
             if df_history.empty or str(target_id) not in df_history['race_id'].astype(str).values:
                 new_record = pd.DataFrame([{'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'race_id': str(target_id), 'race_name': race_display_name, 'honmei_umaban': honmei_umaban, 'partners': partners_str, 'honmei_name': honmei_name, 'result_pay': "", 'pay_tansho': 0, 'pay_umaren': 0, 'pay_wide': 0, 'pay_sanrenpuku': 0, 'pay_sanrentan': 0}])
                 df_history = pd.concat([df_history, new_record], ignore_index=True)
                 df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig')
 
             table_summary = []
-            for _, row in scored_df.iterrows():
-                odds = row['odds_num']
+            for idx, row in scored_df.iterrows():
+                odds = row.get('単勝', 0) if pd.notna(row.get('単勝')) else 0.0
                 pop = row.get('人気', '-') if pd.notna(row.get('人気')) else '-'
                 j_power = row.get('jockey_win_power', 0.0)
                 j_info = "過去データなし(要検索)" if j_power == 0.0 else f"勝率{j_power*100:.1f}%"
-                ev = row['ev']
+                ev = (row['win_prob'] * odds) if odds > 0 else 0.0
                 
                 table_summary.append(
                     f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | "
@@ -566,58 +555,67 @@ with tab_forecast:
                 )
 
             system_instruction = f"""
-あなたはプロの競馬分析AI「勝ちぱかくん」です。以下の絶対ルールに従い、指定された買い目の解説を行ってください。
+あなたはプロの競馬分析AI「勝ちぱかくん」です。以下の絶対ルールに従い、指定された印と買い目のプロフェッショナルな解説を行ってください。
 
 【絶対遵守事項】
 1. 挨拶や前置きは一切不要。結果のみを出力すること。
-2. 【買い目の完全固定】: 今回のレースの買い目（◎と相手5頭）はシステム側で確定しています。提供された「確定済みの買い目」を必ずそのまま使用してください。自分で勝手に馬番を変えたり、印を削ったりすることは絶対に禁止です。
-3. 【解説の方向性とアピール】: 
-   - 軸馬(◎)は「AIスコアが最も高い実力馬」として解説。
-   - 相手馬には「ヒモ抜け防止の人気馬」と「期待値の高い穴馬（妙味馬）」が含まれています。
-   - ※オッズが高く期待値（EV）が良い馬が相手にいる場合、表の評価欄に「🔥 激走警戒」や「🎯 妙味抜群」と記載し、本文でも「💥 勝ちぱかくんの「特注」爆発狙い馬！」として熱くアピールしてください。
-4. 過激すぎる煽り文句（バク穴、全財産など）は使用しない。ただし「狙い目」「妙味」といったプロ視点での熱い推奨は歓迎します。
-5. 【推奨買い目のフォーマット】: （指定された軸と相手をそのまま当てはめること）
+2. 【印と買い目の完全固定】: 今回のレースの印と買い目はシステム（AIスコア）側ですでに確定しています。指定された「確定済みの印と買い目」を100%そのまま出力してください。オッズや人気を理由に勝手に馬番を変えたり、上位馬の評価を格下げしたりすることは絶対に禁止です。
+3. 【解説の重要ミッション】:
+   - 【軸馬の根拠】: ◎の馬が世間の1番人気でない場合、なぜ世間の1番人気ではなく、この馬（AIスコア1位）が本命軸として最も勝率が高いのか合理的根拠（タイム、展開、適性など）を提示すること。
+   - 【過小評価馬（狙い目）のアピール】: 「AIスコア3位以内（3着以内確率極高）でありながら4番人気以降に放置されている馬」が存在する場合、「💥 勝ちぱかくんの「特注」爆発狙い馬！」という見出しで、なぜ世間に軽視されているのか（前走不利、脚質の見落とし等）を熱くアピールすること。
+4. 過激な煽り文句（バク穴、全財産など）は絶対に使用しない。プロとしての説得力ある分析を行うこと。
+5. 【推奨買い目のフォーマット】:
    - 単勝: ◎ (1点)
-   - 馬連: ◎ － ◯, ▲, △ (相手の先頭3頭)
-   - ワイド: ◎ － ◯, ▲, △ (相手の先頭3頭)
-   - 三連複: ◎ 1頭軸流し － 相手5頭 (10点)
-   - 三連単 (フォーメーション): ◎ 1着固定流し → 相手5頭 (20点)
-   - 三連単 (マルチ): ◎・◯ 2頭軸マルチ － 相手残り4頭 (24点)
+   - 馬連: ◎ － ◯, ▲, △ (上位3点絞り)
+   - ワイド: ◎ － ◯, ▲, △ (上位3点絞り)
+   - 三連複: ◎ 1頭軸流し － ◯, ▲, △, ☆ (10点)
+   - 三連単 (フォーメーション): ◎ 1着固定流し → ◯, ▲, △, ☆ (20点)
+   - 三連単 (マルチ): ◎・◯ 2頭軸マルチ － ▲, △, ☆ (24点)
 
 出力フォーマット：
 ---
 ### 📊 1. 出走馬 期待値＆データ一覧
-（※表の行は絶対に【提供したデータの並び順そのまま（AIスコア順）】とし、馬番順に並び替えないこと。コードブロック「```」で囲まないこと。期待値が高い穴馬の評価には🔥や🎯をつけること）
+（※提供データを元に、以下のカラム構成のMarkdownテーブルを出力すること。表の行順は絶対に【提供されたデータの並び順（AIスコアの高い順）そのまま】とし、馬番順や人気順に並び替えないこと。コードブロック「```」で囲まないこと。「評価」欄には印とシンプルな評価を一言記載）
 | 馬番 | 馬名 | 騎手 | 推定オッズ | 純粋勝率 | 🎯期待値 | AIスコア | 評価 |
 |:---:|:---|:---|:---:|:---:|:---:|:---:|:---|
 
 ### 🌪️ 2. レース波乱度と展開分析
-* **【レース判定】:** 「堅実決着」または「波乱（混戦）」とその理由
-* **【展開・バリュー評価】:** （冷静な分析）
+* **【レース判定】:** 「堅実決着」または「波乱含み」とその理由
+* **【展開・バリュー評価】:** （AIスコアと世間の人気を比較した冷静な分析）
 
-### 💥 3. 勝ちぱかくんの「特注」爆発狙い馬！（※該当馬がいる場合のみ）
-* ここに、AIスコアと期待値が高い穴馬へのアピール文を熱く記載してください。
+### 💥 3. 勝ちぱかくんの「特注」爆発狙い馬！（※過小評価馬が存在する場合のみ出力）
+* （AIスコアトップ3でありながら4番人気以降に甘んじている馬についての熱い分析文）
 
 ### 🎯 4. 勝ちぱかくんの印と詳細見解
-* **◎（本命）:** [確定軸馬]（馬名） - （抜擢理由）
-* **◯（対抗）:** [確定相手1頭目]（馬名） - （理由）
-* **▲（単穴）:** [確定相手2頭目]（馬名） - （理由）
-* **△（連下）:** [確定相手3頭目]、[確定相手4頭目]
-* **☆（押さえ）:** [確定相手5頭目]
+* **◎（本命）:** {int(scored_df.iloc[0]['馬番']):02d}番（{scored_df.iloc[0]['馬名']}） - （本命理由。世間の1番人気と異なる場合はその抜擢根拠）
+* **◯（対抗）:** {int(scored_df.iloc[1]['馬番']):02d}番（{scored_df.iloc[1]['馬名']}） - （見解）
+* **▲（単穴）:** {int(scored_df.iloc[2]['馬番']):02d}番（{scored_df.iloc[2]['馬名']}） - （見解）
+* **△（連下）:** {int(scored_df.iloc[3]['馬番']):02d}番（{scored_df.iloc[3]['馬名']}）、{int(scored_df.iloc[4]['馬番']):02d}番（{scored_df.iloc[4]['馬名']}）
+* **☆（押さえ）:** {int(scored_df.iloc[5]['馬番']):02d}番（{scored_df.iloc[5]['馬名']}）
 
 ### 💡 5. 戦略的・推奨買い目
 * **単勝:** ◎ (1点)
-* **馬連:** ◎ － ◯, ▲, △
-* **ワイド:** ◎ － ◯, ▲, △
+* **馬連:** ◎ － ◯, ▲, △ (3点)
+* **ワイド:** ◎ － ◯, ▲, △ (3点)
 * **三連複:** ◎ 1頭軸流し － ◯, ▲, △(2頭), ☆ (10点)
 * **三連単 (フォーメーション):** ◎ 1着固定流し → ◯, ▲, △(2頭), ☆ (20点)
 * **三連単 (マルチ):** ◎・◯ 2頭軸マルチ － ▲, △(2頭), ☆ (24点)
 ---
 """
             prompt = f"対象レース: {race_display_name}\n\n"
-            prompt += f"【確定済みの買い目（絶対にこれに従うこと）】\n"
-            prompt += f"軸馬(◎): {honmei_umaban:02d}番\n"
-            prompt += f"相手馬(◯▲△☆): {partners_str}\n\n"
+            prompt += f"【確定済みの印（AIスコア絶対順位）】\n"
+            prompt += f"◎(AIスコア1位): {int(scored_df.iloc[0]['馬番']):02d}番 {scored_df.iloc[0]['馬名']}\n"
+            prompt += f"◯(AIスコア2位): {int(scored_df.iloc[1]['馬番']):02d}番 {scored_df.iloc[1]['馬名']}\n"
+            prompt += f"▲(AIスコア3位): {int(scored_df.iloc[2]['馬番']):02d}番 {scored_df.iloc[2]['馬名']}\n"
+            prompt += f"△(AIスコア4位): {int(scored_df.iloc[3]['馬番']):02d}番 {scored_df.iloc[3]['馬名']}\n"
+            prompt += f"△(AIスコア5位): {int(scored_df.iloc[4]['馬番']):02d}番 {scored_df.iloc[4]['馬名']}\n"
+            prompt += f"☆(AIスコア6位): {int(scored_df.iloc[5]['馬番']):02d}番 {scored_df.iloc[5]['馬名']}\n\n"
+            
+            if neraime_horses:
+                prompt += f"【検出された過小評価馬（🔥狙い目）】\n" + "\n".join(neraime_horses) + "\n※この馬（たち）について「💥 勝ちぱかくんの「特注」爆発狙い馬！」セクションで強くアピールしてください。\n\n"
+            else:
+                prompt += "【過小評価馬の検出】: なし（AI上位と世間の人気が概ね一致しているレースです）\n\n"
+                
             prompt += f"出走馬データ:\n{chr(10).join(table_summary)}"
 
             with st.spinner("AIがレース波乱度を分析し、Gemini(3.6 Flash)が最適戦略を構築中..."):
