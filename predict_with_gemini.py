@@ -98,7 +98,6 @@ def load_history_data():
                 return pd.DataFrame()
         if 'partners' not in df.columns:
             df['partners'] = ""
-        # 券種別カラムの追加
         for col in ['pay_tansho', 'pay_umaren', 'pay_wide', 'pay_sanrenpuku', 'pay_sanrentan']:
             if col not in df.columns:
                 df[col] = 0
@@ -265,7 +264,9 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                         for tr in soup.find_all("tr"):
                             th = tr.find("th")
                             if not th: continue
-                            kind = th.text.strip()
+                            
+                            # 【重要修正】3連複・3連単の表記ブレを統一して拾い上げる
+                            kind = th.text.strip().replace("3連", "三連")
                             if kind not in payouts: continue
                             
                             tds = tr.find_all("td")
@@ -302,11 +303,14 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                                     if axis in w_nums[:2] and any(p in w_nums[:2] for p in partners):
                                         payouts['ワイド'] += amt
                                 elif kind == "三連複" and len(w_nums) >= 3:
+                                    # 三連複は◎1頭軸流し
                                     if axis in w_nums[:3] and len(set(w_nums[:3]).intersection(set(partners))) >= 2:
                                         payouts['三連複'] += amt
                                 elif kind == "三連単" and len(w_nums) >= 3:
-                                    if axis in w_nums[:3] and len(set(w_nums[:3]).intersection(set(partners))) >= 2:
-                                        payouts['三連単'] += amt
+                                    # 【重要修正】三連単は◎・◯の2頭軸マルチとして厳密に判定
+                                    if len(partners) >= 2 and axis in w_nums[:3] and partners[0] in w_nums[:3]:
+                                        if len(set(w_nums[:3]).intersection(set(partners))) >= 2:
+                                            payouts['三連単'] += amt
                         
                         if payout_found:
                             df_history.at[idx, 'pay_tansho'] = payouts['単勝']
@@ -431,16 +435,16 @@ def get_all_markers():
             top3_diff = sc[0] - sc[2]
             top5_diff = sc[0] - sc[4]
 
-            if sc[0] >= 106 and top3_diff >= 5:
+            if sc[0] >= 110 and (top_diff >= 6 or top3_diff >= 12):
                 race_type = "【堅】"
-            elif top5_diff <= 3 or top_diff <= 1:
+            elif top5_diff <= 8 or top_diff <= 1:
                 race_type = "【穴】"
             else:
                 race_type = "【普】"
 
-            if sc[0] >= 108 and top_diff >= 3:
+            if sc[0] >= 115 and top_diff >= 5:
                 mark = "★"
-            elif top5_diff <= 3:
+            elif top5_diff <= 5:
                 mark = "◎"
             else:
                 mark = ""
@@ -620,7 +624,6 @@ with tab_dashboard:
             invested_total = inv_tansho + inv_umaren + inv_wide + inv_sanrenpuku + inv_sanrentan
             roi_total = (returns / invested_total) * 100 if invested_total > 0 else 0.0
             
-            # 総合データ
             col1, col2, col3 = st.columns(3)
             col1.metric("🎯 総合 的中率", f"{(hits/total)*100:.1f}%", f"{hits} / {total} 的中")
             col2.metric("💰 総合 回収率", f"{roi_total:.1f}%", delta_color="normal" if returns >= invested_total else "inverse")
@@ -644,7 +647,6 @@ with tab_dashboard:
                 </div>
                 ''', unsafe_allow_html=True)
 
-            # 券種ごとの計算
             if 'pay_tansho' in finished_races.columns:
                 h_t = len(finished_races[finished_races['pay_tansho'].astype(float) > 0])
                 r_t = finished_races['pay_tansho'].astype(float).sum()
