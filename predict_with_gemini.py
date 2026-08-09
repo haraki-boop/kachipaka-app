@@ -150,7 +150,6 @@ def run_scraper(p_text, p_bar):
         p_text.text(f"📥 出馬表とオッズを取得中... ({i+1}/{total} レース)")
         p_bar.progress((i + 1) / total)
         
-        # --- 【追加】裏側のオッズAPIからデータを取得 ---
         odds_dict = {}
         try:
             odds_res = session.get(f"https://race.netkeiba.com/api/api_get_jra_odds.html?race_id={race_id}&type=1&action=init", timeout=5)
@@ -160,7 +159,6 @@ def run_scraper(p_text, p_bar):
                     for umaban, vals in odds_json['data']['odds']['1'].items():
                         odds_dict[str(int(umaban))] = float(vals[0])
         except: pass
-        # 地方競馬だった場合のフォールバックAPI
         if not odds_dict:
             try:
                 odds_res = session.get(f"https://race.netkeiba.com/api/api_get_nar_odds.html?race_id={race_id}&type=1&action=init", timeout=5)
@@ -170,7 +168,6 @@ def run_scraper(p_text, p_bar):
                         for umaban, vals in odds_json['data']['odds']['1'].items():
                             odds_dict[str(int(umaban))] = float(vals[0])
             except: pass
-        # -----------------------------------------------
 
         try:
             res = session.get(f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}", timeout=10)
@@ -206,7 +203,6 @@ def run_scraper(p_text, p_bar):
                             sa = clean_text(cols[4].text)
                             pop_val = np.nan
                             
-                            # オッズはAPIから取得した辞書を優先、なければHTMLから探す
                             odds_val = odds_dict.get(str(int(ub)), np.nan)
                             
                             if pd.isna(odds_val):
@@ -499,6 +495,8 @@ with tab_forecast:
 4. 【波乱レースの場合】: スコアが拮抗している場合は【🎯期待値】を最重要視し、過剰人気を切り、期待値1.0超えの美味しい穴馬を本命（◎）や穴（☆）に抜擢して高配当を狙う。
 5. 騎手データが「過去データなし(要検索)」の場合は、必ずWeb検索機能を利用して最新の実績や評判を調べ見解に反映する。
 6. いかなる戦略でも、トリガミ（的中してもマイナス）は完全に排除した買い目を構築する。
+7. 【最重要: 買い目の指定】三連複の買い目は、基本的に◎（本命）を1頭軸とした4〜5頭への流し（6点〜10点）をベースに構築すること。
+8. 【紐抜け防止】AIスコアが120（最高評価）に達している馬は非常に能力が高いため、本命（◎）にしない場合でも必ず相手（紐・△・☆など）には含めること。
 
 出力フォーマット：
 ---
@@ -521,7 +519,7 @@ with tab_forecast:
 * **単勝:** ◎ (1点)
 * **馬連:** ◎ － ◯, ▲, △, ☆ (方針に合わせて点数を調整)
 * **ワイド:** ◎ － ◯, ▲, ☆ (方針に合わせて点数を調整)
-* **三連複:** ◎ － ◯, ▲, △, ☆ (方針に合わせて点数を調整)
+* **三連複:** ◎ 1頭軸流し － ◯, ▲, △, ☆ (相手4〜5頭推奨)
 * **三連単:** 1着:◎ → 2・3着:◯, ▲, △, ☆ (方針に合わせて点数を調整)
 ---
 """
