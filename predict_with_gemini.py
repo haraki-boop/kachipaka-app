@@ -518,7 +518,7 @@ with tab_forecast:
 出力フォーマット：
 ---
 ### 📊 1. 出走馬 期待値＆データ一覧
-（※この項目はMarkdownテーブルを作成し、ユーザーがワンクリックでコピーできるように全体を ```markdown と ``` で囲んだコードブロックとして出力してください）
+（Markdownテーブルで出力）
 
 ### 🌪️ 2. レース波乱度と展開分析
 * **【レース判定】:** 「堅実決着」または「波乱（混戦）」とその理由
@@ -542,7 +542,7 @@ with tab_forecast:
 """
             prompt = f"対象レース: {race_display_name}\n\n出走馬データ:\n{chr(10).join(table_summary)}"
 
-            with st.spinner("AIがレース波今度を分析し、Gemini(3.6 Flash)が最適戦略を構築中..."):
+            with st.spinner("AIがレース波乱度を分析し、Gemini(3.6 Flash)が最適戦略を構築中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 try:
                     response = client.models.generate_content(
