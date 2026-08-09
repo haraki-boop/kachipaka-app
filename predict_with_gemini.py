@@ -107,129 +107,7 @@ df_future = load_future_data()
 df_history = load_history_data()
 
 # ==========================================
-# 2. スクレイパー関数
-# ==========================================
-def get_target_dates():
-    today = datetime.now()
-    return sorted(list(set([(today + timedelta(days=i)).strftime("%Y%m%d") for i in range(7) if (today + timedelta(days=i)).weekday() in [5, 6]])))
-
-def clean_text(text):
-    return re.sub(r'\s+', ' ', re.sub(r'[\r\n\t]+', ' ', text)).strip() if text else ""
-
-def run_scraper(p_text, p_bar):
-    target_dates = get_target_dates()
-    all_race_ids, id_to_date = [], {}
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": "https://race.netkeiba.com/"
-    })
-
-    p_text.text(f"📅 検索対象日: {target_dates}")
-    for date_str in target_dates:
-        url = f"https://race.netkeiba.com/top/race_list_sub.html?kaisai_date={date_str}"
-        try:
-            res = session.get(url, timeout=10)
-            if res.status_code == 200:
-                found_ids = re.findall(r'race_id=["\']?(\d{12})["\']?', res.text)
-                for rid in found_ids:
-                    if rid not in all_race_ids:
-                        all_race_ids.append(rid)
-                        id_to_date[rid] = date_str
-        except: pass
-        time.sleep(1)
-
-    if not all_race_ids: return False
-
-    race_data_list = []
-    weekdays = ["月", "火", "水", "木", "金", "土", "日"]
-    total = len(all_race_ids)
-
-    for i, race_id in enumerate(all_race_ids):
-        p_text.text(f"📥 出馬表とオッズを取得中... ({i+1}/{total} レース)")
-        p_bar.progress((i + 1) / total)
-        
-        odds_dict = {}
-        try:
-            odds_res = session.get(f"https://race.netkeiba.com/api/api_get_jra_odds.html?race_id={race_id}&type=1&action=init", timeout=5)
-            if odds_res.status_code == 200:
-                odds_json = odds_res.json()
-                if 'data' in odds_json and 'odds' in odds_json['data'] and '1' in odds_json['data']['odds']:
-                    for umaban, vals in odds_json['data']['odds']['1'].items(): odds_dict[str(int(umaban))] = float(vals[0])
-        except: pass
-        if not odds_dict:
-            try:
-                odds_res = session.get(f"https://race.netkeiba.com/api/api_get_nar_odds.html?race_id={race_id}&type=1&action=init", timeout=5)
-                if odds_res.status_code == 200:
-                    odds_json = odds_res.json()
-                    if 'data' in odds_json and 'odds' in odds_json['data'] and '1' in odds_json['data']['odds']:
-                        for umaban, vals in odds_json['data']['odds']['1'].items():
-                            odds_dict[str(int(umaban))] = float(vals[0])
-            except: pass
-
-        try:
-            res = session.get(f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}", timeout=10)
-            if res.status_code == 200:
-                res.encoding = 'utf-8'
-                soup = BeautifulSoup(res.text, "html.parser")
-                d_str = id_to_date.get(race_id, "")
-                display_date = f"{datetime.strptime(d_str, '%Y%m%d').month}月{datetime.strptime(d_str, '%Y%m%d').day}日({weekdays[datetime.strptime(d_str, '%Y%m%d').weekday()]})" if d_str else "不明"
-                
-                r_name_elem = soup.find(class_="RaceName") or soup.find(class_="RaceList_Item02")
-                r_name = clean_text(r_name_elem.find("span", class_="RaceName_main").text) if r_name_elem and r_name_elem.find("span", class_="RaceName_main") else (clean_text(r_name_elem.text) if r_name_elem else "")
-
-                surface, distance, condition = "不明", np.nan, "不明"
-                race_data01 = soup.find(class_="RaceData01")
-                if race_data01:
-                    rd_text = race_data01.text
-                    if "芝" in rd_text: surface = "芝"
-                    elif "ダ" in rd_text: surface = "ダート"
-                    elif "障" in rd_text: surface = "障害"
-                    dist_match = re.search(r'(\d+)m', rd_text)
-                    if dist_match: distance = float(dist_match.group(1))
-                    if "良" in rd_text: condition = "良"
-                    elif "稍" in rd_text: condition = "稍重"
-                    elif "重" in rd_text: condition = "重"
-                    elif "不良" in rd_text: condition = "不良"
-
-                for row in soup.select("tr.HorseList"):
-                    cols = row.find_all("td")
-                    if len(cols) >= 7:
-                        nm = clean_text(cols[3].find("a").text) if cols[3].find("a") else clean_text(cols[3].text)
-                        ub = clean_text(cols[1].text)
-                        if nm and ub.isdigit():
-                            sa = clean_text(cols[4].text)
-                            pop_val = np.nan
-                            odds_val = odds_dict.get(str(int(ub)), np.nan)
-                            if pd.isna(odds_val):
-                                odds_elem = row.find(class_=re.compile(r'Popular_Txt|Odds'))
-                                if odds_elem:
-                                    try: odds_val = float(clean_text(odds_elem.text))
-                                    except: pass
-                            pop_elem = row.find(class_=re.compile(r'Popular_Num'))
-                            if pop_elem:
-                                try: pop_val = float(clean_text(pop_elem.text))
-                                except: pass
-
-                            race_data_list.append({
-                                "race_id": str(race_id), "date": display_date, "race_name": r_name,
-                                "枠番": clean_text(cols[0].text), "馬番": ub, "馬名": nm,
-                                "sex_code": sa[0] if sa else "", "age": sa[1:] if len(sa)>1 else "",
-                                "斤量": clean_text(cols[5].text),
-                                "騎手": clean_text(cols[6].find("a").text) if cols[6].find("a") else clean_text(cols[6].text),
-                                "単勝": odds_val, "人気": pop_val,
-                                "surface": surface, "distance": distance, "condition": condition
-                            })
-            time.sleep(random.uniform(0.3, 0.7))
-        except: pass
-
-    if race_data_list:
-        pd.DataFrame(race_data_list).to_csv(FUTURE_CSV, index=False, encoding='utf-8-sig')
-        return True
-    return False
-
-# ==========================================
-# サイドバー UI (配当取得ロジック超強化版)
+# サイドバー UI
 # ==========================================
 st.sidebar.header("🔄 画面の更新")
 if st.sidebar.button("🔄 最新の情報にリロード", use_container_width=True):
@@ -322,7 +200,7 @@ if st.sidebar.button("💥 ゴミ予想履歴を完全消去", type="primary", u
 
 
 # ==========================================
-# 3. AIスコア計算 ＋ 予想出力
+# 3. AIスコア計算 ＋ 予想出力 (実力ベース)
 # ==========================================
 def calculate_race_scores(race_id_target, target_df):
     if target_df.empty or model_data is None: return None
@@ -334,8 +212,8 @@ def calculate_race_scores(race_id_target, target_df):
     model = model_data.get('model')
 
     if not df_past.empty and '馬名' in df_past.columns:
+        df_past['is_win'] = (pd.to_numeric(df_past['着順'], errors='coerce') == 1).astype(int)
         agg_dict = {'is_win': ['sum', 'count']}
-        if '着順' in df_past.columns: agg_dict['着順'] = 'last'
         if 'my_time_idx' in df_past.columns: agg_dict['my_time_idx'] = 'mean'
         if 'my_last3f_idx' in df_past.columns: agg_dict['my_last3f_idx'] = 'mean'
         if 'my_pace_idx' in df_past.columns: agg_dict['my_pace_idx'] = 'mean'
@@ -343,7 +221,6 @@ def calculate_race_scores(race_id_target, target_df):
         
         horse_stats = df_past.groupby('馬名').agg(agg_dict).reset_index()
         new_cols = ['馬名', 'total_wins', 'total_runs']
-        if '着順' in df_past.columns: new_cols.append('prev_rank')
         if 'my_time_idx' in df_past.columns: new_cols.append('horse_avg_time_idx')
         if 'my_last3f_idx' in df_past.columns: new_cols.append('horse_avg_last3f_idx')
         if 'my_pace_idx' in df_past.columns: new_cols.append('horse_avg_pace_idx')
@@ -355,21 +232,13 @@ def calculate_race_scores(race_id_target, target_df):
 
     if not df_past.empty and '騎手' in df_past.columns:
         j_stats = df_past.groupby('騎手')['is_win'].mean().reset_index()
-        j_stats.rename(columns={'is_win': 'jockey_win_rate'}, inplace=True)
+        j_stats.rename(columns={'is_win': 'jockey_win_power'}, inplace=True)
         race_df = pd.merge(race_df, j_stats, on='騎手', how='left')
-        
-        if 'place_code' in race_df.columns and 'place_code' in df_past.columns:
-            race_df['place_code'] = race_df['place_code'].astype(str)
-            df_past['place_code'] = df_past['place_code'].astype(str)
-            jp_stats = df_past.groupby(['騎手', 'place_code'])['is_win'].mean().reset_index()
-            jp_stats.rename(columns={'is_win': 'jockey_track_win_rate'}, inplace=True)
-            jp_stats['place_code'] = jp_stats['place_code'].astype(str)
-            race_df = pd.merge(race_df, jp_stats, on=['騎手', 'place_code'], how='left')
-        else:
-            race_df['jockey_track_win_rate'] = race_df['jockey_win_rate']
+    else:
+        race_df['jockey_win_power'] = 0.0
 
     for f in features:
-        if f not in race_df.columns: race_df[f] = np.nan
+        if f not in race_df.columns: race_df[f] = 0.0
 
     if 'sex_code' in race_df.columns and race_df['sex_code'].dtype == object:
         race_df['sex_code'] = race_df['sex_code'].map({'牡': 0, '牝': 1, 'セ': 2}).fillna(0)
@@ -382,18 +251,17 @@ def calculate_race_scores(race_id_target, target_df):
         race_df['condition_code'] = race_df['condition'].map(lambda c: le_cond.transform([c])[0] if c in le_cond.classes_ else le_cond.transform(['不明'])[0])
 
     X = race_df[features].copy()
-    X = X.apply(pd.to_numeric, errors='coerce')
-    X = X.fillna(X.mean()).fillna(0)
+    X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
 
     try:
-        if hasattr(model, "predict_proba"): prob = model.predict_proba(X)[:, 1]
-        else: prob = model.predict(X)
+        preds = model.predict(X)
     except Exception: return None
 
-    s = prob.sum()
-    race_df['win_prob'] = prob / s if s > 0 else 1.0 / len(race_df)
-    mp = race_df['win_prob'].mean()
-    rs = 100 + ((race_df['win_prob'] - mp) / mp) * 35 if mp > 0 else 100
+    inv_preds = 1.0 / np.clip(preds, 1.0, 18.0)
+    race_df['win_prob'] = inv_preds / inv_preds.sum()
+    
+    mp = inv_preds.mean()
+    rs = 100 + ((inv_preds - mp) / mp) * 35 if mp > 0 else 100
     race_df['score'] = np.clip(rs, 50, 120).round().astype(int)
 
     return race_df.sort_values(by='score', ascending=False).reset_index(drop=True)
@@ -405,7 +273,6 @@ def get_all_markers():
         sdf = calculate_race_scores(rid, df_future)
         if sdf is not None and len(sdf) >= 5:
             sc = sdf['score'].tolist()
-            
             if sc[0] >= 105 and (sc[0] - sc[2]) >= 10: race_type = "【堅】"
             elif (sc[0] - sc[4]) <= 7: race_type = "【穴】"
             else: race_type = "【普】"
@@ -484,15 +351,16 @@ with tab_forecast:
             for _, row in scored_df.iterrows():
                 odds = row.get('単勝', 0) if pd.notna(row.get('単勝')) else 0.0
                 pop = row.get('人気', '-') if pd.notna(row.get('人気')) else '-'
-                j_win = row.get('jockey_win_rate', 0.0)
-                j_info = "過去データなし(要検索)" if j_win == 0.0 else f"勝率{j_win*100:.1f}%"
+                j_power = row.get('jockey_win_power', 0.0)
+                j_info = "過去データなし(要検索)" if j_power == 0.0 else f"勝率{j_power*100:.1f}%"
+                
                 ev = (row['win_prob'] * odds) if odds > 0 else 0.0
                 
                 table_summary.append(
                     f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | "
                     f"騎手:{row.get('騎手', '不明')}({j_info}) | "
                     f"オッズ:{odds}倍 ({pop}人気) | "
-                    f"勝率:{row['win_prob']*100:.1f}% | 🎯期待値:{ev:.2f} | "
+                    f"純粋勝率:{row['win_prob']*100:.1f}% | 🎯期待値:{ev:.2f} | "
                     f"AIスコア:{row['score']:3d}"
                 )
 
@@ -501,13 +369,14 @@ with tab_forecast:
 
 【絶対遵守事項】
 1. 挨拶や前置きは一切不要。
-2. データ内の「純粋勝率」と「AIスコア」の分布を見て、そのレースが「堅い」か「波乱（混戦）」かを判定すること。
-3. 【印の基本原則】: 印（◎本命、◯対抗、▲単穴）は、変にひねらず**「AIスコア」の高さに忠実に**評価して打つこと。
-4. 【期待値馬の扱い（△・☆）】: AIスコアが上位でなくても、【🎯期待値】が高い（美味しいオッズの）馬がいれば、それらを連下（△）や特注穴馬（☆）として確実に紐（相手）に抑えること。
+2. 【目標】: 過度な大穴狙いは避け、「的中率25%・回収率115%」の黄金ラインを安定して狙う戦略をとること。
+3. 【印の基本原則】: 印（◎本命、◯対抗、▲単穴）は、変にひねらず**「AIスコア」の高さに忠実に**評価して打つこと。（AIスコアは人気度を排除した純粋な実力値です）
+4. 【期待値馬の扱い（△・☆）】: AIスコアが上位でなくても、【🎯期待値】が1.0を超えている美味しい馬がいれば、それらを連下（△）や特注穴馬（☆）として確実に紐（相手）に抑えること。
 5. 【紐抜け防止】: AIスコアが120（最高評価）に達している馬は非常に能力が高いため、もし本命（◎）にしなくても必ず相手（紐）に含めること。
-6. 騎手データが「過去データなし(要検索)」の場合は、必ずWeb検索機能を利用して最新の実績や評判を調べ見解に反映する。
-7. いかなる戦略でも、トリガミ（的中してもマイナス）は完全に排除した買い目を構築する。
-8. 【最重要: 買い目の指定】三連複の買い目は、基本的に◎（本命）を1頭軸とした4〜5頭への流し（6点〜10点）をベースに構築すること。
+6. いかなる戦略でも、トリガミ（的中してもマイナス）は完全に排除した買い目を構築する。
+7. 【最重要: 買い目の指定】
+   - 三連複: 1着候補の馬（◎）ではなく、「3着以内を死守しそうな堅実な馬」または「3着に滑り込みそうな期待値の高い穴馬（☆や△など）」をあえて1頭軸に指定し、4〜5頭へ流す（6点〜10点）フォーメーションをベースとすること。
+   - ワイド: ◎から☆（穴馬）や期待値の高い馬への流しを併用し、三連複が紐抜けした時の「保険（資金回収クッション）」として機能させること。
 
 出力フォーマット：
 ---
@@ -516,10 +385,10 @@ with tab_forecast:
 
 ### 🌪️ 2. レース波乱度と展開分析
 * **【レース判定】:** 「堅実決着」または「波乱（混戦）」とその理由
-* **【展開・バリュー評価】:** （判定に基づいた過剰人気馬や狙い目の穴馬の指摘）
+* **【展開・バリュー評価】:** （AIスコアによる実力評価と、期待値による妙味の指摘）
 
 ### 🎯 3. 勝ちぱかくんの印と詳細見解
-* **◎（本命）:** 〇番（馬名） - （レース判定に基づいた抜擢理由）
+* **◎（本命）:** 〇番（馬名） - （抜擢理由）
 * **◯（対抗）:** 〇番（馬名）
 * **▲（単穴）:** 〇番（馬名）
 * **△（連下）:** 〇番（馬名）、〇番（馬名）
@@ -529,8 +398,8 @@ with tab_forecast:
 * **【戦略】:** （堅いので少点数で絞る、混戦なので手広く買う等）
 * **単勝:** ◎ (1点)
 * **馬連:** ◎ － ◯, ▲, △, ☆ (方針に合わせて点数を調整)
-* **ワイド:** ◎ － ◯, ▲, ☆ (方針に合わせて点数を調整)
-* **三連複:** ◎ 1頭軸流し － ◯, ▲, △, ☆ (相手4〜5頭推奨)
+* **ワイド (保険):** ◎ － ☆など期待値上位 (連敗防止のクッションとして活用)
+* **三連複 (本線):** [3着狙いの軸馬] 1頭軸流し － [相手4〜5頭]
 * **三連単:** 1着:◎ → 2・3着:◯, ▲, △, ☆ (方針に合わせて点数を調整)
 ---
 """

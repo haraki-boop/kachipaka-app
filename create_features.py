@@ -47,16 +47,8 @@ def main():
 
     print("Calculating Jockey Stats...")
     jockey_stats = df.groupby('騎手')['is_win'].mean().reset_index()
-    jockey_stats.rename(columns={'is_win': 'jockey_win_rate'}, inplace=True)
+    jockey_stats.rename(columns={'is_win': 'jockey_win_power'}, inplace=True)
     df = pd.merge(df, jockey_stats, on='騎手', how='left')
-    
-    if 'place_code' in df.columns:
-        df['place_code'] = df['place_code'].astype(str)
-        jp_stats = df.groupby(['騎手', 'place_code'])['is_win'].mean().reset_index()
-        jp_stats.rename(columns={'is_win': 'jockey_track_win_rate'}, inplace=True)
-        df = pd.merge(df, jp_stats, on=['騎手', 'place_code'], how='left')
-    else:
-        df['jockey_track_win_rate'] = df['jockey_win_rate']
 
     print("Encoding categories...")
     if 'surface' in df.columns:
