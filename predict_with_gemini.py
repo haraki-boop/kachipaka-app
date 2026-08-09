@@ -110,129 +110,7 @@ df_future = load_future_data()
 df_history = load_history_data()
 
 # ==========================================
-# 2. スクレイパー関数
-# ==========================================
-def get_target_dates():
-    today = datetime.now()
-    return sorted(list(set([(today + timedelta(days=i)).strftime("%Y%m%d") for i in range(7) if (today + timedelta(days=i)).weekday() in [5, 6]])))
-
-def clean_text(text):
-    return re.sub(r'\s+', ' ', re.sub(r'[\r\n\t]+', ' ', text)).strip() if text else ""
-
-def run_scraper(p_text, p_bar):
-    target_dates = get_target_dates()
-    all_race_ids, id_to_date = [], {}
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": "https://race.netkeiba.com/"
-    })
-
-    p_text.text(f"📅 検索対象日: {target_dates}")
-    for date_str in target_dates:
-        url = f"https://race.netkeiba.com/top/race_list_sub.html?kaisai_date={date_str}"
-        try:
-            res = session.get(url, timeout=10)
-            if res.status_code == 200:
-                found_ids = re.findall(r'race_id=["\']?(\d{12})["\']?', res.text)
-                for rid in found_ids:
-                    if rid not in all_race_ids:
-                        all_race_ids.append(rid)
-                        id_to_date[rid] = date_str
-        except: pass
-        time.sleep(1)
-
-    if not all_race_ids: return False
-
-    race_data_list = []
-    weekdays = ["月", "火", "水", "木", "金", "土", "日"]
-    total = len(all_race_ids)
-
-    for i, race_id in enumerate(all_race_ids):
-        p_text.text(f"📥 出馬表とオッズを取得中... ({i+1}/{total} レース)")
-        p_bar.progress((i + 1) / total)
-        
-        odds_dict = {}
-        try:
-            odds_res = session.get(f"https://race.netkeiba.com/api/api_get_jra_odds.html?race_id={race_id}&type=1&action=init", timeout=5)
-            if odds_res.status_code == 200:
-                odds_json = odds_res.json()
-                if 'data' in odds_json and 'odds' in odds_json['data'] and '1' in odds_json['data']['odds']:
-                    for umaban, vals in odds_json['data']['odds']['1'].items(): odds_dict[str(int(umaban))] = float(vals[0])
-        except: pass
-        if not odds_dict:
-            try:
-                odds_res = session.get(f"https://race.netkeiba.com/api/api_get_nar_odds.html?race_id={race_id}&type=1&action=init", timeout=5)
-                if odds_res.status_code == 200:
-                    odds_json = odds_res.json()
-                    if 'data' in odds_json and 'odds' in odds_json['data'] and '1' in odds_json['data']['odds']:
-                        for umaban, vals in odds_json['data']['odds']['1'].items():
-                            odds_dict[str(int(umaban))] = float(vals[0])
-            except: pass
-
-        try:
-            res = session.get(f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}", timeout=10)
-            if res.status_code == 200:
-                res.encoding = 'utf-8'
-                soup = BeautifulSoup(res.text, "html.parser")
-                d_str = id_to_date.get(race_id, "")
-                display_date = f"{datetime.strptime(d_str, '%Y%m%d').month}月{datetime.strptime(d_str, '%Y%m%d').day}日({weekdays[datetime.strptime(d_str, '%Y%m%d').weekday()]})" if d_str else "不明"
-                
-                r_name_elem = soup.find(class_="RaceName") or soup.find(class_="RaceList_Item02")
-                r_name = clean_text(r_name_elem.find("span", class_="RaceName_main").text) if r_name_elem and r_name_elem.find("span", class_="RaceName_main") else (clean_text(r_name_elem.text) if r_name_elem else "")
-
-                surface, distance, condition = "不明", np.nan, "不明"
-                race_data01 = soup.find(class_="RaceData01")
-                if race_data01:
-                    rd_text = race_data01.text
-                    if "芝" in rd_text: surface = "芝"
-                    elif "ダ" in rd_text: surface = "ダート"
-                    elif "障" in rd_text: surface = "障害"
-                    dist_match = re.search(r'(\d+)m', rd_text)
-                    if dist_match: distance = float(dist_match.group(1))
-                    if "良" in rd_text: condition = "良"
-                    elif "稍" in rd_text: condition = "稍重"
-                    elif "重" in rd_text: condition = "重"
-                    elif "不良" in rd_text: condition = "不良"
-
-                for row in soup.select("tr.HorseList"):
-                    cols = row.find_all("td")
-                    if len(cols) >= 7:
-                        nm = clean_text(cols[3].find("a").text) if cols[3].find("a") else clean_text(cols[3].text)
-                        ub = clean_text(cols[1].text)
-                        if nm and ub.isdigit():
-                            sa = clean_text(cols[4].text)
-                            pop_val = np.nan
-                            odds_val = odds_dict.get(str(int(ub)), np.nan)
-                            if pd.isna(odds_val):
-                                odds_elem = row.find(class_=re.compile(r'Popular_Txt|Odds'))
-                                if odds_elem:
-                                    try: odds_val = float(clean_text(odds_elem.text))
-                                    except: pass
-                            pop_elem = row.find(class_=re.compile(r'Popular_Num'))
-                            if pop_elem:
-                                try: pop_val = float(clean_text(pop_elem.text))
-                                except: pass
-
-                            race_data_list.append({
-                                "race_id": str(race_id), "date": display_date, "race_name": r_name,
-                                "枠番": clean_text(cols[0].text), "馬番": ub, "馬名": nm,
-                                "sex_code": sa[0] if sa else "", "age": sa[1:] if len(sa)>1 else "",
-                                "斤量": clean_text(cols[5].text),
-                                "騎手": clean_text(cols[6].find("a").text) if cols[6].find("a") else clean_text(cols[6].text),
-                                "単勝": odds_val, "人気": pop_val,
-                                "surface": surface, "distance": distance, "condition": condition
-                            })
-            time.sleep(random.uniform(0.3, 0.7))
-        except: pass
-
-    if race_data_list:
-        pd.DataFrame(race_data_list).to_csv(FUTURE_CSV, index=False, encoding='utf-8-sig')
-        return True
-    return False
-
-# ==========================================
-# サイドバー UI
+# 2. サイドバー UI (配当取得・リセット)
 # ==========================================
 st.sidebar.header("🔄 画面の更新")
 if st.sidebar.button("🔄 最新の情報にリロード", use_container_width=True):
@@ -253,7 +131,6 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                     axis = str(int(row['honmei_umaban']))
                     partners = [str(int(p.strip())) for p in str(row.get('partners', '')).split(',') if p.strip().isdigit()]
                     payout_found = False
-                    
                     payouts = {'単勝': 0, '馬連': 0, 'ワイド': 0, '三連複': 0, '三連単': 0}
                     
                     for url in [f"https://race.netkeiba.com/race/result.html?race_id={str(row['race_id'])}", f"https://db.netkeiba.com/race/{str(row['race_id'])}/"]:
@@ -337,9 +214,8 @@ if st.sidebar.button("💥 ゴミ予想履歴を完全消去", type="primary", u
         st.rerun()
     except: pass
 
-
 # ==========================================
-# 3. AIスコア計算 ＋ 予想出力
+# 3. AIスコア計算
 # ==========================================
 def calculate_race_scores(race_id_target, target_df):
     if target_df.empty or model_data is None: return None
@@ -355,17 +231,11 @@ def calculate_race_scores(race_id_target, target_df):
         agg_dict = {'is_win': ['sum', 'count']}
         if 'my_time_idx' in df_past.columns: agg_dict['my_time_idx'] = 'mean'
         if 'my_last3f_idx' in df_past.columns: agg_dict['my_last3f_idx'] = 'mean'
-        if 'my_pace_idx' in df_past.columns: agg_dict['my_pace_idx'] = 'mean'
-        if 'my_start_idx' in df_past.columns: agg_dict['my_start_idx'] = 'mean'
         
         horse_stats = df_past.groupby('馬名').agg(agg_dict).reset_index()
-        
         new_cols = ['馬名', 'total_wins', 'total_runs']
         if 'my_time_idx' in df_past.columns: new_cols.append('my_time_idx')
         if 'my_last3f_idx' in df_past.columns: new_cols.append('my_last3f_idx')
-        if 'my_pace_idx' in df_past.columns: new_cols.append('my_pace_idx')
-        if 'my_start_idx' in df_past.columns: new_cols.append('my_start_idx')
-        
         horse_stats.columns = new_cols
         race_df = pd.merge(race_df, horse_stats, on='馬名', how='left')
 
@@ -379,22 +249,14 @@ def calculate_race_scores(race_id_target, target_df):
     for f in features:
         if f not in race_df.columns:
             race_df[f] = 50.0 if 'idx' in f else 0.0
+            
     if 'my_time_idx' in race_df.columns: race_df['my_time_idx'] = race_df['my_time_idx'].fillna(50.0)
     if 'my_last3f_idx' in race_df.columns: race_df['my_last3f_idx'] = race_df['my_last3f_idx'].fillna(50.0)
-    if 'my_pace_idx' in race_df.columns: race_df['my_pace_idx'] = race_df['my_pace_idx'].fillna(50.0)
-    if 'my_start_idx' in race_df.columns: race_df['my_start_idx'] = race_df['my_start_idx'].fillna(50.0)
     if 'jockey_win_power' in race_df.columns: race_df['jockey_win_power'] = race_df['jockey_win_power'].fillna(0.0)
 
     if 'sex_code' in race_df.columns and race_df['sex_code'].dtype == object:
         race_df['sex_code'] = race_df['sex_code'].map({'牡': 0, '牝': 1, 'セ': 2}).fillna(0)
         
-    if 'le_surf' in model_data and 'surface' in race_df.columns:
-        le_surf = model_data['le_surf']
-        race_df['surface_code'] = race_df['surface'].map(lambda s: le_surf.transform([s])[0] if s in le_surf.classes_ else le_surf.transform(['不明'])[0])
-    if 'le_cond' in model_data and 'condition' in race_df.columns:
-        le_cond = model_data['le_cond']
-        race_df['condition_code'] = race_df['condition'].map(lambda c: le_cond.transform([c])[0] if c in le_cond.classes_ else le_cond.transform(['不明'])[0])
-
     X = race_df[features].copy()
     X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
 
@@ -417,55 +279,57 @@ def calculate_race_scores(race_id_target, target_df):
     
     return race_df.sort_values(by='score', ascending=False).reset_index(drop=True)
 
+# ==========================================
+# 4. マーカー（バッジ）の判定 (新馬対応＆厳格化)
+# ==========================================
 def get_all_markers():
     markers = {}
     if df_future.empty: return markers
     for rid in df_future['race_id'].unique():
         sdf = calculate_race_scores(rid, df_future)
         if sdf is not None and len(sdf) >= 5:
-            sc = sdf['score'].tolist()
+            rname = str(sdf['race_name'].iloc[0]) if 'race_name' in sdf.columns else ""
             
+            # 【新馬戦回避ロジック】新馬戦は過去データがないため別枠扱い
+            if "新馬" in rname:
+                markers[rid] = "【🐣新馬・データなし】"
+                continue
+
+            sc = sdf['score'].tolist()
             top_diff = sc[0] - sc[1]
             top3_diff = sc[0] - sc[2]
-            top5_diff = sc[0] - sc[4]
 
-            # 【🔥狙い目】判定判定：AIスコア順位3位以内でありながら、実際の人気が4番人気以降の馬がいるか
+            # 【超・厳格化ロジック】真の狙い目（オッズ異常）のみを抽出
             is_neraime = False
-            if '人気' in sdf.columns and len(sdf) >= 3:
-                top3_df = sdf.iloc[:3]
-                for _, r in top3_df.iterrows():
-                    pop = pd.to_numeric(r.get('人気', 999), errors='coerce')
-                    if pd.isna(pop): pop = 999
-                    if pop >= 4:
-                        is_neraime = True
-                        break
+            if '人気' in sdf.columns and len(sdf) >= 2:
+                pop1 = pd.to_numeric(sdf.iloc[0].get('人気', 999), errors='coerce')
+                pop2 = pd.to_numeric(sdf.iloc[1].get('人気', 999), errors='coerce')
+                
+                # エラー値(999)や欠損を除外した上で判定
+                if not pd.isna(pop1) and pop1 != 999 and pop1 >= 4:
+                    is_neraime = True  # AI1位なのに4番人気以降（激ウマ本命）
+                elif not pd.isna(pop2) and pop2 != 999 and pop2 >= 6:
+                    is_neraime = True  # AI2位なのに6番人気以降（特大穴対抗）
 
-            if sc[0] >= 110 and (top_diff >= 18 or top3_diff >= 30):
-                race_type = "【堅】"
-            elif sc[0] < 95 or (top_diff <= 7 and top5_diff <= 25):
-                race_type = "【穴】"
-            else:
-                race_type = "【普】"
+            if sc[0] >= 110 and top3_diff >= 30: race_type = "【堅】"
+            elif sc[0] < 95 or top_diff <= 7: race_type = "【波乱】"
+            else: race_type = "【普】"
 
-            if is_neraime:
-                race_type = "【🔥狙い目】" + race_type
+            if is_neraime: race_type = "【🔥狙い目】" + race_type
 
-            if sc[0] >= 115 and top_diff >= 15:
-                mark = "★"
-            elif top5_diff <= 10:
-                mark = "◎"
-            else:
-                mark = ""
-            
+            mark = "★" if sc[0] >= 115 and top_diff >= 15 else ("◎" if top3_diff >= 20 else "")
             markers[rid] = f"{race_type} {mark}".strip()
     return markers
 markers = get_all_markers()
 
+# ==========================================
+# 5. メインUI (タブ構成)
+# ==========================================
 tab_forecast, tab_dashboard = st.tabs(["🏇 レース予想", "📈 実戦成績"])
 
 with tab_forecast:
     if df_future.empty:
-        st.warning("⚠️ 出馬表データが存在しません。BOT（auto_pipeline_bot.py）を実行してデータを読み込ませてください。")
+        st.warning("⚠️ 出馬表データが存在しません。BOTを実行してデータを読み込ませてください。")
     else:
         date_options = sorted(df_future['day_label'].unique())
         selected_date = st.radio("開催日", date_options, horizontal=True, label_visibility="collapsed")
@@ -490,135 +354,95 @@ with tab_forecast:
                     label = f"{r}R {mark}".strip()
                     if rname: label = f"{r}R {rname[:5]}… {mark}".strip()
                         
-                    btn_type = "primary" if ("【堅】" in mark or "★" in mark or "🔥" in mark) else "secondary"
+                    btn_type = "primary" if ("🔥" in mark or "★" in mark) else "secondary"
                     if col.button(label, key=f"btn_{rid}", use_container_width=True, type=btn_type):
                         st.session_state['selected_race_id'] = rid
 
-    if st.session_state['selected_race_id'] and not df_future.empty and 'race_id' in df_future.columns:
+    # --- 予想実行セクション ---
+    if st.session_state['selected_race_id'] and not df_future.empty:
         st.markdown("---")
         target_id = st.session_state['selected_race_id']
         target_race_info = df_future[df_future['race_id'] == target_id].iloc[0]
         rname = target_race_info.get('race_name', "")
-        race_display_name = f"{target_race_info['place_name']} {target_race_info['r_num']}R 【{rname}】" if rname else f"{target_race_info['place_name']} {target_race_info['r_num']}R"
-            
+        is_newcomer = "新馬" in str(rname)
+        
+        race_display_name = f"{target_race_info['place_name']} {target_race_info['r_num']}R 【{rname}】"
         st.subheader(f"🚀 {race_display_name}")
         
-        if st.button("🧠 勝ちぱかくんに最終予想させる！", type="primary", use_container_width=True):
+        scored_df = calculate_race_scores(target_id, df_future)
+        
+        if scored_df is not None and len(scored_df) > 0:
+            # 💡 【完全分業 UI】Python側で綺麗なデータフレームを描画する
+            st.markdown("##### 📊 出走馬 データ＆ベースAI評価一覧")
+            disp_df = scored_df.copy()
+            disp_df['馬番'] = disp_df['馬番'].apply(lambda x: f"{int(x):02d}")
+            disp_df['単勝オッズ'] = disp_df['単勝'].apply(lambda x: f"{x}倍" if pd.notnull(x) and x>0 else "-")
+            disp_df['人気'] = disp_df['人気'].apply(lambda x: f"{int(x)}人気" if pd.notnull(x) and x!=999 else "-")
+            disp_df['AI勝率'] = disp_df['win_prob'].apply(lambda x: f"{x*100:.1f}%")
+            disp_df['期待値'] = disp_df.apply(lambda r: f"{(r['win_prob'] * r['単勝']):.2f}" if pd.notnull(r['単勝']) and r['単勝']>0 else "-", axis=1)
+            disp_df['騎手(勝率)'] = disp_df.apply(lambda r: f"{r.get('騎手','')} ({r.get('jockey_win_power',0)*100:.1f}%)", axis=1)
+            
+            show_cols = ['馬番', '馬名', '騎手(勝率)', '単勝オッズ', '人気', 'AI勝率', '期待値', 'score']
+            if is_newcomer:
+                st.info("🐣 新馬戦のため、過去データに基づくAIスコアは参考値（または無効）です。")
+                show_cols = ['馬番', '馬名', '騎手(勝率)', '単勝オッズ', '人気'] # スコア等を除外表示
+                
+            st.dataframe(disp_df[show_cols], use_container_width=True, hide_index=True)
+        
+        if st.button("🧠 勝ちぱかくんに最終予想させる！ (検索・分析を実行)", type="primary", use_container_width=True):
             if not GEMINI_API_KEY:
                 st.error("【設定エラー】APIキーが見つかりません。")
                 st.stop()
                 
-            scored_df = calculate_race_scores(target_id, df_future)
             if scored_df is None or len(scored_df) < 6:
                 st.error("出走頭数が少ない、またはデータが不足しているため予想をスキップします。")
                 st.stop()
 
-            # --- 印と買い目の確定（AIスコア順位絶対主義） ---
-            # ◎ = AIスコア1位
-            honmei_row = scored_df.iloc[0]
-            honmei_umaban = int(honmei_row['馬番'])
-            honmei_name = honmei_row['馬名']
-            
-            # 相手5頭 = AIスコア2位〜6位
-            partners_df = scored_df.iloc[1:6]
-            partners_list = partners_df['馬番'].astype(int).tolist()
-            partners_str = ",".join(map(str, partners_list))
-            
-            # 【過小評価馬（真の狙い目）】の検出（AIスコア1〜3位の中で4番人気以降の馬）
-            neraime_horses = []
-            for rank_idx, r in scored_df.iloc[:3].iterrows():
-                pop = pd.to_numeric(r.get('人気', 999), errors='coerce')
-                if pd.isna(pop): pop = 999
-                if pop >= 4:
-                    mark_symbol = "◎" if rank_idx == 0 else ("◯" if rank_idx == 1 else "▲")
-                    neraime_horses.append(f"{mark_symbol} {int(r['馬番']):02d}番 {r['馬名']}（AIスコア{rank_idx+1}位 / 実際は{int(pop)}番人気）")
-
-            if df_history.empty or str(target_id) not in df_history['race_id'].astype(str).values:
-                new_record = pd.DataFrame([{'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'race_id': str(target_id), 'race_name': race_display_name, 'honmei_umaban': honmei_umaban, 'partners': partners_str, 'honmei_name': honmei_name, 'result_pay': "", 'pay_tansho': 0, 'pay_umaren': 0, 'pay_wide': 0, 'pay_sanrenpuku': 0, 'pay_sanrentan': 0}])
-                df_history = pd.concat([df_history, new_record], ignore_index=True)
-                df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig')
-
+            # データ送信用テキスト化
             table_summary = []
             for idx, row in scored_df.iterrows():
-                odds = row.get('単勝', 0) if pd.notna(row.get('単勝')) else 0.0
-                pop = row.get('人気', '-') if pd.notna(row.get('人気')) else '-'
-                j_power = row.get('jockey_win_power', 0.0)
-                j_info = "過去データなし(要検索)" if j_power == 0.0 else f"勝率{j_power*100:.1f}%"
-                ev = (row['win_prob'] * odds) if odds > 0 else 0.0
-                
                 table_summary.append(
                     f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | "
-                    f"騎手:{row.get('騎手', '不明')}({j_info}) | "
-                    f"オッズ:{odds}倍 ({pop}人気) | "
-                    f"純粋勝率:{row['win_prob']*100:.1f}% | 🎯期待値:{ev:.2f} | "
-                    f"AIスコア:{row['score']:3d}"
+                    f"騎手:{row.get('騎手', '不明')} | オッズ:{row.get('単勝', 0)}倍 ({row.get('人気', 999)}人気) | "
+                    f"ベースAIスコア:{row.get('score', 0)}"
                 )
 
-            system_instruction = f"""
-あなたはプロの競馬分析AI「勝ちぱかくん」です。以下の絶対ルールに従い、指定された印と買い目のプロフェッショナルな解説を行ってください。
+            # --- プロンプト構築（裁量権付与） ---
+            system_instruction = """
+あなたはプロの競馬分析AI「勝ちぱかくん」です。以下の絶対ルールに従い、プロフェッショナルな解説と最終的な買い目を構築してください。
 
-【絶対遵守事項】
-1. 挨拶や前置きは一切不要。結果のみを出力すること。
-2. 【印と買い目の完全固定】: 今回のレースの印と買い目はシステム（AIスコア）側ですでに確定しています。指定された「確定済みの印と買い目」を100%そのまま出力してください。オッズや人気を理由に勝手に馬番を変えたり、上位馬の評価を格下げしたりすることは絶対に禁止です。
-3. 【解説の重要ミッション】:
-   - 【軸馬の根拠】: ◎の馬が世間の1番人気でない場合、なぜ世間の1番人気ではなく、この馬（AIスコア1位）が本命軸として最も勝率が高いのか合理的根拠（タイム、展開、適性など）を提示すること。
-   - 【過小評価馬（狙い目）のアピール】: 「AIスコア3位以内（3着以内確率極高）でありながら4番人気以降に放置されている馬」が存在する場合、「💥 勝ちぱかくんの「特注」爆発狙い馬！」という見出しで、なぜ世間に軽視されているのか（前走不利、脚質の見落とし等）を熱くアピールすること。
-4. 過激な煽り文句（バク穴、全財産など）は絶対に使用しない。プロとしての説得力ある分析を行うこと。
-5. 【推奨買い目のフォーマット】:
-   - 単勝: ◎ (1点)
-   - 馬連: ◎ － ◯, ▲, △ (上位3点絞り)
-   - ワイド: ◎ － ◯, ▲, △ (上位3点絞り)
-   - 三連複: ◎ 1頭軸流し － ◯, ▲, △, ☆ (10点)
-   - 三連単 (フォーメーション): ◎ 1着固定流し → ◯, ▲, △, ☆ (20点)
-   - 三連単 (マルチ): ◎・◯ 2頭軸マルチ － ▲, △, ☆ (24点)
+【絶対遵守事項（ハイブリッド予想ルール）】
+1. あなたには「Pythonが算出したベースAIスコア」が提供されますが、これらは「一次審査」に過ぎません。
+2. あなたは【Web検索ツール】を使用して、直前の調教タイム、血統、陣営コメント、馬場状態などを必ず検索してください。
+3. 【裁量権の行使】: 検索で得た最新情報や、オッズから算出した「期待値（妙味）」を考慮し、ベースAIスコアの順位にとらわれず、あなたがプロとして「最終的な印（◎◯▲△☆）」を決定・変更して構いません。
+4. 【期待値による足切り】: オッズが低すぎて期待値がマイナスだと判断した場合は、無理に買い目を提示せず「このレースは妙味がないため『見（ケン）』を推奨」と宣言してください。
+5. 表（Markdownのテーブル）はシステム側で描画済みのため、あなたは**絶対に表を出力しないでください**。文章と買い目のみを出力すること。
 
-出力フォーマット：
+【出力フォーマット】
 ---
-### 📊 1. 出走馬 期待値＆データ一覧
-（※提供データを元に、以下のカラム構成のMarkdownテーブルを出力すること。表の行順は絶対に【提供されたデータの並び順（AIスコアの高い順）そのまま】とし、馬番順や人気順に並び替えないこと。コードブロック「```」で囲まないこと。「評価」欄には印とシンプルな評価を一言記載）
-| 馬番 | 馬名 | 騎手 | 推定オッズ | 純粋勝率 | 🎯期待値 | AIスコア | 評価 |
-|:---:|:---|:---|:---:|:---:|:---:|:---:|:---|
+### 🌪️ レース波乱度と展開分析
+* （検索結果や血統・馬場を元にした展開予想）
 
-### 🌪️ 2. レース波乱度と展開分析
-* **【レース判定】:** 「堅実決着」または「波乱含み」とその理由
-* **【展開・バリュー評価】:** （AIスコアと世間の人気を比較した冷静な分析）
+### 💥 勝ちぱかくんの最終ジャッジ（印と根拠）
+* **◎（本命）:** 〇〇番（馬名） - （AIスコアや検索結果を加味した抜擢理由）
+* **◯（対抗）:** 〇〇番（馬名） - （見解）
+* **▲（単穴）:** 〇〇番（馬名） - （見解）
+* **△（連下）:** 〇〇番、〇〇番
+* **☆（穴馬）:** 〇〇番 - （オッズ妙味や展開での激走期待）
 
-### 💥 3. 勝ちぱかくんの「特注」爆発狙い馬！（※過小評価馬が存在する場合のみ出力）
-* （AIスコアトップ3でありながら4番人気以降に甘んじている馬についての熱い分析文）
-
-### 🎯 4. 勝ちぱかくんの印と詳細見解
-* **◎（本命）:** {int(scored_df.iloc[0]['馬番']):02d}番（{scored_df.iloc[0]['馬名']}） - （本命理由。世間の1番人気と異なる場合はその抜擢根拠）
-* **◯（対抗）:** {int(scored_df.iloc[1]['馬番']):02d}番（{scored_df.iloc[1]['馬名']}） - （見解）
-* **▲（単穴）:** {int(scored_df.iloc[2]['馬番']):02d}番（{scored_df.iloc[2]['馬名']}） - （見解）
-* **△（連下）:** {int(scored_df.iloc[3]['馬番']):02d}番（{scored_df.iloc[3]['馬名']}）、{int(scored_df.iloc[4]['馬番']):02d}番（{scored_df.iloc[4]['馬名']}）
-* **☆（押さえ）:** {int(scored_df.iloc[5]['馬番']):02d}番（{scored_df.iloc[5]['馬名']}）
-
-### 💡 5. 戦略的・推奨買い目
-* **単勝:** ◎ (1点)
-* **馬連:** ◎ － ◯, ▲, △ (3点)
-* **ワイド:** ◎ － ◯, ▲, △ (3点)
-* **三連複:** ◎ 1頭軸流し － ◯, ▲, △(2頭), ☆ (10点)
-* **三連単 (フォーメーション):** ◎ 1着固定流し → ◯, ▲, △(2頭), ☆ (20点)
-* **三連単 (マルチ):** ◎・◯ 2頭軸マルチ － ▲, △(2頭), ☆ (24点)
+### 💡 戦略的・推奨買い目
+* （オッズや自信度に応じた、最も儲かる券種と資金配分を自由に提案してください。ガミる買い目は避けること）
 ---
 """
             prompt = f"対象レース: {race_display_name}\n\n"
-            prompt += f"【確定済みの印（AIスコア絶対順位）】\n"
-            prompt += f"◎(AIスコア1位): {int(scored_df.iloc[0]['馬番']):02d}番 {scored_df.iloc[0]['馬名']}\n"
-            prompt += f"◯(AIスコア2位): {int(scored_df.iloc[1]['馬番']):02d}番 {scored_df.iloc[1]['馬名']}\n"
-            prompt += f"▲(AIスコア3位): {int(scored_df.iloc[2]['馬番']):02d}番 {scored_df.iloc[2]['馬名']}\n"
-            prompt += f"△(AIスコア4位): {int(scored_df.iloc[3]['馬番']):02d}番 {scored_df.iloc[3]['馬名']}\n"
-            prompt += f"△(AIスコア5位): {int(scored_df.iloc[4]['馬番']):02d}番 {scored_df.iloc[4]['馬名']}\n"
-            prompt += f"☆(AIスコア6位): {int(scored_df.iloc[5]['馬番']):02d}番 {scored_df.iloc[5]['馬名']}\n\n"
-            
-            if neraime_horses:
-                prompt += f"【検出された過小評価馬（🔥狙い目）】\n" + "\n".join(neraime_horses) + "\n※この馬（たち）について「💥 勝ちぱかくんの「特注」爆発狙い馬！」セクションで強くアピールしてください。\n\n"
+            if is_newcomer:
+                prompt += "【⚠️重要指示】このレースは「新馬戦」のため過去データが存在せず、ベースAIスコアは無効（全て同点等）です。AIスコアは完全に無視し、Web検索を用いて『血統』『追い切り（調教）タイム』『厩舎コメント』を調査し、あなた自身の推理で予想を組み立ててください。\n\n"
             else:
-                prompt += "【過小評価馬の検出】: なし（AI上位と世間の人気が概ね一致しているレースです）\n\n"
+                prompt += "【指示】提供されたベースAIスコアを基準にしつつ、オッズの妙味や検索による最新情報（枠の有利不利、血統適性など）を加味して、印を最終決定してください。\n\n"
                 
-            prompt += f"出走馬データ:\n{chr(10).join(table_summary)}"
+            prompt += f"出走馬データ（ベース情報）:\n{chr(10).join(table_summary)}"
 
-            with st.spinner("AIがレース波乱度を分析し、Gemini(3.6 Flash)が最適戦略を構築中..."):
+            with st.spinner("AIが最新情報を検索し、最適戦略と最終買い目を構築中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 try:
                     response = client.models.generate_content(
@@ -626,15 +450,31 @@ with tab_forecast:
                         contents=prompt,
                         config=types.GenerateContentConfig(
                             system_instruction=system_instruction,
-                            temperature=0.0,
+                            temperature=0.3,
                             tools=[{"googleSearch": {}}]
                         )
                     )
                     res_text = response.text if response.text else (response.candidates[0].content.parts[0].text if response.candidates else "")
-                    if res_text: st.markdown(res_text)
-                    else: st.warning("⚠️ 回答を取得できませんでした。")
-                    st.success("📝 実戦履歴に記録しました！")
-                except Exception as e: st.error(f"【APIエラー】: {e}")
+                    
+                    if res_text:
+                        st.markdown(res_text)
+                        # --- 履歴保存処理 ---
+                        # Geminiの出力結果から、正規表現で◎の馬番と相手を抽出して保存するロジック
+                        honmei_match = re.search(r'◎.*?[）:]\s*(\d+)番', res_text)
+                        h_umaban = int(honmei_match.group(1)) if honmei_match else int(scored_df.iloc[0]['馬番'])
+                        
+                        all_nums = re.findall(r'(\d+)番', res_text)
+                        partners_str = ",".join(list(dict.fromkeys([n for n in all_nums if int(n) != h_umaban]))[:5])
+                        
+                        if df_history.empty or str(target_id) not in df_history['race_id'].astype(str).values:
+                            new_record = pd.DataFrame([{'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'race_id': str(target_id), 'race_name': race_display_name, 'honmei_umaban': h_umaban, 'partners': partners_str, 'honmei_name': "履歴参照", 'result_pay': "", 'pay_tansho': 0, 'pay_umaren': 0, 'pay_wide': 0, 'pay_sanrenpuku': 0, 'pay_sanrentan': 0}])
+                            df_history = pd.concat([df_history, new_record], ignore_index=True)
+                            df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig')
+                        st.success("📝 実戦履歴に記録しました！(印の最終結果を反映)")
+                    else:
+                        st.warning("⚠️ 回答を取得できませんでした。")
+                except Exception as e:
+                    st.error(f"【APIエラー】: {e}")
 
 with tab_dashboard:
     st.subheader("📈 実戦成績ダッシュボード")
