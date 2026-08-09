@@ -525,16 +525,19 @@ with tab_forecast:
                     f"AIスコア:{row['score']:3d}"
                 )
 
-            # 【追加】絶対にAIスコア順（渡した順）に並べさせるように指示を追加
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」です。以下の絶対ルールに従い、最適な馬券戦略を遂行してください。
 
 【絶対遵守事項】
 1. 挨拶や前置きは一切不要。
-2. 【印の基本原則】: AIスコア（純粋な実力値）を最優先とし、実力上位馬を素直に評価すること。無理な穴狙いや、過激な煽り文句（バク穴など）は絶対に使用しない。
+2. 【印の基本原則（オッズの適度な加味）】: 単なるAIスコア順の丸写しは絶対に禁止。AIスコアをベースにしつつも、実際の「オッズ」や「期待値」を"適度に"加味して印（◎◯▲△☆）を打つこと。
+   - 実力（スコア）に見合わない「過剰人気馬」は評価を下げる。
+   - AIスコアが上位〜中位で、かつオッズが高い「妙味のある馬」の評価を上げる。
+   - ただし、オッズに引っ張られすぎて実力皆無の大穴ばかりを狙うのは禁止。バランスを保つこと。
+   - 過激な煽り文句（バク穴など）は絶対に使用しない。
 3. 【レース別戦略】: 
    - 堅いレース（AIスコア上位が抜けている）: 無理に穴馬を入れず、上位人気で点数を絞り手堅く仕留める。
-   - 波乱レース（AIスコアが拮抗している）: 期待値が1.0を超える馬を紐（△や☆）に組み込み、高配当を狙う。
+   - 波乱レース（AIスコアが拮抗している）: 期待値が1.0を超える馬を紐（△や☆）に確実に入れ、高配当を狙う。
 4. 【紐抜け防止】: AIスコアが120以上の馬は必ず相手（紐）に含めること。
 5. いかなる戦略でも、トリガミ（的中してもマイナス）は完全に排除する。
 6. 【買い目の指定】
@@ -598,101 +601,106 @@ with tab_dashboard:
         df_history['year_month'] = df_history['datetime'].dt.strftime('%Y年%m月')
         df_history['just_date'] = df_history['datetime'].dt.strftime('%Y-%m-%d')
         
-        finished_races = df_history[pd.to_numeric(df_history['result_pay'], errors='coerce').notna()]
-        
         tab_total, tab_month, tab_day = st.tabs(["🏆 総合成績", "📅 月別成績", "📆 日別成績"])
         
-        def render_dashboard_for_df(target_df, title_prefix):
-            total = len(target_df)
-            if total == 0:
-                st.info(f"この期間の終了済みレースはありません。")
+        def render_dashboard_for_df(raw_df, title_prefix):
+            total_races = len(raw_df)
+            if total_races == 0:
+                st.info(f"この期間のレースはありません。")
                 return
             
-            hits = len(target_df[target_df['result_pay'].astype(float) > 0])
-            returns = target_df['result_pay'].astype(float).sum()
+            finished_df = raw_df[pd.to_numeric(raw_df['result_pay'], errors='coerce').notna()]
+            total = len(finished_df)
             
-            invested_total = 0
-            inv_tansho = 0
-            inv_umaren = 0
-            inv_wide = 0
-            inv_sanrenpuku = 0
-            inv_sanrentan = 0
-            
-            for _, r in target_df.iterrows():
-                p_list = [x for x in str(r.get('partners', '')).split(',') if x.strip().isdigit()]
-                p_len = len(p_list)
-                if p_len >= 3:
-                    inv_tansho += 100
-                    inv_umaren += 300  
-                    inv_wide += 300    
-                    inv_sanrenpuku += int(p_len * (p_len - 1) / 2) * 100 
-                    inv_sanrentan += int(p_len * (p_len - 1)) * 100      
-            
-            invested_total = inv_tansho + inv_umaren + inv_wide + inv_sanrenpuku + inv_sanrentan
-            roi_total = (returns / invested_total) * 100 if invested_total > 0 else 0.0
-            
-            st.markdown(f"**{title_prefix} 判明レース**: {total} 件")
-            col1, col2, col3 = st.columns(3)
-            col1.metric("🎯 的中率", f"{(hits/total)*100:.1f}%", f"{hits} / {total} 的中")
-            col2.metric("💰 回収率", f"{roi_total:.1f}%", delta_color="normal" if returns >= invested_total else "inverse")
-            col3.metric("💴 収支", f"{int(returns - invested_total):,} 円")
-            
-            st.markdown("<br><h5>🎫 券種別の詳細データ</h5>", unsafe_allow_html=True)
-            ticket_cols = st.columns(5)
-            
-            def make_ticket_card(col, name, hits_val, returns_val, inv_val):
-                roi_val = (returns_val / inv_val) * 100 if inv_val > 0 else 0
-                profit_val = int(returns_val - inv_val)
-                color = "red" if profit_val < 0 else "green"
-                sign = "+" if profit_val > 0 else ""
-                col.markdown(f'''
-                <div style="border:1px solid #ddd; padding:10px; border-radius:5px; text-align:center; background-color:#fafafa;">
-                    <div style="font-weight:bold; font-size:1.1em; margin-bottom:5px;">{name}</div>
-                    <div style="font-size:0.85em; color:#555;">投資: {int(inv_val):,}円</div>
-                    <div style="font-size:0.85em; color:#555;">的中率: {(hits_val/total)*100:.1f}%</div>
-                    <div style="font-size:0.85em; color:#555;">回収率: {roi_val:.1f}%</div>
-                    <div style="font-weight:bold; color:{color}; margin-top:5px;">{sign}{profit_val:,} 円</div>
-                </div>
-                ''', unsafe_allow_html=True)
+            if total == 0:
+                st.markdown(f"**{title_prefix} 判明レース**: 0 件 （結果待ち: {total_races} 件）")
+            else:
+                hits = len(finished_df[finished_df['result_pay'].astype(float) > 0])
+                returns = finished_df['result_pay'].astype(float).sum()
+                
+                invested_total = 0
+                inv_tansho = 0
+                inv_umaren = 0
+                inv_wide = 0
+                inv_sanrenpuku = 0
+                inv_sanrentan = 0
+                
+                for _, r in finished_df.iterrows():
+                    p_list = [x for x in str(r.get('partners', '')).split(',') if x.strip().isdigit()]
+                    p_len = len(p_list)
+                    if p_len >= 3:
+                        inv_tansho += 100
+                        inv_umaren += 300  
+                        inv_wide += 300    
+                        inv_sanrenpuku += int(p_len * (p_len - 1) / 2) * 100 
+                        inv_sanrentan += int(p_len * (p_len - 1)) * 100      
+                
+                invested_total = inv_tansho + inv_umaren + inv_wide + inv_sanrenpuku + inv_sanrentan
+                roi_total = (returns / invested_total) * 100 if invested_total > 0 else 0.0
+                
+                st.markdown(f"**{title_prefix} 判明レース**: {total} 件 （結果待ち: {total_races - total} 件）")
+                col1, col2, col3 = st.columns(3)
+                col1.metric("🎯 的中率", f"{(hits/total)*100:.1f}%", f"{hits} / {total} 的中")
+                col2.metric("💰 回収率", f"{roi_total:.1f}%", delta_color="normal" if returns >= invested_total else "inverse")
+                col3.metric("💴 収支", f"{int(returns - invested_total):,} 円")
+                
+                st.markdown("<br><h5>🎫 券種別の詳細データ</h5>", unsafe_allow_html=True)
+                ticket_cols = st.columns(5)
+                
+                def make_ticket_card(col, name, hits_val, returns_val, inv_val):
+                    roi_val = (returns_val / inv_val) * 100 if inv_val > 0 else 0
+                    profit_val = int(returns_val - inv_val)
+                    color = "red" if profit_val < 0 else "green"
+                    sign = "+" if profit_val > 0 else ""
+                    col.markdown(f'''
+                    <div style="border:1px solid #ddd; padding:10px; border-radius:5px; text-align:center; background-color:#fafafa;">
+                        <div style="font-weight:bold; font-size:1.1em; margin-bottom:5px;">{name}</div>
+                        <div style="font-size:0.85em; color:#555;">投資: {int(inv_val):,}円</div>
+                        <div style="font-size:0.85em; color:#555;">的中率: {(hits_val/total)*100:.1f}%</div>
+                        <div style="font-size:0.85em; color:#555;">回収率: {roi_val:.1f}%</div>
+                        <div style="font-weight:bold; color:{color}; margin-top:5px;">{sign}{profit_val:,} 円</div>
+                    </div>
+                    ''', unsafe_allow_html=True)
 
-            if 'pay_tansho' in target_df.columns:
-                h_t = len(target_df[target_df['pay_tansho'].astype(float) > 0])
-                r_t = target_df['pay_tansho'].astype(float).sum()
-                make_ticket_card(ticket_cols[0], "単勝", h_t, r_t, inv_tansho)
-                
-                h_u = len(target_df[target_df['pay_umaren'].astype(float) > 0])
-                r_u = target_df['pay_umaren'].astype(float).sum()
-                make_ticket_card(ticket_cols[1], "馬連", h_u, r_u, inv_umaren)
-                
-                h_w = len(target_df[target_df['pay_wide'].astype(float) > 0])
-                r_w = target_df['pay_wide'].astype(float).sum()
-                make_ticket_card(ticket_cols[2], "ワイド", h_w, r_w, inv_wide)
-                
-                h_3f = len(target_df[target_df['pay_sanrenpuku'].astype(float) > 0])
-                r_3f = target_df['pay_sanrenpuku'].astype(float).sum()
-                make_ticket_card(ticket_cols[3], "三連複", h_3f, r_3f, inv_sanrenpuku)
-                
-                h_3t = len(target_df[target_df['pay_sanrentan'].astype(float) > 0])
-                r_3t = target_df['pay_sanrentan'].astype(float).sum()
-                make_ticket_card(ticket_cols[4], "三連単", h_3t, r_3t, inv_sanrentan)
+                if 'pay_tansho' in finished_df.columns:
+                    h_t = len(finished_df[finished_df['pay_tansho'].astype(float) > 0])
+                    r_t = finished_df['pay_tansho'].astype(float).sum()
+                    make_ticket_card(ticket_cols[0], "単勝", h_t, r_t, inv_tansho)
+                    
+                    h_u = len(finished_df[finished_df['pay_umaren'].astype(float) > 0])
+                    r_u = finished_df['pay_umaren'].astype(float).sum()
+                    make_ticket_card(ticket_cols[1], "馬連", h_u, r_u, inv_umaren)
+                    
+                    h_w = len(finished_df[finished_df['pay_wide'].astype(float) > 0])
+                    r_w = finished_df['pay_wide'].astype(float).sum()
+                    make_ticket_card(ticket_cols[2], "ワイド", h_w, r_w, inv_wide)
+                    
+                    h_3f = len(finished_df[finished_df['pay_sanrenpuku'].astype(float) > 0])
+                    r_3f = finished_df['pay_sanrenpuku'].astype(float).sum()
+                    make_ticket_card(ticket_cols[3], "三連複", h_3f, r_3f, inv_sanrenpuku)
+                    
+                    h_3t = len(finished_df[finished_df['pay_sanrentan'].astype(float) > 0])
+                    r_3t = finished_df['pay_sanrentan'].astype(float).sum()
+                    make_ticket_card(ticket_cols[4], "三連単", h_3t, r_3t, inv_sanrentan)
 
-            st.markdown("<br>", unsafe_allow_html=True)
-            st.caption(f"※ 投資金額・回収率は「三連単◎1着固定流し(20点)」や「馬連・ワイド上位3点」などを想定した最適化実点数で計算されています。")
-            st.dataframe(target_df[['date', 'race_name', 'honmei_umaban', 'partners', 'honmei_name', 'result_pay']].sort_values(by='date', ascending=False), use_container_width=True)
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.caption(f"※ 投資金額・回収率は「三連単◎1着固定流し(20点)」や「馬連・ワイド上位3点」などを想定した最適化実点数で計算されています。")
+                
+            st.dataframe(raw_df[['date', 'race_name', 'honmei_umaban', 'partners', 'honmei_name', 'result_pay']].sort_values(by='date', ascending=False), use_container_width=True)
 
         with tab_total:
-            render_dashboard_for_df(finished_races, "総合")
+            render_dashboard_for_df(df_history, "総合")
             
         with tab_month:
-            months = sorted(finished_races['year_month'].dropna().unique(), reverse=True)
+            months = sorted(df_history['year_month'].dropna().unique(), reverse=True)
             if months:
                 selected_month = st.selectbox("表示する月を選択", months)
-                month_df = finished_races[finished_races['year_month'] == selected_month]
+                month_df = df_history[df_history['year_month'] == selected_month]
                 render_dashboard_for_df(month_df, f"{selected_month} の")
                 
         with tab_day:
-            days = sorted(finished_races['just_date'].dropna().unique(), reverse=True)
+            days = sorted(df_history['just_date'].dropna().unique(), reverse=True)
             if days:
                 selected_day = st.selectbox("表示する日付を選択", days)
-                day_df = finished_races[finished_races['just_date'] == selected_day]
+                day_df = df_history[df_history['just_date'] == selected_day]
                 render_dashboard_for_df(day_df, f"{selected_day} の")
