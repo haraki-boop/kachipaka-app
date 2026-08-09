@@ -107,7 +107,7 @@ df_future = load_future_data()
 df_history = load_history_data()
 
 # ==========================================
-# 2. スクレイパー関数 (BOT実行用)
+# 2. スクレイパー関数
 # ==========================================
 def get_target_dates():
     today = datetime.now()
@@ -244,6 +244,7 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
         if not df_history.empty:
             updated = False
             headers = {"User-Agent": "Mozilla/5.0"}
+            
             for idx, row in df_history.iterrows():
                 try:
                     axis = str(int(row['honmei_umaban']))
@@ -267,25 +268,30 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                             
                             payout_found = True
                             
-                            w_html = str(tds[0]).replace('<br/>', 'SPLIT').replace('<br>', 'SPLIT').replace('</div>', 'SPLIT')
-                            a_html = str(tds[1]).replace('<br/>', 'SPLIT').replace('<br>', 'SPLIT').replace('</div>', 'SPLIT')
+                            # 【重要修正】HTMLタグの間に強制的にスペースとSPLITを差し込む
+                            for br in tds[0].find_all('br'): br.replace_with(' _SPLIT_ ')
+                            for ul in tds[0].find_all('ul'): ul.insert_after(' _SPLIT_ ')
+                            for div in tds[0].find_all('div'): div.insert_after(' _SPLIT_ ')
+                            for br in tds[1].find_all('br'): br.replace_with(' _SPLIT_ ')
+                            for ul in tds[1].find_all('ul'): ul.insert_after(' _SPLIT_ ')
+                            for div in tds[1].find_all('div'): div.insert_after(' _SPLIT_ ')
                             
-                            w_soup = BeautifulSoup(w_html, "html.parser")
-                            a_soup = BeautifulSoup(a_html, "html.parser")
-                            
-                            w_items = w_soup.get_text().split('SPLIT')
-                            a_items = a_soup.get_text().split('SPLIT')
+                            # separator=" " を指定することで、<li>10</li><li>12</li> が "10 12" として抽出される
+                            w_items = tds[0].get_text(separator=" ").split('_SPLIT_')
+                            a_items = tds[1].get_text(separator=" ").split('_SPLIT_')
                             
                             for w_str, a_str in zip(w_items, a_items):
                                 amt_str = re.sub(r'\D', '', a_str)
                                 if not amt_str.isdigit(): continue
                                 amt = int(amt_str)
                                 
+                                # 数字以外（- や → など）をすべてスペースに置換
                                 w_str_clean = re.sub(r'\D', ' ', w_str)
                                 w_nums = [str(int(n)) for n in w_str_clean.split() if n.isdigit()]
                                 
                                 if not w_nums: continue
 
+                                # 判定ロジック
                                 if kind == "単勝" and len(w_nums) >= 1 and w_nums[0] == axis:
                                     total_payout += amt
                                 elif kind in ["馬連", "ワイド"] and len(w_nums) >= 2:
@@ -489,7 +495,6 @@ with tab_forecast:
                 pop = row.get('人気', '-') if pd.notna(row.get('人気')) else '-'
                 j_power = row.get('jockey_win_power', 0.0)
                 j_info = "過去データなし(要検索)" if j_power == 0.0 else f"勝率{j_power*100:.1f}%"
-                
                 ev = (row['win_prob'] * odds) if odds > 0 else 0.0
                 
                 table_summary.append(
@@ -500,7 +505,6 @@ with tab_forecast:
                     f"AIスコア:{row['score']:3d}"
                 )
 
-            # 【追加】中穴ケアの絶対ルールを追記
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」です。以下の絶対ルールに従い、レースの性質を読み切り最適な馬券戦略を遂行してください。
 
@@ -517,21 +521,18 @@ with tab_forecast:
 
 出力フォーマット：
 ---
-### 📊 1. 出走馬 期待値＆データ一覧
-（Markdownテーブルで出力）
-
-### 🌪️ 2. レース波乱度と展開分析
+### 🌪️ 1. レース波乱度と展開分析
 * **【レース判定】:** 「堅実決着」または「波乱（混戦）」とその理由
 * **【展開・バリュー評価】:** （AIスコアによる実力評価と、実際のオッズや期待値を加味した妙味の指摘）
 
-### 🎯 3. 勝ちぱかくんの印と詳細見解
+### 🎯 2. 勝ちぱかくんの印と詳細見解
 * **◎（本命）:** 〇番（馬名） - （抜擢理由）
 * **◯（対抗）:** 〇番（馬名）
 * **▲（単穴）:** 〇番（馬名）
 * **△（連下）:** 〇番（馬名）、〇番（馬名）
 * **☆（穴馬）:** 〇番（馬名）
 
-### 💡 4. 戦略的・推奨買い目（トリガミ完全排除）
+### 💡 3. 戦略的・推奨買い目（トリガミ完全排除）
 * **【戦略】:** （堅いので少点数で絞る、混戦なので手広く買う等）
 * **単勝:** ◎ (1点)
 * **馬連:** ◎ － ◯, ▲, △, ☆ (方針に合わせて点数を調整)
@@ -555,7 +556,26 @@ with tab_forecast:
                         )
                     )
                     res_text = response.text if response.text else (response.candidates[0].content.parts[0].text if response.candidates else "")
-                    if res_text: st.markdown(res_text)
+                    
+                    if res_text:
+                        st.markdown(res_text)
+                        
+                        st.markdown("---")
+                        st.subheader("📋 出走馬 データ一覧（コピー・保存用）")
+                        st.caption("※表の右上にあるダウンロードアイコン(↓)からCSV保存が可能です。ドラッグ＆ドロップでコピーもできます。")
+                        
+                        display_df = scored_df.copy()
+                        display_df['馬番'] = display_df['馬番'].astype(int).astype(str).str.zfill(2)
+                        display_df['オッズ'] = display_df['単勝'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "-")
+                        display_df['人気'] = display_df['人気'].apply(lambda x: f"{int(x)}" if pd.notna(x) else "-")
+                        display_df['純粋勝率(%)'] = (display_df['win_prob'] * 100).round(1).apply(lambda x: f"{x:.1f}")
+                        display_df['期待値'] = (display_df['win_prob'] * display_df['単勝'].fillna(0)).round(2).apply(lambda x: f"{x:.2f}")
+                        display_df['騎手(勝率)'] = display_df.apply(lambda r: f"{r.get('騎手','-')} ({r.get('jockey_win_power',0)*100:.1f}%)", axis=1)
+                        
+                        disp_cols = ['馬番', '馬名', '騎手(勝率)', 'オッズ', '人気', '純粋勝率(%)', '期待値', 'score']
+                        out_df = display_df[disp_cols].rename(columns={'score': 'AIスコア'})
+                        st.dataframe(out_df.set_index('馬番'), use_container_width=True)
+                        
                     else: st.warning("⚠️ 回答を取得できませんでした。")
                     st.success("📝 実戦履歴に記録しました！")
                 except Exception as e: st.error(f"【APIエラー】: {e}")
