@@ -322,7 +322,7 @@ if st.sidebar.button("💥 ゴミ予想履歴を完全消去", type="primary", u
 
 
 # ==========================================
-# 3. AIスコア計算 ＋ 予想出力 (実力ベース)
+# 3. AIスコア計算 ＋ 予想出力
 # ==========================================
 def calculate_race_scores(race_id_target, target_df):
     if target_df.empty or model_data is None: return None
@@ -376,18 +376,22 @@ def calculate_race_scores(race_id_target, target_df):
     X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
 
     try:
-        preds = model.predict(X)
+        if hasattr(model, "predict_proba"):
+            prob = model.predict_proba(X)[:, 1]
+        else:
+            prob = model.predict(X)
     except Exception: return None
 
-    inv_preds = 1.0 / np.clip(preds, 1.0, 18.0)
-    race_df['win_prob'] = inv_preds / inv_preds.sum()
+    s = prob.sum()
+    race_df['win_prob'] = prob / s if s > 0 else 1.0 / len(race_df)
     
-    mp = inv_preds.mean()
-    rs = 100 + ((inv_preds - mp) / mp) * 35 if mp > 0 else 100
+    mp = race_df['win_prob'].mean()
+    rs = 100 + ((race_df['win_prob'] - mp) / mp) * 35 if mp > 0 else 100
     race_df['score'] = np.clip(rs, 50, 120).round().astype(int)
 
     return race_df.sort_values(by='score', ascending=False).reset_index(drop=True)
 
+# 【修正箇所】レース判定の基準を適正化（点数差で【堅】【普】【穴】を分ける）
 def get_all_markers():
     markers = {}
     if df_future.empty: return markers
@@ -395,13 +399,25 @@ def get_all_markers():
         sdf = calculate_race_scores(rid, df_future)
         if sdf is not None and len(sdf) >= 5:
             sc = sdf['score'].tolist()
-            if sc[0] >= 105 and (sc[0] - sc[2]) >= 10: race_type = "【堅】"
-            elif (sc[0] - sc[4]) <= 7: race_type = "【穴】"
-            else: race_type = "【普】"
+            
+            # 1位と2位・3位・5位との点数差から正しく判別
+            top_diff = sc[0] - sc[1]
+            top3_diff = sc[0] - sc[2]
+            top5_diff = sc[0] - sc[4]
 
-            if sc[0] >= 108 and (sc[0] - sc[1]) >= 4: mark = "★"
-            elif (sc[0] - sc[4]) <= 5: mark = "◎"
-            else: mark = ""
+            if sc[0] >= 106 and top3_diff >= 5:
+                race_type = "【堅】"
+            elif top5_diff <= 3 or top_diff <= 1:
+                race_type = "【穴】"
+            else:
+                race_type = "【普】"
+
+            if sc[0] >= 108 and top_diff >= 3:
+                mark = "★"
+            elif top5_diff <= 3:
+                mark = "◎"
+            else:
+                mark = ""
             
             markers[rid] = f"{race_type} {mark}".strip()
     return markers
@@ -491,7 +507,7 @@ with tab_forecast:
 
 【絶対遵守事項】
 1. 挨拶や前置きは一切不要。
-2. 【目標】: 過度な大穴狙いは避け、「的中率25%・回収率115%」の黄金ラインを安定して狙う戦略をとること。
+2. 【目標】: 「堅いレースは上位順当で手堅く」「波乱（混戦）レースは穴馬を抜擢」とレースの性質に応じてメリハリをつけ、「的中率25%・回収率115%」の黄金ラインを狙うこと。
 3. 【印の基本原則】: 印（◎本命、◯対抗、▲単穴）は、「AIスコア（純粋な実力値）」をベースにしつつも、実際の「オッズ」や「人気」を”適度に加味”して総合的に判断すること。過剰人気馬は評価を下げ、実力があるのにオッズが高い（妙味がある）馬を高く評価する。
 4. 【期待値馬の扱い（△・☆）】: AIスコアが上位でなくても、【🎯期待値】が1.0を超えている美味しい馬がいれば、それらを連下（△）や特注穴馬（☆）として確実に紐（相手）に抑えること。
 5. 【紐抜け防止】: AIスコアが120（最高評価）に達している馬は非常に能力が高いため、もし本命（◎）にしなくても必ず相手（紐）に含めること。
