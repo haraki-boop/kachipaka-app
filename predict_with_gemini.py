@@ -344,14 +344,15 @@ def calculate_race_scores(race_id_target, target_df):
         if 'my_start_idx' in df_past.columns: agg_dict['my_start_idx'] = 'mean'
         
         horse_stats = df_past.groupby('馬名').agg(agg_dict).reset_index()
+        
+        # 【修正】AIが勉強した時の名前と完全に一致させる
         new_cols = ['馬名', 'total_wins', 'total_runs']
-        if 'my_time_idx' in df_past.columns: new_cols.append('horse_avg_time_idx')
-        if 'my_last3f_idx' in df_past.columns: new_cols.append('horse_avg_last3f_idx')
-        if 'my_pace_idx' in df_past.columns: new_cols.append('horse_avg_pace_idx')
-        if 'my_start_idx' in df_past.columns: new_cols.append('horse_avg_start_idx')
+        if 'my_time_idx' in df_past.columns: new_cols.append('my_time_idx')
+        if 'my_last3f_idx' in df_past.columns: new_cols.append('my_last3f_idx')
+        if 'my_pace_idx' in df_past.columns: new_cols.append('my_pace_idx')
+        if 'my_start_idx' in df_past.columns: new_cols.append('my_start_idx')
         
         horse_stats.columns = new_cols
-        horse_stats['horse_win_rate'] = np.where(horse_stats['total_runs'] > 0, horse_stats['total_wins'] / horse_stats['total_runs'], 0.0)
         race_df = pd.merge(race_df, horse_stats, on='馬名', how='left')
 
     if not df_past.empty and '騎手' in df_past.columns:
@@ -361,8 +362,15 @@ def calculate_race_scores(race_id_target, target_df):
     else:
         race_df['jockey_win_power'] = 0.0
 
+    # 【修正】データがない馬（初出走など）を0ではなく平均値50で補完する
     for f in features:
-        if f not in race_df.columns: race_df[f] = 0.0
+        if f not in race_df.columns:
+            race_df[f] = 50.0 if 'idx' in f else 0.0
+    if 'my_time_idx' in race_df.columns: race_df['my_time_idx'] = race_df['my_time_idx'].fillna(50.0)
+    if 'my_last3f_idx' in race_df.columns: race_df['my_last3f_idx'] = race_df['my_last3f_idx'].fillna(50.0)
+    if 'my_pace_idx' in race_df.columns: race_df['my_pace_idx'] = race_df['my_pace_idx'].fillna(50.0)
+    if 'my_start_idx' in race_df.columns: race_df['my_start_idx'] = race_df['my_start_idx'].fillna(50.0)
+    if 'jockey_win_power' in race_df.columns: race_df['jockey_win_power'] = race_df['jockey_win_power'].fillna(0.0)
 
     if 'sex_code' in race_df.columns and race_df['sex_code'].dtype == object:
         race_df['sex_code'] = race_df['sex_code'].map({'牡': 0, '牝': 1, 'セ': 2}).fillna(0)
@@ -391,6 +399,11 @@ def calculate_race_scores(race_id_target, target_df):
     rs = 100 + ((race_df['win_prob'] - mp) / mp) * 35 if mp > 0 else 100
     race_df['score'] = np.clip(rs, 50, 120).round().astype(int)
 
+    # 【修正】同点スコアになった場合のタイブレーカー（人気）を追加
+    if '人気' in race_df.columns:
+        race_df['人気_sort'] = pd.to_numeric(race_df['人気'], errors='coerce').fillna(999)
+        return race_df.sort_values(by=['score', '人気_sort'], ascending=[False, True]).reset_index(drop=True)
+    
     return race_df.sort_values(by='score', ascending=False).reset_index(drop=True)
 
 def get_all_markers():
@@ -501,7 +514,6 @@ with tab_forecast:
                     f"AIスコア:{row['score']:3d}"
                 )
 
-            # 【重要】三連単を「2頭軸マルチ」に変更
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」です。以下の絶対ルールに従い、レースの性質を読み切り最適な馬券戦略を遂行してください。
 
@@ -574,7 +586,6 @@ with tab_dashboard:
             hits = len(finished_races[finished_races['result_pay'].astype(float) > 0])
             returns = finished_races['result_pay'].astype(float).sum()
             
-            # 【修正】投資金額を「2頭軸マルチ」ベースの点数で再計算
             invested = 0
             for _, r in finished_races.iterrows():
                 p_len = len([x for x in str(r.get('partners', '')).split(',') if x.strip().isdigit()])
