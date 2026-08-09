@@ -250,48 +250,60 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
             updated = False
             headers = {"User-Agent": "Mozilla/5.0"}
             for idx, row in df_history.iterrows():
-                if pd.isna(row['result_pay']) or str(row['result_pay']).strip() == "":
-                    try:
-                        axis = str(int(row['honmei_umaban']))
-                        partners = [str(int(p.strip())) for p in str(row.get('partners', '')).split(',') if p.strip().isdigit()]
-                        payout_found, total_payout = False, 0
+                try:
+                    axis = str(int(row['honmei_umaban']))
+                    partners = [str(int(p.strip())) for p in str(row.get('partners', '')).split(',') if p.strip().isdigit()]
+                    payout_found, total_payout = False, 0
+                    
+                    for url in [f"https://race.netkeiba.com/race/result.html?race_id={str(row['race_id'])}", f"https://db.netkeiba.com/race/{str(row['race_id'])}/"]:
+                        res = requests.get(url, headers=headers, timeout=5)
+                        res.encoding = 'EUC-JP' if 'db.netkeiba' in url else 'utf-8'
+                        soup = BeautifulSoup(res.text, "html.parser")
                         
-                        for url in [f"https://race.netkeiba.com/race/result.html?race_id={str(row['race_id'])}", f"https://db.netkeiba.com/race/{str(row['race_id'])}/"]:
-                            res = requests.get(url, headers=headers, timeout=5)
-                            res.encoding = 'EUC-JP' if 'db.netkeiba' in url else 'utf-8'
-                            soup = BeautifulSoup(res.text, "html.parser")
+                        for tr in soup.find_all("tr"):
+                            th = tr.find("th")
+                            if not th: continue
+                            kind = th.text.strip()
+                            if kind not in ["単勝", "馬連", "ワイド", "三連複", "三連単"]: continue
+                            tds = tr.find_all("td")
+                            if len(tds) < 2: continue
                             
-                            for tr in soup.find_all("tr"):
-                                th = tr.find("th")
-                                if not th: continue
-                                kind = th.text.strip()
-                                if kind not in ["単勝", "馬連", "ワイド", "三連複", "三連単"]: continue
-                                tds = tr.find_all("td")
-                                if len(tds) < 2: continue
-                                
-                                payout_found = True
-                                for br in tds[0].find_all('br'): br.replace_with('\n')
-                                for div in tds[0].find_all('div'): div.insert_after('\n')
-                                for br in tds[1].find_all('br'): br.replace_with('\n')
-                                
-                                win_lines = [re.sub(r'\s+', '', line) for line in tds[0].get_text().split('\n') if line.strip()]
-                                amt_lines = [re.sub(r'\D', '', line) for line in tds[1].get_text().split('\n') if line.strip()]
-                                
-                                for w_str, a_str in zip(win_lines, amt_lines):
-                                    if not a_str.isdigit(): continue
-                                    amt = int(a_str)
-                                    w_nums = [str(int(n)) for n in re.split(r'[-→=]', w_str) if n.isdigit()]
-                                    
-                                    if kind == "単勝" and len(w_nums) == 1 and w_nums[0] == axis: total_payout += amt
-                                    elif kind in ["馬連", "ワイド"] and len(w_nums) == 2 and axis in w_nums and any(p in w_nums for p in partners): total_payout += amt
-                                    elif kind in ["三連複", "三連単"] and len(w_nums) == 3 and axis in w_nums and len(set(w_nums).intersection(set(partners))) >= 2: total_payout += amt
+                            payout_found = True
                             
-                            if payout_found:
-                                df_history.at[idx, 'result_pay'] = total_payout
-                                updated = True
-                                break
-                    except: pass
-                    time.sleep(1)
+                            # HTML内の改行や<br>をスペースに変換
+                            for br in tds[0].find_all('br'): br.replace_with(' ')
+                            for div in tds[0].find_all('div'): div.insert_after(' ')
+                            for br in tds[1].find_all('br'): br.replace_with(' ')
+                            
+                            # 改行や複数スペースで分割してリスト化
+                            w_lines = [x.strip() for x in re.split(r'\s+', tds[0].get_text()) if x.strip()]
+                            a_lines = [x.strip() for x in re.split(r'\s+', tds[1].get_text()) if x.strip()]
+                            
+                            for w_str, a_str in zip(w_lines, a_lines):
+                                a_str_clean = re.sub(r'\D', '', a_str)
+                                if not a_str_clean.isdigit(): continue
+                                amt = int(a_str_clean)
+                                
+                                # 数字以外の文字（-, →, =など）をすべてスペースに置換してから分割
+                                w_str_clean = re.sub(r'\D', ' ', w_str)
+                                w_nums = [str(int(n)) for n in w_str_clean.split() if n.isdigit()]
+                                
+                                if not w_nums: continue
+
+                                if kind == "単勝" and len(w_nums) == 1 and w_nums[0] == axis:
+                                    total_payout += amt
+                                elif kind in ["馬連", "ワイド"] and len(w_nums) >= 2 and axis in w_nums[:2] and any(p in w_nums[:2] for p in partners):
+                                    total_payout += amt
+                                elif kind in ["三連複", "三連単"] and len(w_nums) >= 3 and axis in w_nums[:3] and len(set(w_nums[:3]).intersection(set(partners))) >= 2:
+                                    total_payout += amt
+                        
+                        if payout_found:
+                            df_history.at[idx, 'result_pay'] = total_payout
+                            updated = True
+                            break
+                except: pass
+                time.sleep(1)
+            
             if updated: df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig', errors='replace')
         st.cache_data.clear()
         st.success("✅ 実戦結果を最新化しました！")
