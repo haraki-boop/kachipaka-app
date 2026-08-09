@@ -8,7 +8,6 @@ import pandas as pd
 import numpy as np
 import joblib
 import streamlit as st
-import subprocess
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from google import genai
@@ -214,8 +213,9 @@ if st.sidebar.button("💥 ゴミ予想履歴を完全消去", type="primary", u
         st.rerun()
     except: pass
 
+
 # ==========================================
-# 3. AIスコア計算
+# 3. AIスコア算出 (第1の脳 & 第5の脳)
 # ==========================================
 def calculate_race_scores(race_id_target, target_df):
     if target_df.empty or model_data is None: return None
@@ -253,7 +253,6 @@ def calculate_race_scores(race_id_target, target_df):
     if 'my_time_idx' in race_df.columns: race_df['my_time_idx'] = race_df['my_time_idx'].fillna(50.0)
     if 'my_last3f_idx' in race_df.columns: race_df['my_last3f_idx'] = race_df['my_last3f_idx'].fillna(50.0)
     if 'jockey_win_power' in race_df.columns: race_df['jockey_win_power'] = race_df['jockey_win_power'].fillna(0.0)
-
     if 'sex_code' in race_df.columns and race_df['sex_code'].dtype == object:
         race_df['sex_code'] = race_df['sex_code'].map({'牡': 0, '牝': 1, 'セ': 2}).fillna(0)
         
@@ -267,20 +266,30 @@ def calculate_race_scores(race_id_target, target_df):
             prob = model.predict(X)
     except Exception: return None
 
+    # 【第1の脳】純粋な勝率とAIスコアの算出
     s = prob.sum()
     race_df['win_prob'] = prob / s if s > 0 else 1.0 / len(race_df)
-    
     rs = 40 + (race_df['win_prob'] * 400)
-    race_df['score'] = np.clip(rs, 30, 150).round().astype(int)
+    race_df['score_brain1'] = np.clip(rs, 30, 150).round().astype(int)
 
+    # 【第5の脳】オッズと人気を加味した期待値(EV)の算出
+    def calc_ev(row):
+        odds = pd.to_numeric(row.get('単勝', 0), errors='coerce')
+        if pd.isna(odds) or odds <= 0: return 0.0
+        return row['win_prob'] * odds
+
+    race_df['ev_brain5'] = race_df.apply(calc_ev, axis=1)
+
+    # 人気ソート用
     if '人気' in race_df.columns:
         race_df['人気_sort'] = pd.to_numeric(race_df['人気'], errors='coerce').fillna(999)
-        return race_df.sort_values(by=['score', '人気_sort'], ascending=[False, True]).reset_index(drop=True)
+        return race_df.sort_values(by=['score_brain1', '人気_sort'], ascending=[False, True]).reset_index(drop=True)
     
-    return race_df.sort_values(by='score', ascending=False).reset_index(drop=True)
+    return race_df.sort_values(by='score_brain1', ascending=False).reset_index(drop=True)
+
 
 # ==========================================
-# 4. マーカー（バッジ）の判定 (新馬対応＆厳格化)
+# 4. マーカー判定 (シンプル化)
 # ==========================================
 def get_all_markers():
     markers = {}
@@ -289,41 +298,21 @@ def get_all_markers():
         sdf = calculate_race_scores(rid, df_future)
         if sdf is not None and len(sdf) >= 5:
             rname = str(sdf['race_name'].iloc[0]) if 'race_name' in sdf.columns else ""
-            
-            # 【新馬戦回避ロジック】新馬戦は過去データがないため別枠扱い
             if "新馬" in rname:
-                markers[rid] = "【🐣新馬・データなし】"
+                markers[rid] = "【🐣新馬】"
                 continue
 
-            sc = sdf['score'].tolist()
-            top_diff = sc[0] - sc[1]
-            top3_diff = sc[0] - sc[2]
-
-            # 【超・厳格化ロジック】真の狙い目（オッズ異常）のみを抽出
-            is_neraime = False
-            if '人気' in sdf.columns and len(sdf) >= 2:
-                pop1 = pd.to_numeric(sdf.iloc[0].get('人気', 999), errors='coerce')
-                pop2 = pd.to_numeric(sdf.iloc[1].get('人気', 999), errors='coerce')
-                
-                # エラー値(999)や欠損を除外した上で判定
-                if not pd.isna(pop1) and pop1 != 999 and pop1 >= 4:
-                    is_neraime = True  # AI1位なのに4番人気以降（激ウマ本命）
-                elif not pd.isna(pop2) and pop2 != 999 and pop2 >= 6:
-                    is_neraime = True  # AI2位なのに6番人気以降（特大穴対抗）
-
-            if sc[0] >= 110 and top3_diff >= 30: race_type = "【堅】"
-            elif sc[0] < 95 or top_diff <= 7: race_type = "【波乱】"
-            else: race_type = "【普】"
-
-            if is_neraime: race_type = "【🔥狙い目】" + race_type
-
-            mark = "★" if sc[0] >= 115 and top_diff >= 15 else ("◎" if top3_diff >= 20 else "")
-            markers[rid] = f"{race_type} {mark}".strip()
+            max_ev = sdf['ev_brain5'].max()
+            if max_ev > 2.0:
+                markers[rid] = "【🔥妙味あり】"
+            else:
+                markers[rid] = "【普】"
     return markers
 markers = get_all_markers()
 
+
 # ==========================================
-# 5. メインUI (タブ構成)
+# 5. メインUI
 # ==========================================
 tab_forecast, tab_dashboard = st.tabs(["🏇 レース予想", "📈 実戦成績"])
 
@@ -354,7 +343,7 @@ with tab_forecast:
                     label = f"{r}R {mark}".strip()
                     if rname: label = f"{r}R {rname[:5]}… {mark}".strip()
                         
-                    btn_type = "primary" if ("🔥" in mark or "★" in mark) else "secondary"
+                    btn_type = "primary" if "🔥" in mark else "secondary"
                     if col.button(label, key=f"btn_{rid}", use_container_width=True, type=btn_type):
                         st.session_state['selected_race_id'] = rid
 
@@ -372,24 +361,23 @@ with tab_forecast:
         scored_df = calculate_race_scores(target_id, df_future)
         
         if scored_df is not None and len(scored_df) > 0:
-            # 💡 【完全分業 UI】Python側で綺麗なデータフレームを描画する
             st.markdown("##### 📊 出走馬 データ＆ベースAI評価一覧")
             disp_df = scored_df.copy()
             disp_df['馬番'] = disp_df['馬番'].apply(lambda x: f"{int(x):02d}")
             disp_df['単勝オッズ'] = disp_df['単勝'].apply(lambda x: f"{x}倍" if pd.notnull(x) and x>0 else "-")
             disp_df['人気'] = disp_df['人気'].apply(lambda x: f"{int(x)}人気" if pd.notnull(x) and x!=999 else "-")
-            disp_df['AI勝率'] = disp_df['win_prob'].apply(lambda x: f"{x*100:.1f}%")
-            disp_df['期待値'] = disp_df.apply(lambda r: f"{(r['win_prob'] * r['単勝']):.2f}" if pd.notnull(r['単勝']) and r['単勝']>0 else "-", axis=1)
+            disp_df['純粋勝率(1の脳)'] = disp_df['win_prob'].apply(lambda x: f"{x*100:.1f}%")
+            disp_df['期待値(5の脳)'] = disp_df['ev_brain5'].apply(lambda x: f"{x:.2f}" if x>0 else "-")
             disp_df['騎手(勝率)'] = disp_df.apply(lambda r: f"{r.get('騎手','')} ({r.get('jockey_win_power',0)*100:.1f}%)", axis=1)
             
-            show_cols = ['馬番', '馬名', '騎手(勝率)', '単勝オッズ', '人気', 'AI勝率', '期待値', 'score']
+            show_cols = ['馬番', '馬名', '騎手(勝率)', '単勝オッズ', '人気', '純粋勝率(1の脳)', '期待値(5の脳)', 'score_brain1']
             if is_newcomer:
                 st.info("🐣 新馬戦のため、過去データに基づくAIスコアは参考値（または無効）です。")
-                show_cols = ['馬番', '馬名', '騎手(勝率)', '単勝オッズ', '人気'] # スコア等を除外表示
+                show_cols = ['馬番', '馬名', '騎手(勝率)', '単勝オッズ', '人気']
                 
             st.dataframe(disp_df[show_cols], use_container_width=True, hide_index=True)
         
-        if st.button("🧠 勝ちぱかくんに最終予想させる！ (検索・分析を実行)", type="primary", use_container_width=True):
+        if st.button("🧠 Geminiで最終適正化＆買い目生成", type="primary", use_container_width=True):
             if not GEMINI_API_KEY:
                 st.error("【設定エラー】APIキーが見つかりません。")
                 st.stop()
@@ -403,46 +391,49 @@ with tab_forecast:
             for idx, row in scored_df.iterrows():
                 table_summary.append(
                     f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | "
-                    f"騎手:{row.get('騎手', '不明')} | オッズ:{row.get('単勝', 0)}倍 ({row.get('人気', 999)}人気) | "
-                    f"ベースAIスコア:{row.get('score', 0)}"
+                    f"オッズ:{row.get('単勝', 0)}倍 ({row.get('人気', 999)}人気) | "
+                    f"純粋スコア(1の脳):{row.get('score_brain1', 0)} | 期待値(5の脳):{row.get('ev_brain5', 0):.2f}"
                 )
 
-            # --- プロンプト構築（裁量権付与） ---
+            # --- プロンプト構築（最強黄金パターン：1の脳→5の脳→Gemini） ---
             system_instruction = """
-あなたはプロの競馬分析AI「勝ちぱかくん」です。以下の絶対ルールに従い、プロフェッショナルな解説と最終的な買い目を構築してください。
+あなたはプロの競馬分析AI「勝ちぱかくん」の最終意思決定者（Gemini脳）です。
+提供されるデータは以下の2つの脳（システム）から出力されたものです。
 
-【絶対遵守事項（ハイブリッド予想ルール）】
-1. あなたには「Pythonが算出したベースAIスコア」が提供されますが、これらは「一次審査」に過ぎません。
-2. あなたは【Web検索ツール】を使用して、直前の調教タイム、血統、陣営コメント、馬場状態などを必ず検索してください。
-3. 【裁量権の行使】: 検索で得た最新情報や、オッズから算出した「期待値（妙味）」を考慮し、ベースAIスコアの順位にとらわれず、あなたがプロとして「最終的な印（◎◯▲△☆）」を決定・変更して構いません。
-4. 【期待値による足切り】: オッズが低すぎて期待値がマイナスだと判断した場合は、無理に買い目を提示せず「このレースは妙味がないため『見（ケン）』を推奨」と宣言してください。
-5. 表（Markdownのテーブル）はシステム側で描画済みのため、あなたは**絶対に表を出力しないでください**。文章と買い目のみを出力すること。
+・【第1の脳】：オッズや人気を排除し、過去データから純粋な「馬の強さ（勝率）」を評価したAIスコア。
+・【第5の脳】：第1の脳の勝率に、現在のオッズと人気を掛け合わせ、馬券的価値（期待値）を算出したデータ。
+
+【あなたのミッションと絶対ルール】
+1. 検索ツールを使用して「今日の馬場状態」「騎手のバイアス」「厩舎の勝負気配」などをリアルタイム補完してください。
+2. LLM（あなた）は無難な上位人気馬を過大評価する傾向があるため、それを自覚し、【第5の脳】が弾き出した「期待値の高い中穴（4〜8番人気）」を絶対に無視せず、積極的に買い目に組み込むよう「適正化」を行ってください。
+3. 2つの脳のデータと、検索したリアルタイム情報を統合し、最終的な印（◎◯▲△☆）と最も儲かる券種を提示してください。
+4. Markdownの表はシステム側で描画済みのため、あなたは**絶対に表を出力しないでください**。解説文と買い目のみを出力すること。
 
 【出力フォーマット】
 ---
-### 🌪️ レース波乱度と展開分析
-* （検索結果や血統・馬場を元にした展開予想）
+### 🌪️ レース展開とリアルタイム情報の統合
+* （検索結果や馬場状態、ペース予想などのプロの分析）
 
 ### 💥 勝ちぱかくんの最終ジャッジ（印と根拠）
-* **◎（本命）:** 〇〇番（馬名） - （AIスコアや検索結果を加味した抜擢理由）
+* **◎（本命）:** 〇〇番（馬名） - （抜擢理由。中穴を狙った場合はその期待値を強調）
 * **◯（対抗）:** 〇〇番（馬名） - （見解）
 * **▲（単穴）:** 〇〇番（馬名） - （見解）
 * **△（連下）:** 〇〇番、〇〇番
-* **☆（穴馬）:** 〇〇番 - （オッズ妙味や展開での激走期待）
+* **☆（穴馬）:** 〇〇番 - （第5の脳が推奨するオッズ妙味馬など）
 
 ### 💡 戦略的・推奨買い目
-* （オッズや自信度に応じた、最も儲かる券種と資金配分を自由に提案してください。ガミる買い目は避けること）
+* （オッズや自信度に応じた、回収率を最大化する券種と資金配分）
 ---
 """
             prompt = f"対象レース: {race_display_name}\n\n"
             if is_newcomer:
-                prompt += "【⚠️重要指示】このレースは「新馬戦」のため過去データが存在せず、ベースAIスコアは無効（全て同点等）です。AIスコアは完全に無視し、Web検索を用いて『血統』『追い切り（調教）タイム』『厩舎コメント』を調査し、あなた自身の推理で予想を組み立ててください。\n\n"
+                prompt += "【⚠️重要指示】このレースは「新馬戦」のため過去データが存在せず、第1・第5の脳のスコアは無効です。スコアは完全に無視し、Web検索で『血統』『調教タイム』を調査し、あなた自身の推理で予想を組み立ててください。\n\n"
             else:
-                prompt += "【指示】提供されたベースAIスコアを基準にしつつ、オッズの妙味や検索による最新情報（枠の有利不利、血統適性など）を加味して、印を最終決定してください。\n\n"
+                prompt += "【指示】第1の脳（純粋な強さ）と第5の脳（期待値）のデータを読み解き、特に第5の脳が評価している「中穴馬」を拾い上げるプロンプト補助に従って、最終的な印を決定してください。\n\n"
                 
-            prompt += f"出走馬データ（ベース情報）:\n{chr(10).join(table_summary)}"
+            prompt += f"出走馬データ（第1・第5の脳 出力結果）:\n{chr(10).join(table_summary)}"
 
-            with st.spinner("AIが最新情報を検索し、最適戦略と最終買い目を構築中..."):
+            with st.spinner("AIが1の脳と5の脳のデータを統合し、最終適正化（中穴補助）を実行中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 try:
                     response = client.models.generate_content(
@@ -459,7 +450,6 @@ with tab_forecast:
                     if res_text:
                         st.markdown(res_text)
                         # --- 履歴保存処理 ---
-                        # Geminiの出力結果から、正規表現で◎の馬番と相手を抽出して保存するロジック
                         honmei_match = re.search(r'◎.*?[）:]\s*(\d+)番', res_text)
                         h_umaban = int(honmei_match.group(1)) if honmei_match else int(scored_df.iloc[0]['馬番'])
                         
@@ -476,6 +466,9 @@ with tab_forecast:
                 except Exception as e:
                     st.error(f"【APIエラー】: {e}")
 
+# ==========================================
+# 6. ダッシュボード (完全復活)
+# ==========================================
 with tab_dashboard:
     st.subheader("📈 実戦成績ダッシュボード")
     if df_history.empty: st.info("まだ予想履歴がありません。")
