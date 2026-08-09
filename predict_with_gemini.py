@@ -501,6 +501,7 @@ with tab_forecast:
                     f"AIスコア:{row['score']:3d}"
                 )
 
+            # 【重要】三連単を「2頭軸マルチ」に変更
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」です。以下の絶対ルールに従い、レースの性質を読み切り最適な馬券戦略を遂行してください。
 
@@ -513,12 +514,13 @@ with tab_forecast:
 6. いかなる戦略でも、トリガミ（的中してもマイナス）は完全に排除した買い目を構築する。
 7. 【最重要: 買い目の指定】
    - 三連複: 1着候補の馬（◎）ではなく、「3着以内を死守しそうな堅実な馬」または「3着に滑り込みそうな期待値の高い穴馬（☆や△など）」をあえて1頭軸に指定し、4〜5頭へ流す（6点〜10点）フォーメーションをベースとすること。
+   - 三連単: ◎と◯（またはAIスコア2位馬）の「2頭軸マルチ」を推奨すること。相手は▲, △, ☆へ。買い目が多くなりすぎないよう現実的な点数（20〜30点程度）に絞ること。
    - ワイド: ◎から☆（穴馬）や期待値の高い馬への流しを併用し、三連複が紐抜けした時の「保険（資金回収クッション）」として機能させること。
 
 出力フォーマット：
 ---
 ### 📊 1. 出走馬 期待値＆データ一覧
-（Markdownテーブルで出力）
+（Markdownテーブルで出力してください。絶対にコードブロック「```」で囲まないでください。）
 
 ### 🌪️ 2. レース波乱度と展開分析
 * **【レース判定】:** 「堅実決着」または「波乱（混戦）」とその理由
@@ -537,7 +539,7 @@ with tab_forecast:
 * **馬連:** ◎ － ◯, ▲, △, ☆ (方針に合わせて点数を調整)
 * **ワイド (保険):** ◎ － ☆など期待値上位 (連敗防止のクッションとして活用)
 * **三連複 (本線):** [3着狙いの軸馬] 1頭軸流し － [相手4〜5頭]
-* **三連単:** 1着:◎ → 2・3着:◯, ▲, △, ☆ (方針に合わせて点数を調整)
+* **三連単:** ◎・◯ 2頭軸マルチ － ▲, △, ☆ (相手4〜5頭推奨)
 ---
 """
             prompt = f"対象レース: {race_display_name}\n\n出走馬データ:\n{chr(10).join(table_summary)}"
@@ -567,12 +569,27 @@ with tab_dashboard:
         finished_races = df_history[pd.to_numeric(df_history['result_pay'], errors='coerce').notna()]
         total = len(finished_races)
         st.markdown(f"**結果判明レース**: {total} 件 （結果待ち: {len(df_history) - total} 件）")
+        
         if total > 0:
             hits = len(finished_races[finished_races['result_pay'].astype(float) > 0])
             returns = finished_races['result_pay'].astype(float).sum()
-            invested = total * 5000
+            
+            # 【修正】投資金額を「2頭軸マルチ」ベースの点数で再計算
+            invested = 0
+            for _, r in finished_races.iterrows():
+                p_len = len([x for x in str(r.get('partners', '')).split(',') if x.strip().isdigit()])
+                # 単勝(1) + 馬連(p_len) + ワイド(p_len) + 三連複(p_len*(p_len-1)/2) + 三連単2頭軸マルチ(6*(p_len-1))
+                pts = 1 + p_len + p_len + (p_len * (p_len - 1) / 2) + (6 * (p_len - 1)) if p_len >= 2 else 0
+                invested += pts * 100
+                
+            invested = int(invested)
+            roi = (returns / invested) * 100 if invested > 0 else 0.0
+            
             col1, col2, col3 = st.columns(3)
             col1.metric("🎯 レース的中率", f"{(hits/total)*100:.1f}%", f"{hits} / {total} 的中")
-            col2.metric("💰 総合回収率", f"{(returns/invested)*100:.1f}%", delta_color="normal" if returns >= invested else "inverse")
+            col2.metric("💰 総合回収率", f"{roi:.1f}%", delta_color="normal" if returns >= invested else "inverse")
             col3.metric("💴 累計収支", f"{int(returns - invested):,} 円")
+            
+            st.caption(f"※ 投資金額は「三連単2頭軸マルチ」などを想定した実点数（計 {invested:,} 円）で計算されています。")
+            
         st.dataframe(df_history[['date', 'race_name', 'honmei_umaban', 'partners', 'honmei_name', 'result_pay']].sort_values(by='date', ascending=False), use_container_width=True)
