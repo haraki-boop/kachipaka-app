@@ -4,10 +4,12 @@ import time
 import random
 import requests
 import pandas as pd
+import unicodedata
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 
 FUTURE_CSV = "future_races.csv"
+ML_TARGET_CSV = "ml_target_data.csv"
 
 def get_target_dates():
     today = datetime.now()
@@ -23,6 +25,11 @@ def clean_text(text):
     text = re.sub(r'[\r\n\t]+', ' ', text)
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
+
+def clean_horse_name(name):
+    if pd.isna(name): return ""
+    s = unicodedata.normalize('NFKC', str(name))
+    return re.sub(r'[\s\u3000]+', '', s)
 
 def detect_grade(race_name, soup):
     grade_prefix = ""
@@ -46,7 +53,6 @@ def fetch_with_retry(session, url, max_retries=3):
         try:
             res = session.get(url, timeout=15)
             if res.status_code == 200:
-                # 🎯 最新のUTF-8として正しく読み込む
                 res.encoding = 'utf-8'
                 return res
             else:
@@ -130,7 +136,6 @@ def scrape_shutsuba():
                     jockey_td = cols[6]
                     jockey = clean_text(jockey_td.find("a").text) if jockey_td.find("a") else clean_text(jockey_td.text)
                     
-                    # 🎯 【追加】オッズを取得（左から10番目のカラム）
                     odds_str = ""
                     if len(cols) >= 10:
                         odds_str = clean_text(cols[9].text)
@@ -147,7 +152,7 @@ def scrape_shutsuba():
                             "age": sex_age[1:] if len(sex_age) > 1 else "",
                             "斤量": kinryo,
                             "騎手": jockey,
-                            "オッズ": odds_str  # 🎯 ここにオッズを追加
+                            "オッズ": odds_str
                         })
             time.sleep(random.uniform(0.5, 1.0))
             
@@ -156,15 +161,36 @@ def scrape_shutsuba():
 
     if race_data_list:
         df_future = pd.DataFrame(race_data_list)
-        
-        # 🎯 【追加】オッズから「人気」をシステム側で自動計算して穴埋めする魔法のロジック
         df_future['オッズ'] = pd.to_numeric(df_future['オッズ'], errors='coerce')
-        # race_idごとにオッズの低い順（昇順）で順位付けを行う
-        df_future['人気'] = df_future.groupby('race_id')['オッズ'].rank(method='min')
-        # 小数点表記を整数に変換（オッズ未発表のNaNを許容する 'Int64' 型を使用）
-        df_future['人気'] = df_future['人気'].astype('Int64')
+        df_future['人気'] = df_future.groupby('race_id')['オッズ'].rank(method='min').astype('Int64')
 
-        # Excelでダブルクリックしても絶対に文字化けしないフォーマット「utf-8-sig」で保存
+        # 🎯 【完全版】スクレイピング時に過去データを合体させる処理を追加
+        if os.path.exists(ML_TARGET_CSV):
+            print(f"\n🔗 過去データ({ML_TARGET_CSV})からタイム指数などの特徴量を結合しています...")
+            try:
+                df_past = pd.read_csv(ML_TARGET_CSV, low_memory=False, encoding='utf-8-sig')
+            except:
+                df_past = pd.read_csv(ML_TARGET_CSV, low_memory=False, encoding='cp932')
+            
+            if '馬名' in df_past.columns:
+                df_past['馬名_clean'] = df_past['馬名'].apply(clean_horse_name)
+                df_future['馬名_clean'] = df_future['馬名'].apply(clean_horse_name)
+                
+                # 各馬の最新レースのみ残す
+                if 'date' in df_past.columns:
+                    df_past = df_past.sort_values('date')
+                df_past_latest = df_past.drop_duplicates(subset='馬名_clean', keep='last')
+                
+                # 結合不要な重複カラムを除外
+                cols_to_drop = ['race_id', 'date', 'race_name', '枠番', '馬番', '馬名', 'sex_code', 'age', '斤量', '騎手', 'オッズ', '人気', '単勝', '着順']
+                cols_to_keep = [c for c in df_past_latest.columns if c not in cols_to_drop]
+                df_past_latest = df_past_latest[cols_to_keep]
+                
+                # 出馬表に合体
+                df_future = pd.merge(df_future, df_past_latest, on='馬名_clean', how='left')
+                df_future.drop(columns=['馬名_clean'], inplace=True)
+                print("✅ 特徴量の結合が完了しました。")
+
         df_future.to_csv(FUTURE_CSV, index=False, encoding='utf-8-sig')
         print(f"\n✅ {len(race_data_list)}頭のデータを保存完了！ ({FUTURE_CSV})")
     else:

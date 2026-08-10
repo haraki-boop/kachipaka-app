@@ -117,17 +117,43 @@ df_past = load_past_data()
 df_future = load_future_data()
 df_history = load_history_data()
 
-# アプリ内の表示データを df_future に統一
-df_display = df_future
-
 # ==========================================
-# 2. サイドバー UI
+# 2. サイドバー UI & 過去検証モード
 # ==========================================
 st.sidebar.header("🔄 画面の更新")
 if st.sidebar.button("🔄 最新の情報にリロード", use_container_width=True):
     st.cache_data.clear()
     st.cache_resource.clear()
     st.rerun()
+
+st.sidebar.markdown("---")
+st.sidebar.header("🔬 AI精度検証モード")
+test_mode = st.sidebar.checkbox("過去データ(直近)でAIをテストする")
+
+def get_display_data():
+    if test_mode and not df_past.empty:
+        dates = df_past['date'].dropna().unique()
+        if len(dates) > 0:
+            latest_date = sorted(dates)[-1]
+            test_df = df_past[df_past['date'] == latest_date].copy()
+            
+            PLACE_MAP_REV = {
+                "01": "札幌", "02": "函館", "03": "福島", "04": "新潟", "05": "東京",
+                "06": "中山", "07": "中京", "08": "京都", "09": "阪神", "10": "小倉"
+            }
+            if 'race_id' in test_df.columns:
+                test_df['place_code'] = test_df['race_id'].astype(str).str[4:6]
+                test_df['place_name'] = test_df['place_code'].map(PLACE_MAP_REV).fillna("不明")
+                test_df['r_num'] = test_df['race_id'].astype(str).str[10:12].astype(int)
+            test_df['day_label'] = f"【過去検証】{latest_date}"
+            if 'race_name' not in test_df.columns:
+                test_df['race_name'] = "過去レース検証"
+            if '単勝' not in test_df.columns:
+                test_df['単勝'] = test_df.get('オッズ', 0)
+            return test_df
+    return df_future
+
+df_display = get_display_data()
 
 st.sidebar.markdown("---")
 st.sidebar.header("🏁 実戦結果の検証")
@@ -237,9 +263,11 @@ def calculate_race_scores(race_id_target, target_df):
         if not df_past.empty and '馬名_clean' in df_past.columns:
             h_history = df_past[df_past['馬名_clean'] == horse_name_clean]
             if not h_history.empty:
+                # 馬の直近の成績からAIに必要な指数データを引き継ぐ（未来の出馬表に指数を合体）
                 latest_race = h_history.iloc[-1].to_dict()
                 for f in features:
-                    if pd.isna(horse_features.get(f)):
+                    # 既にデータが入っている場合（過去検証モード時）は上書きせず、空っぽの場合（未来レース）のみ補完する
+                    if f not in horse_features or pd.isna(horse_features.get(f)) or horse_features.get(f) == "":
                         if f in latest_race and pd.notna(latest_race[f]):
                             horse_features[f] = latest_race[f]
 
@@ -293,7 +321,6 @@ def calculate_race_scores(race_id_target, target_df):
     race_df['人気_sort'] = pd.to_numeric(race_df['人気'], errors='coerce').fillna(999)
     return race_df.sort_values(by=['score_brain1', '人気_sort'], ascending=[False, True]).reset_index(drop=True)
 
-# 🎯 ロジック修正：勝率7%以下の馬は穴馬判定せず「消し」にする
 def get_mark(idx, ev, odds, win_prob):
     if idx == 0: return "◎ 本命"
     if idx == 1: return "◯ 対抗"
@@ -426,7 +453,7 @@ with tab_forecast:
                 st.info("🐣 新馬戦のため、過去データによるベースAIスコアは参考値です。Geminiの自力予想に委ねます。")
                 show_cols = ['馬番', '馬名', '騎手', '予想オッズ']
             
-            # 🎯 デザイン修正：間延びするst.tableから、スッキリ整ったst.dataframeに戻しました
+            # デザインを st.dataframe でスッキリ表示
             st.dataframe(disp_df[show_cols], use_container_width=True, hide_index=True)
 
         if st.button("🧠 Geminiで最終適正化＆買い目生成", type="primary", use_container_width=True):
