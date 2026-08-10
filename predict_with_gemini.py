@@ -270,8 +270,8 @@ def calculate_race_scores(race_id_target, target_df):
     X = X.apply(lambda x: pd.to_numeric(x, errors='coerce'))
 
     try:
+        # ごまかし無しの純粋なAI推論
         if hasattr(model, "predict_proba"):
-            # 純粋なAIの予測確率をそのまま使用する（余計な補正はしない）
             prob = model.predict_proba(X)[:, 1]
         else:
             prob = model.predict(X)
@@ -290,6 +290,7 @@ def calculate_race_scores(race_id_target, target_df):
         
     race_df['score_brain1'] = race_df['win_prob'].apply(scale_score).round().astype(int)
 
+    # 期待値計算
     def calc_ev(r):
         raw_odds = r.get('単勝') if pd.notna(r.get('単勝')) else r.get('オッズ', 0)
         odds = pd.to_numeric(raw_odds, errors='coerce')
@@ -312,7 +313,6 @@ def get_mark(idx, ev, odds, win_prob):
     if idx == 2: return "▲ 単穴"
     if idx in [3, 4]: return "△ 連下"
     
-    # 勝率のハードルを元に戻し、シンプルに期待値やオッズで穴馬を拾う
     if win_prob <= 0.07: 
         return "消し"
         
