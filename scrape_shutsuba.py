@@ -46,7 +46,7 @@ def fetch_with_retry(session, url, max_retries=3):
         try:
             res = session.get(url, timeout=15)
             if res.status_code == 200:
-                # 🎯 修正箇所：最新のUTF-8として正しく読み込む
+                # 🎯 最新のUTF-8として正しく読み込む
                 res.encoding = 'utf-8'
                 return res
             else:
@@ -130,6 +130,11 @@ def scrape_shutsuba():
                     jockey_td = cols[6]
                     jockey = clean_text(jockey_td.find("a").text) if jockey_td.find("a") else clean_text(jockey_td.text)
                     
+                    # 🎯 【追加】オッズを取得（左から10番目のカラム）
+                    odds_str = ""
+                    if len(cols) >= 10:
+                        odds_str = clean_text(cols[9].text)
+                    
                     if horse_name and umaban.isdigit():
                         race_data_list.append({
                             "race_id": race_id,
@@ -142,6 +147,7 @@ def scrape_shutsuba():
                             "age": sex_age[1:] if len(sex_age) > 1 else "",
                             "斤量": kinryo,
                             "騎手": jockey,
+                            "オッズ": odds_str  # 🎯 ここにオッズを追加
                         })
             time.sleep(random.uniform(0.5, 1.0))
             
@@ -150,7 +156,15 @@ def scrape_shutsuba():
 
     if race_data_list:
         df_future = pd.DataFrame(race_data_list)
-        # 🎯 修正箇所：Excelでダブルクリックしても絶対に文字化けしない魔法のフォーマット「utf-8-sig」で保存
+        
+        # 🎯 【追加】オッズから「人気」をシステム側で自動計算して穴埋めする魔法のロジック
+        df_future['オッズ'] = pd.to_numeric(df_future['オッズ'], errors='coerce')
+        # race_idごとにオッズの低い順（昇順）で順位付けを行う
+        df_future['人気'] = df_future.groupby('race_id')['オッズ'].rank(method='min')
+        # 小数点表記を整数に変換（オッズ未発表のNaNを許容する 'Int64' 型を使用）
+        df_future['人気'] = df_future['人気'].astype('Int64')
+
+        # Excelでダブルクリックしても絶対に文字化けしないフォーマット「utf-8-sig」で保存
         df_future.to_csv(FUTURE_CSV, index=False, encoding='utf-8-sig')
         print(f"\n✅ {len(race_data_list)}頭のデータを保存完了！ ({FUTURE_CSV})")
     else:

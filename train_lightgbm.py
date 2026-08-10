@@ -37,8 +37,13 @@ def main():
     use_features = [f for f in features if f in df.columns]
     print(f"Selected Features: {use_features}")
 
-    df_clean = df.dropna(subset=use_features + ['is_win']).copy()
-    X = df_clean[use_features].apply(pd.to_numeric, errors='coerce').fillna(0)
+    # 💥 【修正点1】目的変数（is_win）が欠損している行だけを削除する
+    # （特徴量が欠損していても、行ごと削除しない）
+    df_clean = df.dropna(subset=['is_win']).copy()
+    
+    # 💥 【修正点2】fillna(0) を完全撤去。
+    # データなしは NaN のまま LightGBM に渡し、アルゴリズムにネイティブ処理させる
+    X = df_clean[use_features].apply(pd.to_numeric, errors='coerce')
     y = df_clean['is_win']
 
     if len(X) < 100:
