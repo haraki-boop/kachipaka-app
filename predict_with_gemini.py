@@ -57,42 +57,37 @@ def load_model():
 @st.cache_data
 def load_past_data():
     if os.path.exists(ML_TARGET_CSV) and os.path.getsize(ML_TARGET_CSV) > 0:
-        try:
-            df = pd.read_csv(ML_TARGET_CSV, low_memory=False, dtype={'race_id': str}, encoding='utf-8-sig')
-        except Exception:
+        for enc in ['utf-8-sig', 'cp932', 'utf-8', 'shift_jis']:
             try:
-                df = pd.read_csv(ML_TARGET_CSV, low_memory=False, dtype={'race_id': str}, encoding='cp932')
+                df = pd.read_csv(ML_TARGET_CSV, low_memory=False, dtype={'race_id': str}, encoding=enc)
+                if 'date' in df.columns:
+                    df = df.sort_values(by='date')
+                if '馬名' in df.columns:
+                    df['馬名_clean'] = df['馬名'].astype(str).apply(clean_horse_name)
+                return df
             except Exception:
-                return pd.DataFrame()
-        if 'date' in df.columns:
-            df = df.sort_values(by='date')
-        if '馬名' in df.columns:
-            df['馬名_clean'] = df['馬名'].apply(clean_horse_name)
-        return df
+                continue
     return pd.DataFrame()
 
 def load_future_data():
     if os.path.exists(FUTURE_CSV) and os.path.getsize(FUTURE_CSV) > 0:
-        try:
-            df = pd.read_csv(FUTURE_CSV, dtype={'race_id': str}, encoding='utf-8-sig')
-        except Exception:
+        for enc in ['utf-8-sig', 'cp932', 'utf-8']:
             try:
-                df = pd.read_csv(FUTURE_CSV, dtype={'race_id': str}, encoding='cp932')
-            except Exception:
-                return pd.DataFrame()
+                df = pd.read_csv(FUTURE_CSV, dtype={'race_id': str}, encoding=enc)
+                PLACE_MAP_REV = {
+                    "01": "札幌", "02": "函館", "03": "福島", "04": "新潟", "05": "東京",
+                    "06": "中山", "07": "中京", "08": "京都", "09": "阪神", "10": "小倉"
+                }
+                if 'race_id' in df.columns:
+                    df['place_code'] = df['race_id'].str[4:6]
+                    df['place_name'] = df['place_code'].map(PLACE_MAP_REV).fillna("不明")
+                    df['r_num'] = df['race_id'].str[10:12].astype(int)
                 
-        PLACE_MAP_REV = {
-            "01": "札幌", "02": "函館", "03": "福島", "04": "新潟", "05": "東京",
-            "06": "中山", "07": "中京", "08": "京都", "09": "阪神", "10": "小倉"
-        }
-        if 'race_id' in df.columns:
-            df['place_code'] = df['race_id'].str[4:6]
-            df['place_name'] = df['place_code'].map(PLACE_MAP_REV).fillna("不明")
-            df['r_num'] = df['race_id'].str[10:12].astype(int)
-        
-        if 'race_name' not in df.columns: df['race_name'] = ""
-        df['day_label'] = df['date'] if 'date' in df.columns else "不明"
-        return df
+                if 'race_name' not in df.columns: df['race_name'] = ""
+                df['day_label'] = df['date'] if 'date' in df.columns else "不明"
+                return df
+            except Exception:
+                continue
     return pd.DataFrame()
 
 def load_history_data():
@@ -254,34 +249,25 @@ def calculate_race_scores(race_id_target, target_df):
     features = model_data.get('features', [])
     model = model_data.get('model')
 
-    X_rows = []
-    
-    for idx, row in race_df.iterrows():
-        horse_features = row.to_dict()
-        horse_name_clean = clean_horse_name(row.get('馬名', ''))
-        
-        if not df_past.empty and '馬名_clean' in df_past.columns:
-            h_history = df_past[df_past['馬名_clean'] == horse_name_clean]
-            if not h_history.empty:
-                # 馬の直近の成績からAIに必要な指数データを引き継ぐ（未来の出馬表に指数を合体）
-                latest_race = h_history.iloc[-1].to_dict()
-                for f in features:
-                    # 既にデータが入っている場合（過去検証モード時）は上書きせず、空っぽの場合（未来レース）のみ補完する
-                    if f not in horse_features or pd.isna(horse_features.get(f)) or horse_features.get(f) == "":
-                        if f in latest_race and pd.notna(latest_race[f]):
-                            horse_features[f] = latest_race[f]
-
-        X_rows.append(horse_features)
-
-    X_df = pd.DataFrame(X_rows)
+    # すでに future_races.csv 側で結合済みのため、余分な照合を削除して直接 X を構築
     for f in features:
-        if f not in X_df.columns:
-            X_df[f] = np.nan
+        if f not in race_df.columns:
+            race_df[f] = np.nan
             
-    X = X_df[features].copy()
+    X = race_df[features].copy()
     
-    if 'sex_code' in X.columns and X['sex_code'].dtype == object:
-        X['sex_code'] = X['sex_code'].map({'牡': 0, '牝': 1, 'セ': 2})
+    # カテゴリ変数の文字破壊を防ぐマッピング処理
+    if 'sex_code' in X.columns:
+        X['sex_code'] = X['sex_code'].replace({'牡': 0, '牝': 1, 'セ': 2})
+        
+    if 'surface' in X.columns:
+        X['surface'] = X['surface'].replace({'芝': 0, 'ダート': 1, '障害': 2})
+        
+    if 'condition' in X.columns:
+        X['condition'] = X['condition'].replace({'良': 0, '稍重': 1, '稍': 1, '重': 2, '不良': 3})
+
+    if 'weather' in X.columns:
+        X['weather'] = X['weather'].replace({'晴': 0, '曇': 1, '雨': 2, '雪': 3, '小雨': 2, '小雪': 3})
         
     X = X.apply(lambda x: pd.to_numeric(x, errors='coerce'))
 
@@ -450,10 +436,9 @@ with tab_forecast:
             
             show_cols = ['馬番', '馬名', '騎手', 'AIスコア', '勝率', '予想オッズ', '期待値', '評価']
             if is_newcomer:
-                st.info("🐣 新馬戦のため、過去データによるベースAIスコアは参考値です。Geminiの自力予想に委ねます。")
+                st.info("🐣 新馬戦のため、過去データが存在せずベースAIスコアは参考値です。Geminiの自力予想に委ねます。")
                 show_cols = ['馬番', '馬名', '騎手', '予想オッズ']
             
-            # デザインを st.dataframe でスッキリ表示
             st.dataframe(disp_df[show_cols], use_container_width=True, hide_index=True)
 
         if st.button("🧠 Geminiで最終適正化＆買い目生成", type="primary", use_container_width=True):
