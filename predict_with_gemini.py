@@ -5,6 +5,7 @@ import requests
 import pandas as pd
 import numpy as np
 import joblib
+import unicodedata
 import streamlit as st
 from bs4 import BeautifulSoup
 from datetime import datetime
@@ -36,6 +37,11 @@ HISTORY_CSV = "prediction_history.csv"
 FUTURE_CSV = "future_races.csv"
 ML_TARGET_CSV = "ml_target_data.csv"
 
+def clean_horse_name(name):
+    if pd.isna(name): return ""
+    s = unicodedata.normalize('NFKC', str(name))
+    return re.sub(r'[\s\u3000]+', '', s)
+
 # ==========================================
 # 1. データとAIモデルの読み込み
 # ==========================================
@@ -61,7 +67,7 @@ def load_past_data():
         if 'date' in df.columns:
             df = df.sort_values(by='date')
         if '馬名' in df.columns:
-            df['馬名_clean'] = df['馬名'].astype(str).str.replace(r'\s+', '', regex=True)
+            df['馬名_clean'] = df['馬名'].apply(clean_horse_name)
         return df
     return pd.DataFrame()
 
@@ -111,6 +117,9 @@ df_past = load_past_data()
 df_future = load_future_data()
 df_history = load_history_data()
 
+# アプリ内の表示データを df_future に統一
+df_display = df_future
+
 # ==========================================
 # 2. サイドバー UI
 # ==========================================
@@ -119,36 +128,6 @@ if st.sidebar.button("🔄 最新の情報にリロード", use_container_width=
     st.cache_data.clear()
     st.cache_resource.clear()
     st.rerun()
-
-st.sidebar.markdown("---")
-# 🎯 追加：月曜日等でデータが無い時でも検証できる魔法のスイッチ
-st.sidebar.header("🔬 AI精度検証モード")
-test_mode = st.sidebar.checkbox("過去データ(昨日)でAIをテストする", help="チェックを入れると、最新の過去レース結果を使ってAIの評価をテストできます。")
-
-def get_display_data():
-    if test_mode and not df_past.empty:
-        dates = df_past['date'].dropna().unique()
-        if len(dates) > 0:
-            latest_date = sorted(dates)[-1]
-            test_df = df_past[df_past['date'] == latest_date].copy()
-            
-            PLACE_MAP_REV = {
-                "01": "札幌", "02": "函館", "03": "福島", "04": "新潟", "05": "東京",
-                "06": "中山", "07": "中京", "08": "京都", "09": "阪神", "10": "小倉"
-            }
-            if 'race_id' in test_df.columns:
-                test_df['place_code'] = test_df['race_id'].astype(str).str[4:6]
-                test_df['place_name'] = test_df['place_code'].map(PLACE_MAP_REV).fillna("不明")
-                test_df['r_num'] = test_df['race_id'].astype(str).str[10:12].astype(int)
-            test_df['day_label'] = f"【過去検証】{latest_date}"
-            if 'race_name' not in test_df.columns:
-                test_df['race_name'] = "過去レース検証"
-            if '単勝' not in test_df.columns:
-                test_df['単勝'] = test_df.get('オッズ', 0)
-            return test_df
-    return df_future
-
-df_display = get_display_data()
 
 st.sidebar.markdown("---")
 st.sidebar.header("🏁 実戦結果の検証")
@@ -253,14 +232,10 @@ def calculate_race_scores(race_id_target, target_df):
     
     for idx, row in race_df.iterrows():
         horse_features = row.to_dict()
-        horse_name_clean = str(row.get('馬名', '')).replace(' ', '').replace(' ', '')
+        horse_name_clean = clean_horse_name(row.get('馬名', ''))
         
         if not df_past.empty and '馬名_clean' in df_past.columns:
             h_history = df_past[df_past['馬名_clean'] == horse_name_clean]
-            current_date = row.get('date', '9999-12-31')
-            if pd.notna(current_date):
-                h_history = h_history[h_history['date'] < current_date]
-            
             if not h_history.empty:
                 latest_race = h_history.iloc[-1].to_dict()
                 for f in features:
@@ -273,14 +248,14 @@ def calculate_race_scores(race_id_target, target_df):
     X_df = pd.DataFrame(X_rows)
     for f in features:
         if f not in X_df.columns:
-            X_df[f] = 0.0
+            X_df[f] = np.nan
             
     X = X_df[features].copy()
     
     if 'sex_code' in X.columns and X['sex_code'].dtype == object:
-        X['sex_code'] = X['sex_code'].map({'牡': 0, '牝': 1, 'セ': 2}).fillna(0)
+        X['sex_code'] = X['sex_code'].map({'牡': 0, '牝': 1, 'セ': 2})
         
-    X = X.apply(lambda x: pd.to_numeric(x, errors='coerce')).fillna(0.0)
+    X = X.apply(lambda x: pd.to_numeric(x, errors='coerce'))
 
     try:
         if hasattr(model, "predict_proba"):
@@ -290,11 +265,9 @@ def calculate_race_scores(race_id_target, target_df):
     except Exception:
         return None
 
-    # 純粋勝率の算出
     s = prob.sum()
     race_df['win_prob'] = prob / s if s > 0 else 1.0 / len(race_df)
     
-    # 【第1の脳】AIスコア (レース内で50〜150にMin-Maxスケーリングして強弱を明確化)
     min_prob = race_df['win_prob'].min()
     max_prob = race_df['win_prob'].max()
     
@@ -304,36 +277,43 @@ def calculate_race_scores(race_id_target, target_df):
         
     race_df['score_brain1'] = race_df['win_prob'].apply(scale_score).round().astype(int)
 
-    # 【第2の脳】期待値の算出 (純粋勝率 × 単勝オッズ)
     def calc_ev(r):
-        odds = pd.to_numeric(r.get('単勝', r.get('オッズ', 0)), errors='coerce')
+        raw_odds = r.get('単勝') if pd.notna(r.get('単勝')) else r.get('オッズ', 0)
+        odds = pd.to_numeric(raw_odds, errors='coerce')
         if pd.isna(odds) or odds <= 0: return 0.0
         return r['win_prob'] * odds
 
     race_df['ev_brain2'] = race_df.apply(calc_ev, axis=1)
     
-    if '人気' in race_df.columns:
-        race_df['人気_sort'] = pd.to_numeric(race_df['人気'], errors='coerce').fillna(999)
-        return race_df.sort_values(by=['score_brain1', '人気_sort'], ascending=[False, True]).reset_index(drop=True)
-    return race_df.sort_values(by='score_brain1', ascending=False).reset_index(drop=True)
+    if '人気' not in race_df.columns or race_df['人気'].isna().all():
+        raw_odds_col = race_df['単勝'] if '単勝' in race_df.columns else race_df.get('オッズ', pd.Series())
+        numeric_odds = pd.to_numeric(raw_odds_col, errors='coerce')
+        race_df['人気'] = numeric_odds.rank(method='min').fillna(999)
 
-# 評価印判定ロジック
-def get_mark(idx, ev, odds):
+    race_df['人気_sort'] = pd.to_numeric(race_df['人気'], errors='coerce').fillna(999)
+    return race_df.sort_values(by=['score_brain1', '人気_sort'], ascending=[False, True]).reset_index(drop=True)
+
+# 🎯 ロジック修正：勝率7%以下の馬は穴馬判定せず「消し」にする
+def get_mark(idx, ev, odds, win_prob):
     if idx == 0: return "◎ 本命"
     if idx == 1: return "◯ 対抗"
     if idx == 2: return "▲ 単穴"
     if idx in [3, 4]: return "△ 連下"
+    
+    if win_prob <= 0.07: 
+        return "消し"
+        
     if ev >= 0.7 or odds >= 15.0: return "☆ 穴馬"
     return "消し"
 
 # ==========================================
-# 4. マーカー判定 (AI上位かつ世間で舐められている馬)
+# 4. マーカー判定
 # ==========================================
-def get_all_markers(target_df):
+def get_all_markers():
     markers = {}
-    if target_df.empty: return markers
-    for rid in target_df['race_id'].unique():
-        sdf = calculate_race_scores(rid, target_df)
+    if df_display.empty: return markers
+    for rid in df_display['race_id'].unique():
+        sdf = calculate_race_scores(rid, df_display)
         if sdf is not None and len(sdf) >= 5:
             rname = str(sdf['race_name'].iloc[0]) if 'race_name' in sdf.columns else ""
             if "新馬" in rname:
@@ -354,7 +334,7 @@ def get_all_markers(target_df):
                 markers[rid] = "【普】"
     return markers
 
-markers = get_all_markers(df_display)
+markers = get_all_markers()
 
 # ==========================================
 # 5. メインUI
@@ -363,7 +343,7 @@ tab_forecast, tab_dashboard = st.tabs(["🏇 レース予想", "📈 実戦成�
 
 with tab_forecast:
     if df_display.empty:
-        st.warning("⚠️ 出馬表データが存在しません。BOTを実行するか、左側の「🔬 過去データでAI精度検証モード」をオンにしてください。")
+        st.warning("⚠️ 出馬表データが存在しません。")
     else:
         date_options = sorted(df_display['day_label'].unique())
         selected_date = st.radio("開催日", date_options, horizontal=True, label_visibility="collapsed")
@@ -390,8 +370,15 @@ with tab_forecast:
 
     if st.session_state['selected_race_id'] and not df_display.empty:
         st.markdown("---")
-        target_id = st.session_state['selected_race_id']
-        target_race_info = df_display[df_display['race_id'] == target_id].iloc[0]
+        target_id = str(st.session_state['selected_race_id'])
+        
+        target_rows = df_display[df_display['race_id'].astype(str) == target_id]
+        if target_rows.empty:
+            st.session_state['selected_race_id'] = None
+            st.rerun()
+            
+        target_race_info = target_rows.iloc[0]
+        
         rname = target_race_info.get('race_name', "")
         is_newcomer = "新馬" in str(rname)
         race_display_name = f"{target_race_info['place_name']} {target_race_info['r_num']}R 【{rname}】"
@@ -400,30 +387,29 @@ with tab_forecast:
         scored_df = calculate_race_scores(target_id, df_display)
         
         if scored_df is not None:
-            # 🎯 復活：画像と全く同じ、完璧で美しい表の表示
             st.markdown("### 📊 1. 出走馬 期待値＆データ一覧")
-            disp_df = scored_df.copy()
-            disp_df = disp_df.sort_values(by=['score_brain1', 'win_prob'], ascending=[False, False]).reset_index(drop=True)
+            disp_df = scored_df.copy().sort_values(by=['score_brain1', 'win_prob'], ascending=[False, False]).reset_index(drop=True)
             
             marks_list = []
             for i, r in disp_df.iterrows():
                 ev_val = float(r.get('ev_brain2', 0))
-                o_val = r.get('単勝', r.get('オッズ', 0))
-                odds_val = float(pd.to_numeric(o_val, errors='coerce')) if pd.notna(o_val) else 0.0
-                marks_list.append(get_mark(i, ev_val, odds_val))
+                raw_o = r.get('単勝') if pd.notna(r.get('単勝')) else r.get('オッズ', 0)
+                odds_val = float(pd.to_numeric(raw_o, errors='coerce')) if pd.notna(raw_o) else 0.0
+                win_prob_val = float(r.get('win_prob', 0))
+                marks_list.append(get_mark(i, ev_val, odds_val, win_prob_val))
                 
-            disp_df['評価'] = marks_list
             disp_df['馬番'] = disp_df['馬番'].apply(lambda x: f"{int(x):02d}")
             disp_df['AIスコア'] = disp_df['score_brain1'].astype(int)
             disp_df['勝率'] = disp_df['win_prob'].apply(lambda x: f"{x*100:.1f}%")
             
-            def format_odds(val):
+            def format_odds(row):
+                raw_o = row.get('単勝') if pd.notna(row.get('単勝')) else row.get('オッズ', 0)
                 try:
-                    v = float(val)
+                    v = float(raw_o)
                     return f"{v:.1f}倍" if v > 0 else "-"
                 except: return "-"
                 
-            disp_df['予想オッズ'] = disp_df.apply(lambda r: r.get('単勝', r.get('オッズ', 0)), axis=1).apply(format_odds)
+            disp_df['予想オッズ'] = disp_df.apply(format_odds, axis=1)
             
             def format_ev(val):
                 try:
@@ -433,14 +419,15 @@ with tab_forecast:
                 
             disp_df['期待値'] = disp_df['ev_brain2'].apply(format_ev)
             disp_df['騎手'] = disp_df.get('騎手', '-')
+            disp_df['評価'] = marks_list
             
             show_cols = ['馬番', '馬名', '騎手', 'AIスコア', '勝率', '予想オッズ', '期待値', '評価']
             if is_newcomer:
                 st.info("🐣 新馬戦のため、過去データによるベースAIスコアは参考値です。Geminiの自力予想に委ねます。")
                 show_cols = ['馬番', '馬名', '騎手', '予想オッズ']
-                
-            # Streamlitの機能で画像と同じ枠線付きの美しいテーブルを描画
-            st.table(disp_df[show_cols])
+            
+            # 🎯 デザイン修正：間延びするst.tableから、スッキリ整ったst.dataframeに戻しました
+            st.dataframe(disp_df[show_cols], use_container_width=True, hide_index=True)
 
         if st.button("🧠 Geminiで最終適正化＆買い目生成", type="primary", use_container_width=True):
             if not GEMINI_API_KEY:
@@ -454,9 +441,10 @@ with tab_forecast:
             prompt_df = scored_df.copy().sort_values(by=['score_brain1', 'win_prob'], ascending=[False, False]).reset_index(drop=True)
             for idx, row in prompt_df.iterrows():
                 ev_val = float(row.get('ev_brain2', 0))
-                o_val = row.get('単勝', row.get('オッズ', 0))
-                odds_val = float(pd.to_numeric(o_val, errors='coerce')) if pd.notna(o_val) else 0.0
-                mark = get_mark(idx, ev_val, odds_val)
+                raw_o = row.get('単勝') if pd.notna(row.get('単勝')) else row.get('オッズ', 0)
+                odds_val = float(pd.to_numeric(raw_o, errors='coerce')) if pd.notna(raw_o) else 0.0
+                win_prob_val = float(row.get('win_prob', 0))
+                mark = get_mark(idx, ev_val, odds_val, win_prob_val)
                 
                 table_summary.append(
                     f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | "
