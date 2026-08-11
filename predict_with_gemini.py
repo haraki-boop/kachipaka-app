@@ -20,6 +20,11 @@ st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="🐴", l
 st.markdown("""
 <style>
     .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
+    
+    /* タイトル・見出しのベースサイズ */
+    h1 { font-size: 1.8rem !important; }
+    h2 { font-size: 1.4rem !important; }
+    
     .section-header {
         font-size: 1.3rem;
         font-weight: bold;
@@ -66,6 +71,17 @@ st.markdown("""
         .kachi-table th, .kachi-table td { padding: 4px 6px; }
         .section-header { font-size: 1.1rem; }
         .badge-mark { min-width: 45px; padding: 2px 4px; font-size: 0.75em; }
+        
+        /* 📱追加：スマホでの文字サイズ縮小＆改行防止 */
+        h1 { font-size: 1.3rem !important; } /* 「AI予想 勝ちぱかくん」を小さく */
+        h2 { font-size: 1.1rem !important; } /* 🚀〇〇 1R... を小さく */
+        
+        /* 📱追加：レース選択ボタンの文字を極小にし、1行に強制 */
+        .stButton button p {
+            font-size: 0.65rem !important; /* ボタンの文字を極小に */
+            white-space: nowrap !important; /* 強制的に1行にする */
+            letter-spacing: -0.5px; /* 文字間隔を少し詰める */
+        }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -497,24 +513,27 @@ with tab_forecast:
             with place_tabs[p_idx]:
                 place_df = day_df[day_df['place_name'] == place]
                 races = sorted(place_df['r_num'].unique())
-                # スマホ幅を考慮してカラム調整 (最大3~4列程度でもOKですが標準6列)
-                cols = st.columns(6)
-                for i, r in enumerate(races):
-                    col = cols[i % 6]
-                    race_rows = place_df[place_df['r_num'] == r]
-                    rid = race_rows['race_id'].iloc[0]
-                    rname = str(race_rows['race_name'].iloc[0]).strip() if 'race_name' in race_rows.columns and pd.notna(race_rows['race_name'].iloc[0]) else ""
-                    mark = markers.get(rid, "")
-                    
-                    # ボタンにレース名を追加して表示 (例: 1R 2歳未勝利 【普通】)
-                    if rname and rname != "nan":
-                        label = f"{r}R {rname} {mark}".strip()
-                    else:
-                        label = f"{r}R {mark}".strip()
+                
+                # 【修正】6レースごとに新しく行を作ることで、スマホでも1Rから順番に縦に並ぶようにする
+                for i in range(0, len(races), 6):
+                    chunk = races[i:i+6]
+                    cols = st.columns(6)
+                    for j, r in enumerate(chunk):
+                        col = cols[j]
+                        race_rows = place_df[place_df['r_num'] == r]
+                        rid = race_rows['race_id'].iloc[0]
+                        rname = str(race_rows['race_name'].iloc[0]).strip() if 'race_name' in race_rows.columns and pd.notna(race_rows['race_name'].iloc[0]) else ""
+                        mark = markers.get(rid, "")
                         
-                    btn_type = "primary" if "🔥" in mark else "secondary"
-                    if col.button(label, key=f"btn_{rid}", use_container_width=True, type=btn_type):
-                        st.session_state['selected_race_id'] = rid
+                        # ボタンにレース名を追加して表示 (例: 1R 2歳未勝利 【普通】)
+                        if rname and rname != "nan":
+                            label = f"{r}R {rname} {mark}".strip()
+                        else:
+                            label = f"{r}R {mark}".strip()
+                            
+                        btn_type = "primary" if "🔥" in mark else "secondary"
+                        if col.button(label, key=f"btn_{rid}", use_container_width=True, type=btn_type):
+                            st.session_state['selected_race_id'] = rid
 
     if st.session_state['selected_race_id'] and not df_future.empty:
         st.markdown("---")
@@ -675,7 +694,7 @@ with tab_dashboard:
                 col2.metric("💰 回収率 (※1着固定ベース)", f"{roi_total:.1f}%", delta_color="normal" if profit_total >= 0 else "inverse")
                 col3.metric("💴 収支 (※1着固定ベース)", f"{profit_total:,} 円")
                 
-                st.markdown("<br><h5>🎫 券種別の詳細データ（3連単 比較検証）</h5>", unsafe_allow_html=True)
+                st.markdown("<br><h5>🎫 券種別の詳細データ（3直単 比較検証）</h5>", unsafe_allow_html=True)
                 
                 def make_ticket_card(col, name, hits_val, returns_val, inv_val):
                     roi_val = (returns_val / inv_val) * 100 if inv_val > 0 else 0
