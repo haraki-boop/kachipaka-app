@@ -29,16 +29,28 @@ st.markdown("""
         border-bottom: 2px solid #ecf0f1;
         padding-bottom: 5px;
     }
+    
+    /* 表の横スクロール用コンテナ（スマホ対応） */
+    .table-container {
+        width: 100%;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        margin-bottom: 20px;
+        border-radius: 8px;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    }
+    
     .kachi-table {
-        width: 100%; border-collapse: collapse; margin-bottom: 20px;
+        width: 100%; border-collapse: collapse; margin-bottom: 0;
         font-family: 'Helvetica Neue', Arial, sans-serif;
-        box-shadow: 0 1px 4px rgba(0,0,0,0.06); border-radius: 8px; overflow: hidden;
         background-color: #ffffff;
+        white-space: nowrap; /* スマホで改行されすぎないようにする */
     }
     .kachi-table thead tr { background: #fdfdfd; color: #2c3e50; font-weight: bold; border-bottom: 2px solid #eaeaea; }
     .kachi-table th { padding: 8px 10px; text-align: center; }
     .kachi-table td { padding: 6px 10px; text-align: center; border-bottom: 1px solid #f4f4f4; color: #34495e; }
     .kachi-table tbody tr:hover td { background: #f9fbfd; }
+    
     .badge-mark { color: #fff; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 0.85em; display: inline-block; min-width: 60px;}
     .badge-honmei { background: #e74c3c; }
     .badge-taikou { background: #3498db; }
@@ -46,6 +58,15 @@ st.markdown("""
     .badge-renka  { background: #f39c12; }
     .badge-ana    { background: #9b59b6; }
     .badge-keshi  { background: #e0e0e0; color: #7f8c8d; }
+
+    /* スマホ画面向けのレスポンシブデザイン */
+    @media (max-width: 768px) {
+        .block-container { padding-top: 1rem; padding-bottom: 1rem; padding-left: 0.5rem; padding-right: 0.5rem; }
+        .kachi-table { font-size: 12px; }
+        .kachi-table th, .kachi-table td { padding: 4px 6px; }
+        .section-header { font-size: 1.1rem; }
+        .badge-mark { min-width: 45px; padding: 2px 4px; font-size: 0.75em; }
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -425,7 +446,7 @@ def get_all_markers():
 markers = get_all_markers()
 
 def generate_beautiful_table(disp_df, is_newcomer):
-    html = ""
+    html = "<div class='table-container'>"
     html += "<table class='kachi-table'>"
     html += "<thead><tr><th>馬番</th><th style='text-align:left;'>馬名</th><th>騎手</th><th>AIスコア</th><th>勝率</th><th>予想オッズ</th><th>期待値</th><th>印</th></tr></thead>"
     html += "<tbody>"
@@ -453,7 +474,7 @@ def generate_beautiful_table(disp_df, is_newcomer):
         
         html += f"<tr><td style='font-weight:bold; font-size:1.1em; color:#34495e;'>{int(r['馬番']):02d}</td><td style='text-align:left; font-weight:bold; color:#2c3e50;'>{r.get('馬名', '-')}</td><td style='color:#7f8c8d;'>{r.get('騎手', '-')}</td><td style='color:#2c3e50;'>{score_str}</td><td style='color:#2c3e50;'>{win_str}</td><td style='color:#7f8c8d;'>{odds_str}</td><td style='color:#2c3e50;'>{ev_str}</td><td>{mark_html}</td></tr>"
         
-    html += "</tbody></table>"
+    html += "</tbody></table></div>"
     return html
 
 # ==========================================
@@ -476,14 +497,21 @@ with tab_forecast:
             with place_tabs[p_idx]:
                 place_df = day_df[day_df['place_name'] == place]
                 races = sorted(place_df['r_num'].unique())
+                # スマホ幅を考慮してカラム調整 (最大3~4列程度でもOKですが標準6列)
                 cols = st.columns(6)
                 for i, r in enumerate(races):
                     col = cols[i % 6]
                     race_rows = place_df[place_df['r_num'] == r]
                     rid = race_rows['race_id'].iloc[0]
-                    rname = str(race_rows['race_name'].iloc[0]).strip() if 'race_name' in race_rows.columns else ""
+                    rname = str(race_rows['race_name'].iloc[0]).strip() if 'race_name' in race_rows.columns and pd.notna(race_rows['race_name'].iloc[0]) else ""
                     mark = markers.get(rid, "")
-                    label = f"{r}R {mark}".strip()
+                    
+                    # ボタンにレース名を追加して表示 (例: 1R 2歳未勝利 【普通】)
+                    if rname and rname != "nan":
+                        label = f"{r}R {rname} {mark}".strip()
+                    else:
+                        label = f"{r}R {mark}".strip()
+                        
                     btn_type = "primary" if "🔥" in mark else "secondary"
                     if col.button(label, key=f"btn_{rid}", use_container_width=True, type=btn_type):
                         st.session_state['selected_race_id'] = rid
