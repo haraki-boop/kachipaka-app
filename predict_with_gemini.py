@@ -12,26 +12,59 @@ from datetime import datetime
 from google import genai
 from google.genai import types
 
+# ==========================================
+# 🎨 アプリの基本設定とカスタムCSS
+# ==========================================
 st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="🐴", layout="wide")
 
-col_img, col_text = st.columns([1, 10])
-with col_img:
+st.markdown("""
+<style>
+    .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
+    .section-header {
+        font-size: 1.3rem;
+        font-weight: bold;
+        color: #2c3e50;
+        margin-top: 1rem;
+        margin-bottom: 1rem;
+        border-bottom: 2px solid #ecf0f1;
+        padding-bottom: 5px;
+    }
+    .kachi-table {
+        width: 100%; border-collapse: collapse; margin-bottom: 20px;
+        font-family: 'Helvetica Neue', Arial, sans-serif;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.06); border-radius: 8px; overflow: hidden;
+        background-color: #ffffff;
+    }
+    .kachi-table thead tr { background: #fdfdfd; color: #2c3e50; font-weight: bold; border-bottom: 2px solid #eaeaea; }
+    .kachi-table th { padding: 8px 10px; text-align: center; }
+    .kachi-table td { padding: 6px 10px; text-align: center; border-bottom: 1px solid #f4f4f4; color: #34495e; }
+    .kachi-table tbody tr:hover td { background: #f9fbfd; }
+    .badge-mark { color: #fff; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 0.85em; display: inline-block; min-width: 60px;}
+    .badge-honmei { background: #e74c3c; }
+    .badge-taikou { background: #3498db; }
+    .badge-tana   { background: #2ecc71; }
+    .badge-renka  { background: #f39c12; }
+    .badge-ana    { background: #9b59b6; }
+    .badge-keshi  { background: #e0e0e0; color: #7f8c8d; }
+</style>
+""", unsafe_allow_html=True)
+
+col1, col2 = st.columns([0.6, 10])
+with col1:
     try:
-        st.image("image_61b676.png", width=70)
+        st.image("image_61b676.png", use_container_width=True)
     except Exception:
         st.write("🐴")
-with col_text:
+with col2:
     st.title("AI予想 勝ちぱかくん")
 
 if 'selected_race_id' not in st.session_state:
     st.session_state['selected_race_id'] = None
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    try:
-        GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-    except Exception:
-        GEMINI_API_KEY = None
+# ==========================================
+# 🔑 APIキーの設定
+# ==========================================
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 
 HISTORY_CSV = "prediction_history.csv"
 FUTURE_CSV = "future_races.csv"
@@ -101,19 +134,44 @@ def load_history_data():
                 return pd.DataFrame()
         if 'partners' not in df.columns:
             df['partners'] = ""
-        for col in ['pay_tansho', 'pay_umaren', 'pay_wide', 'pay_sanrenpuku', 'pay_sanrentan']:
+        for col in ['pay_tansho', 'pay_umaren', 'pay_wide', 'pay_sanrenpuku', 'pay_sanrentan_axis', 'pay_sanrentan_form']:
             if col not in df.columns:
                 df[col] = 0
         return df
-    return pd.DataFrame(columns=['date', 'race_id', 'race_name', 'honmei_umaban', 'partners', 'honmei_name', 'result_pay', 'pay_tansho', 'pay_umaren', 'pay_wide', 'pay_sanrenpuku', 'pay_sanrentan'])
+    return pd.DataFrame(columns=['date', 'race_id', 'race_name', 'honmei_umaban', 'partners', 'honmei_name', 'result_pay', 'pay_tansho', 'pay_umaren', 'pay_wide', 'pay_sanrenpuku', 'pay_sanrentan_axis', 'pay_sanrentan_form'])
 
 model_data = load_model()
 df_past = load_past_data()
 df_future = load_future_data()
 df_history = load_history_data()
 
+@st.cache_data
+def build_past_horse_dict(df_p):
+    if df_p.empty: return {}
+    past = df_p.copy()
+    past['date_parsed'] = pd.to_datetime(past['date'], errors='coerce')
+    past = past.dropna(subset=['date_parsed']).sort_values(['馬名', 'date_parsed'])
+    
+    horse_dict = {}
+    for horse, group in past.groupby('馬名'):
+        last_date = group['date_parsed'].iloc[-1]
+        prize = pd.to_numeric(group['賞金(万円)'].iloc[-1], errors='coerce') if '賞金(万円)' in group.columns else 0.0
+        t3 = pd.to_numeric(group.get('my_time_idx'), errors='coerce').tail(3).mean()
+        l3 = pd.to_numeric(group.get('my_last3f_idx'), errors='coerce').tail(3).mean()
+        p3 = pd.to_numeric(group.get('my_pace_idx'), errors='coerce').tail(3).mean()
+        s3 = pd.to_numeric(group.get('my_start_idx'), errors='coerce').tail(3).mean()
+        
+        horse_dict[horse] = {
+            'last_date': last_date, 'prev_prize': prize,
+            'recent3_time_idx': t3, 'recent3_last3f_idx': l3,
+            'recent3_pace_idx': p3, 'recent3_start_idx': s3
+        }
+    return horse_dict
+
+past_dict = build_past_horse_dict(df_past)
+
 # ==========================================
-# 2. サイドバー UI & 過去検証モード
+# 2. サイドバー UI
 # ==========================================
 st.sidebar.header("🔄 画面の更新")
 if st.sidebar.button("🔄 最新の情報にリロード", use_container_width=True):
@@ -122,102 +180,97 @@ if st.sidebar.button("🔄 最新の情報にリロード", use_container_width=
     st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.header("🔬 AI精度検証モード")
-test_mode = st.sidebar.checkbox("過去データ(直近)でAIをテストする")
-
-def get_display_data():
-    if test_mode and not df_past.empty:
-        dates = df_past['date'].dropna().unique()
-        if len(dates) > 0:
-            latest_date = sorted(dates)[-1]
-            test_df = df_past[df_past['date'] == latest_date].copy()
-            
-            PLACE_MAP_REV = {
-                "01": "札幌", "02": "函館", "03": "福島", "04": "新潟", "05": "東京",
-                "06": "中山", "07": "中京", "08": "京都", "09": "阪神", "10": "小倉"
-            }
-            if 'race_id' in test_df.columns:
-                test_df['place_code'] = test_df['race_id'].astype(str).str[4:6]
-                test_df['place_name'] = test_df['place_code'].map(PLACE_MAP_REV).fillna("不明")
-                test_df['r_num'] = test_df['race_id'].astype(str).str[10:12].astype(int)
-            test_df['day_label'] = f"【過去検証】{latest_date}"
-            if 'race_name' not in test_df.columns:
-                test_df['race_name'] = "過去レース検証"
-            if '単勝' not in test_df.columns:
-                test_df['単勝'] = test_df.get('オッズ', 0)
-            return test_df
-    return df_future
-
-df_display = get_display_data()
-
-st.sidebar.markdown("---")
 st.sidebar.header("🏁 実戦結果の検証")
 if st.sidebar.button("🏆 終了したレースの配当を取得", use_container_width=True):
     with st.spinner("🏁 実際の着順と全券種の配当をリアルタイム検索中..."):
         if not df_history.empty:
             updated = False
             headers = {"User-Agent": "Mozilla/5.0"}
+            
+            # 全てのレースを最後まで回すためのループ
             for idx, row in df_history.iterrows():
                 try:
                     axis = str(int(row['honmei_umaban']))
                     partners = [str(int(p.strip())) for p in str(row.get('partners', '')).split(',') if p.strip().isdigit()]
                     payout_found = False
-                    payouts = {'単勝': 0, '馬連': 0, 'ワイド': 0, '三連複': 0, '三連単': 0}
+                    payouts = {'単勝': 0, '馬連': 0, 'ワイド': 0, '三連複': 0, '三連単_軸': 0, '三連単_F': 0}
                     
                     for url in [f"https://race.netkeiba.com/race/result.html?race_id={str(row['race_id'])}", f"https://db.netkeiba.com/race/{str(row['race_id'])}/"]:
                         res = requests.get(url, headers=headers, timeout=5)
                         res.encoding = 'EUC-JP' if 'db.netkeiba' in url else 'utf-8'
                         soup = BeautifulSoup(res.text, "html.parser")
+                        
                         for tr in soup.find_all("tr"):
                             th = tr.find("th")
-                            if not th: continue
-                            kind = th.text.strip().replace("3連", "三連")
-                            if kind not in payouts: continue
-                            tds = tr.find_all("td")
-                            if len(tds) < 2: continue
-                            payout_found = True
+                            if th:
+                                tds = tr.find_all("td")
+                                if len(tds) < 2: continue
+                                w_td, a_td = tds[0], tds[1]
+                            else:
+                                th = tr.find("td", class_=re.compile(r"(Result_Pay_Type|Pay_Type|type)"))
+                                if not th: continue
+                                tds = tr.find_all("td")
+                                if len(tds) < 3: continue
+                                w_td, a_td = tds[1], tds[2]
+                                
+                            kind_raw = th.get_text(strip=True).replace(" ", "").replace(" ", "")
+                            kind = ""
+                            if "単勝" in kind_raw: kind = "単勝"
+                            elif "馬連" in kind_raw: kind = "馬連"
+                            elif "ワイド" in kind_raw: kind = "ワイド"
+                            elif "3連複" in kind_raw or "３連複" in kind_raw or "三連複" in kind_raw: kind = "三連複"
+                            elif "3連単" in kind_raw or "３連単" in kind_raw or "三連単" in kind_raw: kind = "三連単"
                             
-                            for br in tds[0].find_all('br'): br.replace_with(' _SPLIT_ ')
-                            for ul in tds[0].find_all('ul'): ul.insert_after(' _SPLIT_ ')
-                            for div in tds[0].find_all('div'): div.insert_after(' _SPLIT_ ')
-                            for br in tds[1].find_all('br'): br.replace_with(' _SPLIT_ ')
-                            for ul in tds[1].find_all('ul'): ul.insert_after(' _SPLIT_ ')
-                            for div in tds[1].find_all('div'): div.insert_after(' _SPLIT_ ')
+                            if not kind: continue
                             
-                            w_items = tds[0].get_text(separator=" ").split('_SPLIT_')
-                            a_items = tds[1].get_text(separator=" ").split('_SPLIT_')
+                            for br in w_td.find_all('br'): br.replace_with(' _SPLIT_ ')
+                            for ul in w_td.find_all('ul'): ul.insert_before(' _SPLIT_ ')
+                            for br in a_td.find_all('br'): br.replace_with(' _SPLIT_ ')
+                            for ul in a_td.find_all('ul'): ul.insert_before(' _SPLIT_ ')
                             
-                            for w_str, a_str in zip(w_items, a_items):
+                            w_lines = [s for s in w_td.get_text(separator=" ").split('_SPLIT_') if s.strip()]
+                            a_lines = [s for s in a_td.get_text(separator=" ").split('_SPLIT_') if s.strip()]
+                            
+                            for w_str, a_str in zip(w_lines, a_lines):
                                 amt_str = re.sub(r'\D', '', a_str)
                                 if not amt_str.isdigit(): continue
                                 amt = int(amt_str)
-                                w_str_clean = re.sub(r'\D', ' ', w_str)
-                                w_nums = [str(int(n)) for n in w_str_clean.split() if n.isdigit()]
+                                
+                                w_nums = [str(int(n)) for n in re.findall(r'\d+', w_str)]
                                 if not w_nums: continue
+                                payout_found = True
 
+                                # 【修正】馬連やワイドなども「選んだ相手全頭」を対象に判定するよう統一
                                 if kind == "単勝" and len(w_nums) >= 1 and w_nums[0] == axis:
                                     payouts['単勝'] += amt
                                 elif kind == "馬連" and len(w_nums) >= 2:
-                                    if axis in w_nums[:2] and any(p in w_nums[:2] for p in partners[:3]):
+                                    if axis in w_nums[:2] and any(p in w_nums[:2] for p in partners):
                                         payouts['馬連'] += amt
                                 elif kind == "ワイド" and len(w_nums) >= 2:
-                                    if axis in w_nums[:2] and any(p in w_nums[:2] for p in partners[:3]):
+                                    if axis in w_nums[:2] and any(p in w_nums[:2] for p in partners):
                                         payouts['ワイド'] += amt
                                 elif kind == "三連複" and len(w_nums) >= 3:
-                                    if axis in w_nums[:3] and len(set(w_nums[:3]).intersection(set(partners))) >= 2:
+                                    # 軸馬と相手馬のボックス（全通り）の中に上位3頭が含まれていれば的中
+                                    if all(n in ([axis] + partners) for n in w_nums[:3]):
                                         payouts['三連複'] += amt
                                 elif kind == "三連単" and len(w_nums) >= 3:
                                     if w_nums[0] == axis and w_nums[1] in partners and w_nums[2] in partners:
-                                        payouts['三連単'] += amt
-                    if payout_found:
-                        df_history.at[idx, 'pay_tansho'] = payouts['単勝']
-                        df_history.at[idx, 'pay_umaren'] = payouts['馬連']
-                        df_history.at[idx, 'pay_wide'] = payouts['ワイド']
-                        df_history.at[idx, 'pay_sanrenpuku'] = payouts['三連複']
-                        df_history.at[idx, 'pay_sanrentan'] = payouts['三連単']
-                        df_history.at[idx, 'result_pay'] = sum(payouts.values())
-                        updated = True
-                        break
+                                        payouts['三連単_軸'] += amt
+                                    form_2nd = partners[:2] if len(partners) >= 2 else partners
+                                    if w_nums[0] == axis and w_nums[1] in form_2nd and w_nums[2] in partners:
+                                        payouts['三連単_F'] += amt
+
+                        # 【修正】結果を見つけたら「URL探しのループ」だけを抜ける（次のレースの処理へ進む）
+                        if payout_found:
+                            df_history.at[idx, 'pay_tansho'] = payouts['単勝']
+                            df_history.at[idx, 'pay_umaren'] = payouts['馬連']
+                            df_history.at[idx, 'pay_wide'] = payouts['ワイド']
+                            df_history.at[idx, 'pay_sanrenpuku'] = payouts['三連複']
+                            df_history.at[idx, 'pay_sanrentan_axis'] = payouts['三連単_軸']
+                            df_history.at[idx, 'pay_sanrentan_form'] = payouts['三連単_F']
+                            df_history.at[idx, 'result_pay'] = payouts['単勝'] + payouts['馬連'] + payouts['ワイド'] + payouts['三連複'] + payouts['三連単_軸']
+                            updated = True
+                            break
                 except: pass
                 time.sleep(1)
             
@@ -239,7 +292,7 @@ if st.sidebar.button("💥 予想履歴を消去", type="primary", use_container
     except: pass
 
 # ==========================================
-# 3. AIスコア算出 (第1の脳：純粋AIスコア / 第2の脳：期待値)
+# 3. AIスコア算出
 # ==========================================
 def calculate_race_scores(race_id_target, target_df):
     if target_df.empty or model_data is None: return None
@@ -248,85 +301,107 @@ def calculate_race_scores(race_id_target, target_df):
 
     features = model_data.get('features', [])
     model = model_data.get('model')
+
+    raw_odds = pd.to_numeric(race_df.get('単勝', race_df.get('オッズ', pd.Series())), errors='coerce')
+    race_df['単勝_num'] = raw_odds.fillna(15.0)
+    if '人気' not in race_df.columns or race_df['人気'].isna().all():
+        race_df['人気'] = race_df['単勝_num'].rank(method='min').fillna(99.0)
     
+    race_df['log_odds'] = np.log(race_df['単勝_num'].clip(lower=1.1))
+    race_df['pop_num'] = pd.to_numeric(race_df['人気'], errors='coerce').fillna(99.0)
+    race_df['prev_rank_num'] = pd.to_numeric(race_df.get('prev_rank'), errors='coerce').fillna(9.0)
+
+    def get_past_stat(horse_name, key, default=np.nan):
+        return past_dict.get(horse_name, {}).get(key, default)
+    
+    race_df['recent3_time_idx'] = race_df['馬名'].apply(lambda x: get_past_stat(x, 'recent3_time_idx'))
+    race_df['recent3_last3f_idx'] = race_df['馬名'].apply(lambda x: get_past_stat(x, 'recent3_last3f_idx'))
+    race_df['recent3_pace_idx'] = race_df['馬名'].apply(lambda x: get_past_stat(x, 'recent3_pace_idx'))
+    race_df['recent3_start_idx'] = race_df['馬名'].apply(lambda x: get_past_stat(x, 'recent3_start_idx'))
+    race_df['prev_prize'] = race_df['馬名'].apply(lambda x: get_past_stat(x, 'prev_prize', 0.0))
+    
+    race_df['date_parsed_fut'] = pd.to_datetime(race_df['date'], errors='coerce')
+    race_df['last_date'] = race_df['馬名'].apply(lambda x: get_past_stat(x, 'last_date', pd.NaT))
+    race_df['interval_days'] = (race_df['date_parsed_fut'] - race_df['last_date']).dt.days.fillna(60.0)
+
+    race_df['eff_time_idx'] = pd.to_numeric(race_df.get('recent3_time_idx'), errors='coerce').fillna(75.0)
+    race_df['eff_last3f_idx'] = pd.to_numeric(race_df.get('recent3_last3f_idx'), errors='coerce').fillna(75.0)
+    race_df['eff_pace_idx'] = pd.to_numeric(race_df.get('recent3_pace_idx'), errors='coerce').fillna(75.0)
+    race_df['eff_start_idx'] = pd.to_numeric(race_df.get('recent3_start_idx'), errors='coerce').fillna(85.0)
+
+    j_col = race_df.get('jockey_win_power', race_df.get('jockey_win_rate', pd.Series()))
+    race_df['eff_jockey_win'] = pd.to_numeric(j_col, errors='coerce').fillna(0.05).clip(0.0, 1.0)
+    race_df['eff_jockey_track_win'] = pd.to_numeric(race_df.get('jockey_track_win_rate'), errors='coerce').fillna(0.05).clip(0.0, 1.0)
+    race_df['horse_win_rate_val'] = pd.to_numeric(race_df.get('horse_win_rate'), errors='coerce').fillna(0.0).clip(0.0, 1.0)
+    race_df['horse_runs_val'] = pd.to_numeric(race_df.get('horse_runs'), errors='coerce').fillna(0.0)
+    race_df['course_avg_time_val'] = pd.to_numeric(race_df.get('course_avg_time'), errors='coerce').fillna(100.0)
+
+    for orig_c, z_c in [('eff_time_idx', 'z_time_idx'), ('eff_last3f_idx', 'z_last3f_idx'), ('log_odds', 'z_odds')]:
+        std_val = race_df[orig_c].std()
+        if pd.isna(std_val) or std_val < 1e-5:
+            race_df[z_c] = 0.0
+        else:
+            race_df[z_c] = (race_df[orig_c] - race_df[orig_c].mean()) / std_val
+
     for f in features:
         if f not in race_df.columns:
-            race_df[f] = np.nan
-            
+            race_df[f] = 0.0
+
     X = race_df[features].copy()
-    
+
     if 'sex_code' in X.columns:
         X['sex_code'] = X['sex_code'].replace({'牡': 0, '牝': 1, 'セ': 2})
-        
     if 'surface' in X.columns:
         X['surface'] = X['surface'].replace({'芝': 0, 'ダート': 1, '障害': 2})
-        
+    if 'surface_code' in X.columns:
+        X['surface_code'] = X['surface_code'].replace({'芝': 0, 'ダート': 1, '障害': 2})
     if 'condition' in X.columns:
         X['condition'] = X['condition'].replace({'良': 0, '稍重': 1, '稍': 1, '重': 2, '不良': 3})
+    if 'condition_code' in X.columns:
+        X['condition_code'] = X['condition_code'].replace({'良': 0, '稍重': 1, '稍': 1, '重': 2, '不良': 3})
 
-    if 'weather' in X.columns:
-        X['weather'] = X['weather'].replace({'晴': 0, '曇': 1, '雨': 2, '雪': 3, '小雨': 2, '小雪': 3})
-        
-    X = X.apply(lambda x: pd.to_numeric(x, errors='coerce'))
+    X = X.apply(lambda x: pd.to_numeric(x, errors='coerce')).fillna(0.0)
 
     try:
-        # ごまかし無しの純粋なAI推論
         if hasattr(model, "predict_proba"):
-            prob = model.predict_proba(X)[:, 1]
+            raw_scores = model.predict_proba(X)[:, 1]
         else:
-            prob = model.predict(X)
+            raw_scores = model.predict(X)
     except Exception:
         return None
 
-    s = prob.sum()
-    race_df['win_prob'] = prob / s if s > 0 else 1.0 / len(race_df)
-    
-    min_prob = race_df['win_prob'].min()
-    max_prob = race_df['win_prob'].max()
-    
-    def scale_score(p):
-        if max_prob == min_prob: return 100
-        return 50 + ((p - min_prob) / (max_prob - min_prob)) * 100
-        
-    race_df['score_brain1'] = race_df['win_prob'].apply(scale_score).round().astype(int)
+    s = raw_scores.sum()
+    win_probs = raw_scores / s if s > 0 else np.ones(len(raw_scores))/len(raw_scores)
+    race_df['win_prob'] = win_probs
 
-    # 期待値計算
-    def calc_ev(r):
-        raw_odds = r.get('単勝') if pd.notna(r.get('単勝')) else r.get('オッズ', 0)
-        odds = pd.to_numeric(raw_odds, errors='coerce')
-        if pd.isna(odds) or odds <= 0: return 0.0
-        return r['win_prob'] * odds
+    std_p = race_df['win_prob'].std()
+    if pd.isna(std_p) or std_p < 1e-5:
+        race_df['score_brain1'] = 100
+    else:
+        race_df['score_brain1'] = (100 + (race_df['win_prob'] - race_df['win_prob'].mean()) / std_p * 15).round().astype(int)
 
-    race_df['ev_brain2'] = race_df.apply(calc_ev, axis=1)
-    
-    if '人気' not in race_df.columns or race_df['人気'].isna().all():
-        raw_odds_col = race_df['単勝'] if '単勝' in race_df.columns else race_df.get('オッズ', pd.Series())
-        numeric_odds = pd.to_numeric(raw_odds_col, errors='coerce')
-        race_df['人気'] = numeric_odds.rank(method='min').fillna(999)
-
+    race_df['ev_brain2'] = race_df['win_prob'] * race_df['単勝_num']
     race_df['人気_sort'] = pd.to_numeric(race_df['人気'], errors='coerce').fillna(999)
+
     return race_df.sort_values(by=['score_brain1', '人気_sort'], ascending=[False, True]).reset_index(drop=True)
 
+# ==========================================
+# 4. マーカーとHTMLテーブル生成
+# ==========================================
 def get_mark(idx, ev, odds, win_prob):
     if idx == 0: return "◎ 本命"
     if idx == 1: return "◯ 対抗"
     if idx == 2: return "▲ 単穴"
     if idx in [3, 4]: return "△ 連下"
-    
-    if win_prob <= 0.07: 
-        return "消し"
-        
+    if win_prob <= 0.07: return "消"
     if ev >= 0.7 or odds >= 15.0: return "☆ 穴馬"
-    return "消し"
+    return "消"
 
-# ==========================================
-# 4. マーカー判定
-# ==========================================
 def get_all_markers():
     markers = {}
-    if df_display.empty: return markers
-    for rid in df_display['race_id'].unique():
-        sdf = calculate_race_scores(rid, df_display)
+    if df_future.empty: return markers
+    for rid in df_future['race_id'].unique():
+        sdf = calculate_race_scores(rid, df_future)
         if sdf is not None and len(sdf) >= 5:
             rname = str(sdf['race_name'].iloc[0]) if 'race_name' in sdf.columns else ""
             if "新馬" in rname:
@@ -342,12 +417,44 @@ def get_all_markers():
                     break
             
             if has_value:
-                markers[rid] = "【🔥妙味あり】"
+                markers[rid] = "【🔥妙味】"
             else:
-                markers[rid] = "【普】"
+                markers[rid] = "【普通】"
     return markers
 
 markers = get_all_markers()
+
+def generate_beautiful_table(disp_df, is_newcomer):
+    html = ""
+    html += "<table class='kachi-table'>"
+    html += "<thead><tr><th>馬番</th><th style='text-align:left;'>馬名</th><th>騎手</th><th>AIスコア</th><th>勝率</th><th>予想オッズ</th><th>期待値</th><th>印</th></tr></thead>"
+    html += "<tbody>"
+    
+    for i, r in disp_df.iterrows():
+        ev_val = float(r.get('ev_brain2', 0))
+        raw_o = r.get('単勝') if pd.notna(r.get('単勝')) else r.get('オッズ', 0)
+        odds_val = float(pd.to_numeric(raw_o, errors='coerce')) if pd.notna(raw_o) else 0.0
+        win_prob_val = float(r.get('win_prob', 0))
+        mark = get_mark(i, ev_val, odds_val, win_prob_val)
+        
+        badge_cls = "badge-keshi"
+        if "◎" in mark: badge_cls = "badge-honmei"
+        elif "◯" in mark: badge_cls = "badge-taikou"
+        elif "▲" in mark: badge_cls = "badge-tana"
+        elif "△" in mark: badge_cls = "badge-renka"
+        elif "☆" in mark: badge_cls = "badge-ana"
+        
+        score_str = f"<b>{int(r['score_brain1'])}</b>" if not is_newcomer else "-"
+        win_str = f"<b>{win_prob_val*100:.1f}%</b>"
+        odds_str = f"{odds_val:.1f}倍" if odds_val > 0 else "-"
+        ev_str = f"<b>{ev_val:.2f}</b>" if ev_val > 0 and not is_newcomer else "-"
+        
+        mark_html = f"<span class='badge-mark {badge_cls}'>{mark}</span>"
+        
+        html += f"<tr><td style='font-weight:bold; font-size:1.1em; color:#34495e;'>{int(r['馬番']):02d}</td><td style='text-align:left; font-weight:bold; color:#2c3e50;'>{r.get('馬名', '-')}</td><td style='color:#7f8c8d;'>{r.get('騎手', '-')}</td><td style='color:#2c3e50;'>{score_str}</td><td style='color:#2c3e50;'>{win_str}</td><td style='color:#7f8c8d;'>{odds_str}</td><td style='color:#2c3e50;'>{ev_str}</td><td>{mark_html}</td></tr>"
+        
+    html += "</tbody></table>"
+    return html
 
 # ==========================================
 # 5. メインUI
@@ -355,15 +462,16 @@ markers = get_all_markers()
 tab_forecast, tab_dashboard = st.tabs(["🏇 レース予想", "📈 実戦成績"])
 
 with tab_forecast:
-    if df_display.empty:
+    if df_future.empty:
         st.warning("⚠️ 出馬表データが存在しません。")
     else:
-        date_options = sorted(df_display['day_label'].unique())
+        st.markdown("<div class='section-header'>🎯 予想レースを選択</div>", unsafe_allow_html=True)
+        date_options = sorted(df_future['day_label'].unique())
         selected_date = st.radio("開催日", date_options, horizontal=True, label_visibility="collapsed")
-        day_df = df_display[df_display['day_label'] == selected_date]
+        day_df = df_future[df_future['day_label'] == selected_date]
         places = day_df['place_name'].unique()
         
-        place_tabs = st.tabs([f"🏇 {p}" for p in places])
+        place_tabs = st.tabs([f"📍 {p}" for p in places])
         for p_idx, place in enumerate(places):
             with place_tabs[p_idx]:
                 place_df = day_df[day_df['place_name'] == place]
@@ -376,71 +484,35 @@ with tab_forecast:
                     rname = str(race_rows['race_name'].iloc[0]).strip() if 'race_name' in race_rows.columns else ""
                     mark = markers.get(rid, "")
                     label = f"{r}R {mark}".strip()
-                    if rname: label = f"{r}R {rname[:5]}… {mark}".strip()
                     btn_type = "primary" if "🔥" in mark else "secondary"
                     if col.button(label, key=f"btn_{rid}", use_container_width=True, type=btn_type):
                         st.session_state['selected_race_id'] = rid
 
-    if st.session_state['selected_race_id'] and not df_display.empty:
+    if st.session_state['selected_race_id'] and not df_future.empty:
         st.markdown("---")
         target_id = str(st.session_state['selected_race_id'])
         
-        target_rows = df_display[df_display['race_id'].astype(str) == target_id]
+        target_rows = df_future[df_future['race_id'].astype(str) == target_id]
         if target_rows.empty:
             st.session_state['selected_race_id'] = None
             st.rerun()
             
         target_race_info = target_rows.iloc[0]
-        
         rname = target_race_info.get('race_name', "")
         is_newcomer = "新馬" in str(rname)
         race_display_name = f"{target_race_info['place_name']} {target_race_info['r_num']}R 【{rname}】"
-        st.subheader(f"🚀 {race_display_name}")
+        st.markdown(f"<h2 style='color:#2c3e50;'>🚀 {race_display_name}</h2>", unsafe_allow_html=True)
         
-        scored_df = calculate_race_scores(target_id, df_display)
+        scored_df = calculate_race_scores(target_id, df_future)
         
         if scored_df is not None:
-            st.markdown("### 📊 1. 出走馬 期待値＆データ一覧")
+            st.markdown("<div class='section-header'>📊 1. 出走馬 期待値＆データ一覧</div>", unsafe_allow_html=True)
             disp_df = scored_df.copy().sort_values(by=['score_brain1', 'win_prob'], ascending=[False, False]).reset_index(drop=True)
-            
-            marks_list = []
-            for i, r in disp_df.iterrows():
-                ev_val = float(r.get('ev_brain2', 0))
-                raw_o = r.get('単勝') if pd.notna(r.get('単勝')) else r.get('オッズ', 0)
-                odds_val = float(pd.to_numeric(raw_o, errors='coerce')) if pd.notna(raw_o) else 0.0
-                win_prob_val = float(r.get('win_prob', 0))
-                marks_list.append(get_mark(i, ev_val, odds_val, win_prob_val))
-                
-            disp_df['馬番'] = disp_df['馬番'].apply(lambda x: f"{int(x):02d}")
-            disp_df['AIスコア'] = disp_df['score_brain1'].astype(int)
-            disp_df['勝率'] = disp_df['win_prob'].apply(lambda x: f"{x*100:.1f}%")
-            
-            def format_odds(row):
-                raw_o = row.get('単勝') if pd.notna(row.get('単勝')) else row.get('オッズ', 0)
-                try:
-                    v = float(raw_o)
-                    return f"{v:.1f}倍" if v > 0 else "-"
-                except: return "-"
-                
-            disp_df['予想オッズ'] = disp_df.apply(format_odds, axis=1)
-            
-            def format_ev(val):
-                try:
-                    v = float(val)
-                    return f"{v:.2f}" if v > 0 else "-"
-                except: return "-"
-                
-            disp_df['期待値'] = disp_df['ev_brain2'].apply(format_ev)
-            disp_df['騎手'] = disp_df.get('騎手', '-')
-            disp_df['評価'] = marks_list
-            
-            show_cols = ['馬番', '馬名', '騎手', 'AIスコア', '勝率', '予想オッズ', '期待値', '評価']
             if is_newcomer:
                 st.info("🐣 新馬戦のため、過去データが存在せずベースAIスコアは参考値です。Geminiの自力予想に委ねます。")
-                show_cols = ['馬番', '馬名', '騎手', '予想オッズ']
-            
-            st.dataframe(disp_df[show_cols], use_container_width=True, hide_index=True)
+            st.markdown(generate_beautiful_table(disp_df, is_newcomer), unsafe_allow_html=True)
 
+        st.markdown("<br>", unsafe_allow_html=True)
         if st.button("🧠 Geminiで最終適正化＆買い目生成", type="primary", use_container_width=True):
             if not GEMINI_API_KEY:
                 st.error("【設定エラー】APIキーが見つかりません。")
@@ -450,51 +522,28 @@ with tab_forecast:
                 st.stop()
 
             table_summary = []
-            prompt_df = scored_df.copy().sort_values(by=['score_brain1', 'win_prob'], ascending=[False, False]).reset_index(drop=True)
-            for idx, row in prompt_df.iterrows():
+            for idx, row in disp_df.iterrows():
                 ev_val = float(row.get('ev_brain2', 0))
                 raw_o = row.get('単勝') if pd.notna(row.get('単勝')) else row.get('オッズ', 0)
                 odds_val = float(pd.to_numeric(raw_o, errors='coerce')) if pd.notna(raw_o) else 0.0
                 win_prob_val = float(row.get('win_prob', 0))
                 mark = get_mark(idx, ev_val, odds_val, win_prob_val)
-                
-                table_summary.append(
-                    f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | "
-                    f"オッズ:{odds_val}倍 ({row.get('人気', 999)}人気) | "
-                    f"純粋スコア:{row.get('score_brain1', 0)} | 期待値:{ev_val:.2f} | システム評価:{mark}"
-                )
+                table_summary.append(f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | オッズ:{odds_val}倍 ({row.get('人気', 999)}人気) | 純粋スコア:{row.get('score_brain1', 0)} | 期待値:{ev_val:.2f} | システム評価:{mark}")
 
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」の最終意思決定者（Gemini脳）です。
-
-【⚠️検索ツールの絶対ルール】
-全出走馬の名前を1頭ずつ個別に検索して調べる行為はフリーズの原因になるため絶対に禁止します。
-必ず日付とレース名を含めて、1〜2回の一括検索のみで情報を取得してください。
-
-【Geminiが分析すべき4大チェック項目】
-1. 今日の天候と馬場状態
-2. 当日のトラックバイアス（イン有利か外差し有利か）
-3. 直前の調教評価と陣営コメント
-4. 展開予想（ペース予想）
-
-【あなたのミッションと絶対ルール】
-- 既にシステム側で付与された「システム評価（◎◯▲△☆）」をベースに、天候や調教などを加味してプロとして最終的な印と買い目を決断してください。
-- Markdownの表はシステム側で描画済みのため、あなたは**絶対に表を出力しないでください**。解説文と買い目のみを出力すること。
-
+【⚠️絶対ルール】検索で全馬を個別に調べるのは禁止です。日付とレース名で一括検索してください。
 【出力フォーマット】
 ---
 ### 🌪️ レース展開とリアルタイム情報の統合
 * （プロの分析）
-
 ### 💥 勝ちぱかくんの最終ジャッジ（印と根拠）
 * **◎（本命）:** 〇〇番（馬名） - （抜擢理由）
 * **◯（対抗）:** 〇〇番（馬名） - （見解）
 * **▲（単穴）:** 〇〇番（馬名） - （見解）
 * **△（連下）:** 〇〇番、〇〇番
 * **☆（穴馬）:** 〇〇番 - （期待値馬など）
-
 ### 💡 戦略的・推奨全買い目
-必ず以下の全券種の買い目を具体的に提示してください。
 * **単勝:** ◎
 * **馬連:** ◎ - ◯▲△☆ (流し)
 * **ワイド:** ◎ - ◯▲△☆ (流し)
@@ -503,49 +552,31 @@ with tab_forecast:
 ---
 """
             prompt = f"対象レース: {selected_date} {race_display_name}\n\n"
-            if is_newcomer:
-                prompt += "【⚠️重要指示】このレースは「新馬戦」のため過去データが存在せずスコアは無効です。スコアは無視し、Web検索で『血統適性』『追い切り（調教）タイム』を日付指定で一括調査し、あなた自身の推理で予想を組み立ててください。\n\n"
-            else:
-                prompt += "【指示】システムが算出した「システム評価」とデータに基づき、特に期待値の高い「中穴馬」を拾い上げるプロンプト補助に従って、最終的な印を決定してください。\n\n"
-                
-            prompt += f"出走馬データ（第1・第2の脳 出力結果）:\n{chr(10).join(table_summary)}"
+            if is_newcomer: prompt += "【新馬戦】血統や調教を中心に予想を組み立ててください。\n\n"
+            prompt += f"出走馬データ:\n{chr(10).join(table_summary)}"
 
             with st.spinner("AIが本日付の一括検索で調教情報を取得し、全買い目を生成中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 res_text = ""
-                
                 for attempt in range(3):
                     try:
                         response = client.models.generate_content(
-                            model='gemini-2.5-flash',
-                            contents=prompt,
-                            config=types.GenerateContentConfig(
-                                system_instruction=system_instruction,
-                                temperature=0.3,
-                                tools=[{"googleSearch": {}}]
-                            )
+                            model='gemini-2.5-flash', contents=prompt,
+                            config=types.GenerateContentConfig(system_instruction=system_instruction, temperature=0.3, tools=[{"googleSearch": {}}])
                         )
                         res_text = response.text if response.text else (response.candidates[0].content.parts[0].text if response.candidates else "")
-                        if res_text:
-                            break
-                    except Exception as e:
-                        if "503" in str(e) or "UNAVAILABLE" in str(e):
-                            if attempt < 2:
-                                time.sleep(3)
-                                continue
-                        st.error(f"【APIエラー】: {e}")
-                        break
+                        if res_text: break
+                    except: time.sleep(3)
                     
                 if res_text:
                     st.markdown(res_text)
-                    
                     honmei_match = re.search(r'◎.*?[）:]\s*(\d+)番', res_text)
-                    h_umaban = int(honmei_match.group(1)) if honmei_match else int(scored_df.iloc[0]['馬番'])
+                    h_umaban = int(honmei_match.group(1)) if honmei_match else int(disp_df.iloc[0]['馬番'])
                     all_nums = re.findall(r'(\d+)番', res_text)
                     partners_str = ",".join(list(dict.fromkeys([n for n in all_nums if int(n) != h_umaban]))[:5])
                     
                     if df_history.empty or str(target_id) not in df_history['race_id'].astype(str).values:
-                        new_record = pd.DataFrame([{'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'race_id': str(target_id), 'race_name': race_display_name, 'honmei_umaban': h_umaban, 'partners': partners_str, 'honmei_name': "履歴参照", 'result_pay': "", 'pay_tansho': 0, 'pay_umaren': 0, 'pay_wide': 0, 'pay_sanrenpuku': 0, 'pay_sanrentan': 0}])
+                        new_record = pd.DataFrame([{'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'race_id': str(target_id), 'race_name': race_display_name, 'honmei_umaban': h_umaban, 'partners': partners_str, 'honmei_name': "履歴参照", 'result_pay': "", 'pay_tansho': 0, 'pay_umaren': 0, 'pay_wide': 0, 'pay_sanrenpuku': 0, 'pay_sanrentan_axis': 0, 'pay_sanrentan_form': 0}])
                         df_history = pd.concat([df_history, new_record], ignore_index=True)
                         df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig')
                     st.success("📝 実戦履歴に記録しました！")
@@ -556,9 +587,11 @@ with tab_forecast:
 # 6. ダッシュボード
 # ==========================================
 with tab_dashboard:
-    st.subheader("📈 実戦成績ダッシュボード")
-    if df_history.empty: st.info("まだ予想履歴がありません。")
+    st.markdown("<div class='section-header'>📈 実戦成績ダッシュボード</div>", unsafe_allow_html=True)
+    if df_history.empty: 
+        st.info("まだ予想履歴がありません。")
     else:
+        df_history['result_pay'] = df_history['result_pay'].replace(['None', 'nan', 'NaN', ''], np.nan)
         df_history['datetime'] = pd.to_datetime(df_history['date'], errors='coerce')
         df_history['year_month'] = df_history['datetime'].dt.strftime('%Y年%m月')
         df_history['just_date'] = df_history['datetime'].dt.strftime('%Y-%m-%d')
@@ -570,70 +603,126 @@ with tab_dashboard:
             if total_races == 0:
                 st.info(f"この期間のレースはありません。")
                 return
+            
             finished_df = raw_df[pd.to_numeric(raw_df['result_pay'], errors='coerce').notna()]
+            pending_df = raw_df[pd.to_numeric(raw_df['result_pay'], errors='coerce').isna()]
             total = len(finished_df)
             
             if total == 0:
-                st.markdown(f"**{title_prefix} 判明レース**: 0 件 （結果待ち: {total_races} 件）")
+                st.markdown(f"**{title_prefix} 確定レース**: 0 件 （結果待ち: {total_races} 件）")
             else:
-                hits = len(finished_df[finished_df['result_pay'].astype(float) > 0])
-                returns = finished_df['result_pay'].astype(float).sum()
+                hits = len(finished_df[pd.to_numeric(finished_df['result_pay'], errors='coerce') > 0])
+                returns = pd.to_numeric(finished_df['result_pay'], errors='coerce').sum()
                 
                 invested_total = 0
-                inv_tansho = 0
-                inv_umaren = 0
-                inv_wide = 0
-                inv_sanrenpuku = 0
-                inv_sanrentan = 0
+                inv_tansho = inv_umaren = inv_wide = inv_sanrenpuku = inv_sanrentan_axis = inv_sanrentan_form = 0
                 
                 for _, r in finished_df.iterrows():
                     p_list = [x for x in str(r.get('partners', '')).split(',') if x.strip().isdigit()]
                     p_len = len(p_list)
-                    if p_len >= 3:
+                    
+                    # 【修正】点数計算を「選ばれた相手馬の数」から正確に計算するように統一
+                    if p_len > 0:
                         inv_tansho += 100
-                        inv_umaren += 300  
-                        inv_wide += 300    
-                        inv_sanrenpuku += 1000 
-                        inv_sanrentan += int(p_len * (p_len - 1)) * 100      
+                        inv_umaren += p_len * 100
+                        inv_wide += p_len * 100
+                        
+                        box_count = p_len + 1
+                        if box_count >= 3:
+                            inv_sanrenpuku += int(box_count * (box_count - 1) * (box_count - 2) / 6) * 100
+                            
+                        if p_len >= 2:
+                            inv_sanrentan_axis += (p_len * (p_len - 1)) * 100
+                            inv_sanrentan_form += (2 * (p_len - 1)) * 100
                 
-                invested_total = inv_tansho + inv_umaren + inv_wide + inv_sanrenpuku + inv_sanrentan
+                invested_total = inv_tansho + inv_umaren + inv_wide + inv_sanrenpuku + inv_sanrentan_axis
                 roi_total = (returns / invested_total) * 100 if invested_total > 0 else 0.0
+                profit_total = int(returns - invested_total)
                 
-                st.markdown(f"**{title_prefix} 判明レース**: {total} 件 （結果待ち: {total_races - total} 件）")
+                st.markdown(f"**{title_prefix} 確定レース**: {total} 件 （結果待ち: {len(pending_df)} 件）")
+                
                 col1, col2, col3 = st.columns(3)
-                col1.metric("🎯 的中率", f"{(hits/total)*100:.1f}%", f"{hits} / {total} 的中")
-                col2.metric("💰 回収率", f"{roi_total:.1f}%", delta_color="normal" if returns >= invested_total else "inverse")
-                col3.metric("💴 収支", f"{int(returns - invested_total):,} 円")
+                # 【修正】0/1的中が緑色になってしまう仕様を修正 (delta_color="off")
+                col1.metric("🎯 的中率", f"{(hits/total)*100:.1f}%", f"{hits} / {total} レース的中", delta_color="off")
+                col2.metric("💰 回収率 (※1着固定ベース)", f"{roi_total:.1f}%", delta_color="normal" if profit_total >= 0 else "inverse")
+                col3.metric("💴 収支 (※1着固定ベース)", f"{profit_total:,} 円")
                 
-                st.markdown("<br><h5>🎫 券種別の詳細データ</h5>", unsafe_allow_html=True)
-                ticket_cols = st.columns(5)
+                st.markdown("<br><h5>🎫 券種別の詳細データ（3連単 比較検証）</h5>", unsafe_allow_html=True)
                 
                 def make_ticket_card(col, name, hits_val, returns_val, inv_val):
                     roi_val = (returns_val / inv_val) * 100 if inv_val > 0 else 0
                     profit_val = int(returns_val - inv_val)
-                    color = "red" if profit_val < 0 else "green"
+                    color = "#e74c3c" if profit_val < 0 else "#2ecc71"
                     sign = "+" if profit_val > 0 else ""
                     col.markdown(f'''
-                    <div style="border:1px solid #ddd; padding:10px; border-radius:5px; text-align:center; background-color:#fafafa;">
-                        <div style="font-weight:bold; font-size:1.1em; margin-bottom:5px;">{name}</div>
-                        <div style="font-size:0.85em; color:#555;">投資: {int(inv_val):,}円</div>
-                        <div style="font-size:0.85em; color:#555;">的中率: {(hits_val/total)*100:.1f}%</div>
-                        <div style="font-size:0.85em; color:#555;">回収率: {roi_val:.1f}%</div>
-                        <div style="font-weight:bold; color:{color}; margin-top:5px;">{sign}{profit_val:,} 円</div>
+                    <div style="border:1px solid #ddd; padding:10px; border-radius:8px; text-align:center; background-color:#fff; box-shadow:0 1px 3px rgba(0,0,0,0.05);">
+                        <div style="font-weight:bold; font-size:1.05em; color:#2c3e50; margin-bottom:5px;">{name}</div>
+                        <div style="font-size:0.8em; color:#7f8c8d;">投資: {int(inv_val):,}円</div>
+                        <div style="font-size:0.8em; color:#7f8c8d;">的中: {(hits_val/total)*100:.1f}%</div>
+                        <div style="font-size:0.8em; color:#7f8c8d;">回収: {roi_val:.1f}%</div>
+                        <div style="font-weight:bold; color:{color}; margin-top:5px; font-size:1.1em;">{sign}{profit_val:,} 円</div>
                     </div>
                     ''', unsafe_allow_html=True)
 
+                ticket_cols1 = st.columns(3)
+                ticket_cols2 = st.columns(3)
+
                 if 'pay_tansho' in finished_df.columns:
-                    make_ticket_card(ticket_cols[0], "単勝", len(finished_df[finished_df['pay_tansho'].astype(float) > 0]), finished_df['pay_tansho'].astype(float).sum(), inv_tansho)
-                    make_ticket_card(ticket_cols[1], "馬連", len(finished_df[finished_df['pay_umaren'].astype(float) > 0]), finished_df['pay_umaren'].astype(float).sum(), inv_umaren)
-                    make_ticket_card(ticket_cols[2], "ワイド", len(finished_df[finished_df['pay_wide'].astype(float) > 0]), finished_df['pay_wide'].astype(float).sum(), inv_wide)
-                    make_ticket_card(ticket_cols[3], "三連複", len(finished_df[finished_df['pay_sanrenpuku'].astype(float) > 0]), finished_df['pay_sanrenpuku'].astype(float).sum(), inv_sanrenpuku)
-                    make_ticket_card(ticket_cols[4], "三連単", len(finished_df[finished_df['pay_sanrentan'].astype(float) > 0]), finished_df['pay_sanrentan'].astype(float).sum(), inv_sanrentan)
+                    make_ticket_card(ticket_cols1[0], "単勝", len(finished_df[pd.to_numeric(finished_df['pay_tansho'], errors='coerce') > 0]), pd.to_numeric(finished_df['pay_tansho'], errors='coerce').sum(), inv_tansho)
+                    make_ticket_card(ticket_cols1[1], "馬連", len(finished_df[pd.to_numeric(finished_df['pay_umaren'], errors='coerce') > 0]), pd.to_numeric(finished_df['pay_umaren'], errors='coerce').sum(), inv_umaren)
+                    make_ticket_card(ticket_cols1[2], "ワイド", len(finished_df[pd.to_numeric(finished_df['pay_wide'], errors='coerce') > 0]), pd.to_numeric(finished_df['pay_wide'], errors='coerce').sum(), inv_wide)
+                    make_ticket_card(ticket_cols2[0], "三連複", len(finished_df[pd.to_numeric(finished_df['pay_sanrenpuku'], errors='coerce') > 0]), pd.to_numeric(finished_df['pay_sanrenpuku'], errors='coerce').sum(), inv_sanrenpuku)
+                    make_ticket_card(ticket_cols2[1], "三連単 (1着固定流し)", len(finished_df[pd.to_numeric(finished_df['pay_sanrentan_axis'], errors='coerce') > 0]), pd.to_numeric(finished_df['pay_sanrentan_axis'], errors='coerce').sum(), inv_sanrentan_axis)
+                    make_ticket_card(ticket_cols2[2], "三連単 (ﾌｫｰﾒｰｼｮﾝ)", len(finished_df[pd.to_numeric(finished_df['pay_sanrentan_form'], errors='coerce') > 0]), pd.to_numeric(finished_df['pay_sanrentan_form'], errors='coerce').sum(), inv_sanrentan_form)
 
                 st.markdown("<br>", unsafe_allow_html=True)
-                st.caption(f"※ 投資金額・回収率は「三連単◎1着固定流し」「三連複4〜5頭ボックス」などを想定した最適化実点数で計算されています。")
+            
+            st.markdown("<h5 style='margin-top:20px;'>📋 レース履歴詳細</h5>", unsafe_allow_html=True)
+            
+            history_html = ""
+            for _, row in raw_df.sort_values(by='date', ascending=False).iterrows():
+                date_str = pd.to_datetime(row['date']).strftime('%m/%d %H:%M') if pd.notna(row['date']) else "-"
+                pay_val = pd.to_numeric(row.get('result_pay'), errors='coerce')
                 
-            st.dataframe(raw_df[['date', 'race_name', 'honmei_umaban', 'partners', 'honmei_name', 'result_pay']].sort_values(by='date', ascending=False), use_container_width=True)
+                if pd.isna(pay_val):
+                    status_html = "<span style='color:#f39c12; font-weight:bold; font-size:0.9em;'>結果待ち・集計中</span>"
+                    border_color = "#f39c12"
+                else:
+                    p_list = [x for x in str(row.get('partners', '')).split(',') if x.strip().isdigit()]
+                    p_len = len(p_list)
+                    inv = 0
+                    if p_len > 0:
+                        inv_tansho_row = 100
+                        inv_umaren_row = p_len * 100
+                        inv_wide_row = p_len * 100
+                        box_count_row = p_len + 1
+                        inv_sanrenpuku_row = int(box_count_row * (box_count_row - 1) * (box_count_row - 2) / 6) * 100 if box_count_row >= 3 else 0
+                        inv_sanrentan_axis_row = (p_len * (p_len - 1)) * 100 if p_len >= 2 else 0
+                        inv = inv_tansho_row + inv_umaren_row + inv_wide_row + inv_sanrenpuku_row + inv_sanrentan_axis_row
+                        
+                    profit = int(pay_val - inv)
+                    
+                    if profit > 0:
+                        status_html = f"<span style='color:#2ecc71; font-weight:bold; font-size:1.1em;'>+{profit:,}円</span>"
+                        border_color = "#2ecc71"
+                    else:
+                        status_html = f"<span style='color:#e74c3c; font-weight:bold; font-size:1.1em;'>{profit:,}円</span>"
+                        border_color = "#e74c3c"
+
+                history_html += f"""
+                <div style="background:#fff; border-radius:8px; padding:10px 15px; margin-bottom:8px; border-left:4px solid {border_color}; box-shadow:0 1px 3px rgba(0,0,0,0.05); color:#333;">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <div>
+                            <div style="font-size:0.85em; color:#7f8c8d; margin-bottom:2px;">{date_str} <span style="margin:0 5px;">|</span> {row.get('race_name', '-')}</div>
+                            <div style="font-weight:bold; font-size:1.1em; color:#2c3e50;">◎ {row.get('honmei_umaban', '-')}番</div>
+                        </div>
+                        <div style="text-align:right;">
+                            {status_html}
+                        </div>
+                    </div>
+                </div>
+                """
+            st.markdown(history_html, unsafe_allow_html=True)
 
         with tab_total:
             render_dashboard_for_df(df_history, "総合")
