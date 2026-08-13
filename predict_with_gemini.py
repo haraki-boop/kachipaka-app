@@ -277,7 +277,7 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                                 if not w_nums: continue
                                 payout_found = True
 
-                                # 【修正】馬連やワイドなども「選んだ相手全頭」を対象に判定するよう統一
+                                # 馬連やワイドなども「選んだ相手全頭」を対象に判定するよう統一
                                 if kind == "単勝" and len(w_nums) >= 1 and w_nums[0] == axis:
                                     payouts['単勝'] += amt
                                 elif kind == "馬連" and len(w_nums) >= 2:
@@ -287,7 +287,6 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                                     if axis in w_nums[:2] and any(p in w_nums[:2] for p in partners):
                                         payouts['ワイド'] += amt
                                 elif kind == "三連複" and len(w_nums) >= 3:
-                                    # 軸馬と相手馬のボックス（全通り）の中に上位3頭が含まれていれば的中
                                     if all(n in ([axis] + partners) for n in w_nums[:3]):
                                         payouts['三連複'] += amt
                                 elif kind == "三連単" and len(w_nums) >= 3:
@@ -297,7 +296,7 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                                     if w_nums[0] == axis and w_nums[1] in form_2nd and w_nums[2] in partners:
                                         payouts['三連単_F'] += amt
 
-                        # 【修正】結果を見つけたら「URL探しのループ」だけを抜ける（次のレースの処理へ進む）
+                        # 結果を見つけたら「URL探しのループ」だけを抜ける
                         if payout_found:
                             df_history.at[idx, 'pay_tansho'] = payouts['単勝']
                             df_history.at[idx, 'pay_umaren'] = payouts['馬連']
@@ -331,7 +330,7 @@ if st.sidebar.button("💥 予想履歴を消去", type="primary", use_container
 # ==========================================
 # 3. AIスコア算出
 # ==========================================
-def calculate_race_scores(race_id_target, target_df):
+def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     if target_df.empty or model_data is None: return None
     race_df = target_df[target_df['race_id'].astype(str) == str(race_id_target)].copy()
     if race_df.empty: return None
@@ -384,6 +383,10 @@ def calculate_race_scores(race_id_target, target_df):
         if f not in race_df.columns:
             race_df[f] = 0.0
 
+    # 【追加】ユーザーが選択した馬場状態をセットして動的にAI予測へ反映させる
+    race_df['condition'] = user_condition
+    race_df['condition_code'] = user_condition
+
     X = race_df[features].copy()
 
     if 'sex_code' in X.columns:
@@ -420,6 +423,22 @@ def calculate_race_scores(race_id_target, target_df):
     race_df['ev_brain2'] = race_df['win_prob'] * race_df['単勝_num']
     race_df['人気_sort'] = pd.to_numeric(race_df['人気'], errors='coerce').fillna(999)
 
+    # 🐴 スタート指数から「脚質」を自動計算
+    total_horses = len(race_df)
+    if total_horses > 0:
+        race_df['start_rank'] = race_df['eff_start_idx'].rank(ascending=False, method='min')
+        def determine_style(row):
+            if pd.isna(row.get('last_date')): 
+                return "-" 
+            pct = row['start_rank'] / total_horses
+            if pct <= 0.15: return "逃げ"
+            elif pct <= 0.40: return "先行"
+            elif pct <= 0.75: return "差し"
+            else: return "追込"
+        race_df['脚質'] = race_df.apply(determine_style, axis=1)
+    else:
+        race_df['脚質'] = "-"
+
     return race_df.sort_values(by=['score_brain1', '人気_sort'], ascending=[False, True]).reset_index(drop=True)
 
 # ==========================================
@@ -438,7 +457,8 @@ def get_all_markers():
     markers = {}
     if df_future.empty: return markers
     for rid in df_future['race_id'].unique():
-        sdf = calculate_race_scores(rid, df_future)
+        # マーカー用はデフォルトの「良」で仮計算
+        sdf = calculate_race_scores(rid, df_future, "良")
         if sdf is not None and len(sdf) >= 5:
             rname = str(sdf['race_name'].iloc[0]) if 'race_name' in sdf.columns else ""
             if "新馬" in rname:
@@ -464,7 +484,7 @@ markers = get_all_markers()
 def generate_beautiful_table(disp_df, is_newcomer):
     html = "<div class='table-container'>"
     html += "<table class='kachi-table'>"
-    html += "<thead><tr><th>馬番</th><th style='text-align:left;'>馬名</th><th>騎手</th><th>AIスコア</th><th>勝率</th><th>予想オッズ</th><th>期待値</th><th>印</th></tr></thead>"
+    html += "<thead><tr><th>馬番</th><th style='text-align:left;'>馬名</th><th>騎手</th><th>脚質</th><th>AIスコア</th><th>勝率</th><th>予想オッズ</th><th>期待値</th><th>印</th></tr></thead>"
     html += "<tbody>"
     
     for i, r in disp_df.iterrows():
@@ -473,6 +493,10 @@ def generate_beautiful_table(disp_df, is_newcomer):
         odds_val = float(pd.to_numeric(raw_o, errors='coerce')) if pd.notna(raw_o) else 0.0
         win_prob_val = float(r.get('win_prob', 0))
         mark = get_mark(i, ev_val, odds_val, win_prob_val)
+        
+        kyakushitsu = r.get('脚質', '-')
+        if pd.isna(kyakushitsu) or str(kyakushitsu).strip() == '':
+            kyakushitsu = '-'
         
         badge_cls = "badge-keshi"
         if "◎" in mark: badge_cls = "badge-honmei"
@@ -488,7 +512,7 @@ def generate_beautiful_table(disp_df, is_newcomer):
         
         mark_html = f"<span class='badge-mark {badge_cls}'>{mark}</span>"
         
-        html += f"<tr><td style='font-weight:bold; font-size:1.1em; color:#34495e;'>{int(r['馬番']):02d}</td><td style='text-align:left; font-weight:bold; color:#2c3e50;'>{r.get('馬名', '-')}</td><td style='color:#7f8c8d;'>{r.get('騎手', '-')}</td><td style='color:#2c3e50;'>{score_str}</td><td style='color:#2c3e50;'>{win_str}</td><td style='color:#7f8c8d;'>{odds_str}</td><td style='color:#2c3e50;'>{ev_str}</td><td>{mark_html}</td></tr>"
+        html += f"<tr><td style='font-weight:bold; font-size:1.1em; color:#34495e;'>{int(r['馬番']):02d}</td><td style='text-align:left; font-weight:bold; color:#2c3e50;'>{r.get('馬名', '-')}</td><td style='color:#7f8c8d;'>{r.get('騎手', '-')}</td><td style='font-weight:bold; color:#8e44ad;'>{kyakushitsu}</td><td style='color:#2c3e50;'>{score_str}</td><td style='color:#2c3e50;'>{win_str}</td><td style='color:#7f8c8d;'>{odds_str}</td><td style='color:#2c3e50;'>{ev_str}</td><td>{mark_html}</td></tr>"
         
     html += "</tbody></table></div>"
     return html
@@ -514,7 +538,6 @@ with tab_forecast:
                 place_df = day_df[day_df['place_name'] == place]
                 races = sorted(place_df['r_num'].unique())
                 
-                # 【修正】6レースごとに新しく行を作ることで、スマホでも1Rから順番に縦に並ぶようにする
                 for i in range(0, len(races), 6):
                     chunk = races[i:i+6]
                     cols = st.columns(6)
@@ -525,7 +548,6 @@ with tab_forecast:
                         rname = str(race_rows['race_name'].iloc[0]).strip() if 'race_name' in race_rows.columns and pd.notna(race_rows['race_name'].iloc[0]) else ""
                         mark = markers.get(rid, "")
                         
-                        # ボタンにレース名を追加して表示 (例: 1R 2歳未勝利 【普通】)
                         if rname and rname != "nan":
                             label = f"{r}R {rname} {mark}".strip()
                         else:
@@ -550,7 +572,12 @@ with tab_forecast:
         race_display_name = f"{target_race_info['place_name']} {target_race_info['r_num']}R 【{rname}】"
         st.markdown(f"<h2 style='color:#2c3e50;'>🚀 {race_display_name}</h2>", unsafe_allow_html=True)
         
-        scored_df = calculate_race_scores(target_id, df_future)
+        # 【追加】馬場状態の選択UI
+        st.markdown("<div style='margin-top: 10px; font-weight: bold; color: #34495e;'>☔ 想定馬場状態</div>", unsafe_allow_html=True)
+        selected_condition = st.radio("想定馬場", ["良", "稍重", "重", "不良"], horizontal=True, label_visibility="collapsed")
+        
+        # 選択された馬場状態を適用してAIスコアを再計算
+        scored_df = calculate_race_scores(target_id, df_future, selected_condition)
         
         if scored_df is not None:
             st.markdown("<div class='section-header'>📊 1. 出走馬 期待値＆データ一覧</div>", unsafe_allow_html=True)
@@ -575,7 +602,12 @@ with tab_forecast:
                 odds_val = float(pd.to_numeric(raw_o, errors='coerce')) if pd.notna(raw_o) else 0.0
                 win_prob_val = float(row.get('win_prob', 0))
                 mark = get_mark(idx, ev_val, odds_val, win_prob_val)
-                table_summary.append(f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | オッズ:{odds_val}倍 ({row.get('人気', 999)}人気) | 純粋スコア:{row.get('score_brain1', 0)} | 期待値:{ev_val:.2f} | システム評価:{mark}")
+                
+                kyakushitsu_val = row.get('脚質', '不明')
+                if pd.isna(kyakushitsu_val) or str(kyakushitsu_val).strip() == '':
+                    kyakushitsu_val = '不明'
+                
+                table_summary.append(f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | 脚質:{kyakushitsu_val} | オッズ:{odds_val}倍 ({row.get('人気', 999)}人気) | 純粋スコア:{row.get('score_brain1', 0)} | 期待値:{ev_val:.2f} | システム評価:{mark}")
 
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」の最終意思決定者（Gemini脳）です。
@@ -583,7 +615,7 @@ with tab_forecast:
 【出力フォーマット】
 ---
 ### 🌪️ レース展開とリアルタイム情報の統合
-* （プロの分析）
+* （プロの分析：脚質データと【想定馬場状態】を元にした展開・ペース・有利不利の考察を必ず含めてください）
 ### 💥 勝ちぱかくんの最終ジャッジ（印と根拠）
 * **◎（本命）:** 〇〇番（馬名） - （抜擢理由）
 * **◯（対抗）:** 〇〇番（馬名） - （見解）
@@ -598,11 +630,13 @@ with tab_forecast:
 * **三連単:** ◎ 1着固定 - ◯▲△☆ (フォーメーション等)
 ---
 """
-            prompt = f"対象レース: {selected_date} {race_display_name}\n\n"
+            # 【追加】Geminiのプロンプトに想定馬場状態を追加
+            prompt = f"対象レース: {selected_date} {race_display_name}\n"
+            prompt += f"【想定馬場状態】: {selected_condition}\n\n"
             if is_newcomer: prompt += "【新馬戦】血統や調教を中心に予想を組み立ててください。\n\n"
             prompt += f"出走馬データ:\n{chr(10).join(table_summary)}"
 
-            with st.spinner("AIが本日付の一括検索で調教情報を取得し、全買い目を生成中..."):
+            with st.spinner(f"AIが【{selected_condition}】の馬場想定で検索・分析し、全買い目を生成中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 res_text = ""
                 for attempt in range(3):
@@ -668,7 +702,7 @@ with tab_dashboard:
                     p_list = [x for x in str(r.get('partners', '')).split(',') if x.strip().isdigit()]
                     p_len = len(p_list)
                     
-                    # 【修正】点数計算を「選ばれた相手馬の数」から正確に計算するように統一
+                    # 点数計算
                     if p_len > 0:
                         inv_tansho += 100
                         inv_umaren += p_len * 100
@@ -689,12 +723,11 @@ with tab_dashboard:
                 st.markdown(f"**{title_prefix} 確定レース**: {total} 件 （結果待ち: {len(pending_df)} 件）")
                 
                 col1, col2, col3 = st.columns(3)
-                # 【修正】0/1的中が緑色になってしまう仕様を修正 (delta_color="off")
                 col1.metric("🎯 的中率", f"{(hits/total)*100:.1f}%", f"{hits} / {total} レース的中", delta_color="off")
                 col2.metric("💰 回収率 (※1着固定ベース)", f"{roi_total:.1f}%", delta_color="normal" if profit_total >= 0 else "inverse")
                 col3.metric("💴 収支 (※1着固定ベース)", f"{profit_total:,} 円")
                 
-                st.markdown("<br><h5>🎫 券種別の詳細データ（3直単 比較検証）</h5>", unsafe_allow_html=True)
+                st.markdown("<br><h5>🎫 券種別の詳細データ（3連単 比較検証）</h5>", unsafe_allow_html=True)
                 
                 def make_ticket_card(col, name, hits_val, returns_val, inv_val):
                     roi_val = (returns_val / inv_val) * 100 if inv_val > 0 else 0
