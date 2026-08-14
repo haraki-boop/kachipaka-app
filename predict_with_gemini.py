@@ -230,7 +230,7 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                                 if not w_nums: continue
                                 payout_found = True
 
-                                if kind == "単勝" and len(w_nums) >= 1 and w_nums[0] == axis: breakouts['単勝'] += amt
+                                if kind == "単勝" and len(w_nums) >= 1 and w_nums[0] == axis: payouts['単勝'] += amt
                                 elif kind == "馬連" and len(w_nums) >= 2:
                                     if axis in w_nums[:2] and any(p in w_nums[:2] for p in partners): payouts['馬連'] += amt
                                 elif kind == "ワイド" and len(w_nums) >= 2:
@@ -273,7 +273,7 @@ if st.sidebar.button("💥 予想履歴を消去", type="primary", use_container
     except: pass
 
 # ==========================================
-# 3. AIスコア算出（★Python側の印付けロジック大改修★）
+# 3. AIスコア算出（★Python側の印付けロジック・並び順改修★）
 # ==========================================
 def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     if target_df.empty or model_data is None: return None
@@ -386,10 +386,29 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
         if len(ev_sorted_idx) > 1: race_df.loc[ev_sorted_idx[1], '印'] = "△ 連下"
         if len(ev_sorted_idx) > 2: race_df.loc[ev_sorted_idx[2], '印'] = "△ 連下"
         
-        # さらに残った馬で、期待値が0.8以上、またはオッズが20倍以上なら一発狙いの穴馬
-        for idx in ev_sorted_idx[3:]:
-            if race_df.loc[idx, 'ev_brain2'] >= 0.8 or race_df.loc[idx, '単勝_num'] >= 20.0:
-                race_df.loc[idx, '印'] = "☆ 穴馬"
+        # さらに残った馬の中から、条件を満たす【一番美味しい1頭だけ】を☆穴馬に指名
+        if len(ev_sorted_idx) > 3:
+            for idx in ev_sorted_idx[3:]:
+                if race_df.loc[idx, 'ev_brain2'] >= 0.8 or race_df.loc[idx, '単勝_num'] >= 20.0:
+                    race_df.loc[idx, '印'] = "☆ 穴馬"
+                    break  # 1頭見つけたらストップ
+
+    # 印の順番に並び替えるための設定
+    mark_order = {
+        "◎ 本命": 1,
+        "◯ 対抗": 2,
+        "▲ 単穴": 3,
+        "△ 連下": 4,
+        "☆ 穴馬": 5,
+        "消": 6
+    }
+    race_df['mark_rank'] = race_df['印'].map(mark_order).fillna(99)
+    
+    # 印順 ＞ 期待値順 ＞ AIスコア順 で最終ソート
+    race_df = race_df.sort_values(
+        by=['mark_rank', 'ev_brain2', 'score_brain1'], 
+        ascending=[True, False, False]
+    ).reset_index(drop=True)
 
     return race_df
 
@@ -407,13 +426,8 @@ def get_all_markers():
                 markers[rid] = "【🐣新馬】"
                 continue
             
-            top3 = sdf.head(3)
-            has_value = False
-            for _, row in top3.iterrows():
-                pop = pd.to_numeric(row.get('人気', 0), errors='coerce')
-                if pd.notna(pop) and pop >= 4:
-                    has_value = True
-                    break
+            # ☆穴馬または高期待値馬がいれば妙味マークをつける
+            has_value = any((sdf['印'].str.contains("☆")) | (sdf['印'].str.contains("▲")))
             
             if has_value: markers[rid] = "【🔥妙味】"
             else: markers[rid] = "【普通】"
@@ -433,7 +447,6 @@ def generate_beautiful_table(disp_df, is_newcomer):
         odds_val = float(pd.to_numeric(raw_o, errors='coerce')) if pd.notna(raw_o) else 0.0
         win_prob_val = float(r.get('win_prob', 0))
         
-        # 新しいPythonの印ロジックを参照
         mark = r.get('印', '消')
         
         kyakushitsu = r.get('脚質', '-')
@@ -517,7 +530,7 @@ with tab_forecast:
         
         if scored_df is not None:
             st.markdown("<div class='section-header'>📊 1. 出走馬 期待値＆データ一覧</div>", unsafe_allow_html=True)
-            # ここはスコア順（本来の強さ順）のまま表示
+            # ここは並び替え済みのデータをそのまま表示
             disp_df = scored_df.copy()
             if is_newcomer:
                 st.info("🐣 新馬戦のため、過去データが存在せずベースAIスコアは参考値です。Geminiの自力予想に委ねます。")
