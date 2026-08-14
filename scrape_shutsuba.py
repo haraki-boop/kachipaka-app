@@ -31,22 +31,13 @@ def clean_horse_name(name):
     s = unicodedata.normalize('NFKC', str(name))
     return re.sub(r'[\s\u3000]+', '', s)
 
-def detect_grade(race_name, soup):
-    grade_prefix = ""
-    grade_icon = soup.find(class_=re.compile(r'Icon_GradeType\d+'))
-    if grade_icon:
-        cls_str = " ".join(grade_icon.get('class', []))
-        if 'GradeType1' in cls_str: grade_prefix = "👑 G1 "
-        elif 'GradeType2' in cls_str: grade_prefix = "👑 G2 "
-        elif 'GradeType3' in cls_str: grade_prefix = "👑 G3 "
-            
-    if not grade_prefix:
-        if re.search(r'G1|Ｇ１|ＧＩ|\(G1\)', race_name, re.IGNORECASE): grade_prefix = "👑 G1 "
-        elif re.search(r'G2|Ｇ２|ＧⅡ|\(G2\)', race_name, re.IGNORECASE): grade_prefix = "👑 G2 "
-        elif re.search(r'G3|Ｇ３|ＧⅢ|\(G3\)', race_name, re.IGNORECASE): grade_prefix = "👑 G3 "
-
-    clean_name = re.sub(r'\(?G[123１２３ＩⅡⅢ]\)?', '', race_name).strip()
-    return f"{grade_prefix}{clean_name}".strip()
+# 👑やG1表記を完全に除去し、純粋なレース名だけにする関数
+def clean_race_name(race_name):
+    if not race_name: return ""
+    s = str(race_name)
+    # G1, Ｇ１, (G1), （G1）, 👑 などの表記をすべて消去
+    s = re.sub(r'\(?G[1-3１-３I-V]+\)?|（?G[1-3１-３I-V]+）?|👑|G[1-3１-３]', '', s, flags=re.IGNORECASE)
+    return s.strip()
 
 def fetch_with_retry(session, url, max_retries=3):
     for i in range(max_retries):
@@ -121,7 +112,8 @@ def scrape_shutsuba():
             if rn_elem:
                 raw_race_name = clean_text(rn_elem.text)
             
-            final_race_name = detect_grade(raw_race_name, soup)
+            # ここで余計なグレード表記や👑を削除！
+            final_race_name = clean_race_name(raw_race_name)
             
             rows = soup.select("tr.HorseList")
             for row in rows:
@@ -164,7 +156,7 @@ def scrape_shutsuba():
         df_future['オッズ'] = pd.to_numeric(df_future['オッズ'], errors='coerce')
         df_future['人気'] = df_future.groupby('race_id')['オッズ'].rank(method='min').astype('Int64')
 
-        # 🎯 【完全版】スクレイピング時に過去データを合体させる処理を追加
+        # 🎯 過去データからタイム指数などの特徴量を結合
         if os.path.exists(ML_TARGET_CSV):
             print(f"\n🔗 過去データ({ML_TARGET_CSV})からタイム指数などの特徴量を結合しています...")
             try:
