@@ -11,17 +11,7 @@ init(autoreset=True)
 # モジュール読み込み用にパスを追加
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-try:
-    from predict_with_gemini import run_scraper, FUTURE_CSV
-    class DummyProgress:
-        def progress(self, val): pass
-    class DummyText:
-        def text(self, msg): 
-            print(f"{Fore.CYAN}  [🤖 取得中] {msg}")
-except Exception as e:
-    print(f"{Fore.RED}❌ predict_with_gemini.py の読み込みに失敗しました: {e}")
-    sys.exit(1)
-
+FUTURE_CSV = "future_races.csv"
 
 def print_header(title):
     print(f"\n{Fore.YELLOW}{'='*50}")
@@ -30,17 +20,40 @@ def print_header(title):
 
 def step1_fetch_future_races():
     print_header("🚀 STEP 1: 最新レースデータの自動取得")
-    p_text = DummyText()
-    p_bar = DummyProgress()
     
-    success = run_scraper(p_text, p_bar)
-    if success and os.path.exists(FUTURE_CSV) and os.path.getsize(FUTURE_CSV) > 0:
-        print(f"{Fore.GREEN}✅ 最新出馬表(＋オッズ)の取得完了: {FUTURE_CSV}")
+    # ⚠️ 名前を scrape_shutsuba.py (s入り) に修正しました！
+    if os.path.exists("scrape_shutsuba.py"):
+        try:
+            print(f"{Fore.CYAN}  [🤖 取得中] scrape_shutsuba.py を実行して最新レースを取得します...")
+            subprocess.run([sys.executable, "scrape_shutsuba.py"], check=True, text=True)
+        except subprocess.CalledProcessError as e:
+            print(f"{Fore.RED}❌ scrape_shutsuba.py の実行中にエラーが発生しました: {e}")
+            return False
+    else:
+        try:
+            from predict_with_gemini import run_scraper
+            class DummyProgress:
+                def progress(self, val): pass
+            class DummyText:
+                def text(self, msg): 
+                    print(f"{Fore.CYAN}  [🤖 取得中] {msg}")
+            
+            p_text = DummyText()
+            p_bar = DummyProgress()
+            run_scraper(p_text, p_bar)
+        except ImportError:
+            print(f"{Fore.YELLOW}⚠️ predict_with_gemini.py に run_scraper が見つかりませんでした。")
+            print(f"{Fore.YELLOW}   既存の {FUTURE_CSV} を使用して後続処理を続行します。")
+        except Exception as e:
+            print(f"{Fore.RED}❌ レースデータの取得中にエラーが発生しました: {e}")
+            return False
+
+    if os.path.exists(FUTURE_CSV) and os.path.getsize(FUTURE_CSV) > 0:
+        print(f"{Fore.GREEN}✅ 最新出馬表(＋オッズ)の準備完了: {FUTURE_CSV}")
         return True
     else:
-        print(f"{Fore.RED}❌ 出馬表データの取得に失敗しました。")
+        print(f"{Fore.RED}❌ {FUTURE_CSV} が見つからないか、ファイルが空です。")
         return False
-
 
 def step2_update_features():
     print_header("📊 STEP 2: 蓄積データの更新・特徴量生成 (create_features.py)")
@@ -57,7 +70,6 @@ def step2_update_features():
         print(f"{Fore.RED}❌ 特徴量生成中にエラーが発生しました:\n{e.stderr}")
         return False
 
-
 def step3_retrain_ai():
     print_header("🧠 STEP 3: 蓄積データのAI再学習 (train_lightgbm.py)")
     if not os.path.exists("train_lightgbm.py"):
@@ -72,7 +84,6 @@ def step3_retrain_ai():
     except subprocess.CalledProcessError as e:
         print(f"{Fore.RED}❌ AI再学習中にエラーが発生しました:\n{e.stderr}")
         return False
-
 
 def step4_push_to_github():
     print_header("☁️ STEP 4: GitHubへの自動コミット＆Push (Web版同期)")
@@ -94,7 +105,6 @@ def step4_push_to_github():
         print(f"{Fore.GREEN}✅ GitHub同期完了！Web上のStreamlit Cloud側も最新化されます。")
     except subprocess.CalledProcessError as e:
         print(f"{Fore.YELLOW}⚠️ Git Push時に警告・エラーが発生しました (※変更がない場合は無視してOKです):\n{e.stderr}")
-
 
 def main():
     start_time = time.time()
@@ -121,7 +131,6 @@ def main():
     print(f"{Fore.MAGENTA}=========================================={Style.RESET_ALL}\n")
     print(f"{Fore.WHITE}このウィンドウは数秒後に自動で閉じます...")
     time.sleep(5)
-
 
 if __name__ == "__main__":
     main()
