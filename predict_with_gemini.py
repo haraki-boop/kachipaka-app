@@ -20,42 +20,25 @@ st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="🐴", l
 st.markdown("""
 <style>
     .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
-    
-    /* タイトル・見出しのベースサイズ */
     h1 { font-size: 1.8rem !important; }
     h2 { font-size: 1.4rem !important; }
-    
     .section-header {
-        font-size: 1.3rem;
-        font-weight: bold;
-        color: #2c3e50;
-        margin-top: 1rem;
-        margin-bottom: 1rem;
-        border-bottom: 2px solid #ecf0f1;
-        padding-bottom: 5px;
+        font-size: 1.3rem; font-weight: bold; color: #2c3e50;
+        margin-top: 1rem; margin-bottom: 1rem;
+        border-bottom: 2px solid #ecf0f1; padding-bottom: 5px;
     }
-    
-    /* 表の横スクロール用コンテナ（スマホ対応） */
     .table-container {
-        width: 100%;
-        overflow-x: auto;
-        -webkit-overflow-scrolling: touch;
-        margin-bottom: 20px;
-        border-radius: 8px;
-        box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+        width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch;
+        margin-bottom: 20px; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,0.06);
     }
-    
     .kachi-table {
         width: 100%; border-collapse: collapse; margin-bottom: 0;
-        font-family: 'Helvetica Neue', Arial, sans-serif;
-        background-color: #ffffff;
-        white-space: nowrap; /* スマホで改行されすぎないようにする */
+        font-family: 'Helvetica Neue', Arial, sans-serif; background-color: #ffffff; white-space: nowrap;
     }
     .kachi-table thead tr { background: #fdfdfd; color: #2c3e50; font-weight: bold; border-bottom: 2px solid #eaeaea; }
     .kachi-table th { padding: 8px 10px; text-align: center; }
     .kachi-table td { padding: 6px 10px; text-align: center; border-bottom: 1px solid #f4f4f4; color: #34495e; }
     .kachi-table tbody tr:hover td { background: #f9fbfd; }
-    
     .badge-mark { color: #fff; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 0.85em; display: inline-block; min-width: 60px;}
     .badge-honmei { background: #e74c3c; }
     .badge-taikou { background: #3498db; }
@@ -64,24 +47,15 @@ st.markdown("""
     .badge-ana    { background: #9b59b6; }
     .badge-keshi  { background: #e0e0e0; color: #7f8c8d; }
 
-    /* スマホ画面向けのレスポンシブデザイン */
     @media (max-width: 768px) {
         .block-container { padding-top: 1rem; padding-bottom: 1rem; padding-left: 0.5rem; padding-right: 0.5rem; }
         .kachi-table { font-size: 12px; }
         .kachi-table th, .kachi-table td { padding: 4px 6px; }
         .section-header { font-size: 1.1rem; }
         .badge-mark { min-width: 45px; padding: 2px 4px; font-size: 0.75em; }
-        
-        /* 📱追加：スマホでの文字サイズ縮小＆改行防止 */
-        h1 { font-size: 1.3rem !important; } /* 「AI予想 勝ちぱかくん」を小さく */
-        h2 { font-size: 1.1rem !important; } /* 🚀〇〇 1R... を小さく */
-        
-        /* 📱追加：レース選択ボタンの文字を極小にし、1行に強制 */
-        .stButton button p {
-            font-size: 0.65rem !important; /* ボタンの文字を極小に */
-            white-space: nowrap !important; /* 強制的に1行にする */
-            letter-spacing: -0.5px; /* 文字間隔を少し詰める */
-        }
+        h1 { font-size: 1.3rem !important; } 
+        h2 { font-size: 1.1rem !important; } 
+        .stButton button p { font-size: 0.65rem !important; white-space: nowrap !important; letter-spacing: -0.5px; }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -98,9 +72,6 @@ with col2:
 if 'selected_race_id' not in st.session_state:
     st.session_state['selected_race_id'] = None
 
-# ==========================================
-# 🔑 APIキーの設定
-# ==========================================
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 
 HISTORY_CSV = "prediction_history.csv"
@@ -118,10 +89,8 @@ def clean_horse_name(name):
 @st.cache_resource
 def load_model():
     if os.path.exists("keiba_ai_model.pkl") and os.path.getsize("keiba_ai_model.pkl") > 0:
-        try:
-            return joblib.load("keiba_ai_model.pkl")
-        except Exception:
-            return None
+        try: return joblib.load("keiba_ai_model.pkl")
+        except: return None
     return None
 
 @st.cache_data
@@ -130,13 +99,10 @@ def load_past_data():
         for enc in ['utf-8-sig', 'cp932', 'utf-8', 'shift_jis']:
             try:
                 df = pd.read_csv(ML_TARGET_CSV, low_memory=False, dtype={'race_id': str}, encoding=enc)
-                if 'date' in df.columns:
-                    df = df.sort_values(by='date')
-                if '馬名' in df.columns:
-                    df['馬名_clean'] = df['馬名'].astype(str).apply(clean_horse_name)
+                if 'date' in df.columns: df = df.sort_values(by='date')
+                if '馬名' in df.columns: df['馬名_clean'] = df['馬名'].astype(str).apply(clean_horse_name)
                 return df
-            except Exception:
-                continue
+            except: continue
     return pd.DataFrame()
 
 def load_future_data():
@@ -152,28 +118,21 @@ def load_future_data():
                     df['place_code'] = df['race_id'].str[4:6]
                     df['place_name'] = df['place_code'].map(PLACE_MAP_REV).fillna("不明")
                     df['r_num'] = df['race_id'].str[10:12].astype(int)
-                
                 if 'race_name' not in df.columns: df['race_name'] = ""
                 df['day_label'] = df['date'] if 'date' in df.columns else "不明"
                 return df
-            except Exception:
-                continue
+            except: continue
     return pd.DataFrame()
 
 def load_history_data():
     if os.path.exists(HISTORY_CSV) and os.path.getsize(HISTORY_CSV) > 0:
-        try:
-            df = pd.read_csv(HISTORY_CSV, dtype={'race_id': str, 'honmei_umaban': str, 'partners': str}, encoding='utf-8-sig')
-        except Exception:
-            try:
-                df = pd.read_csv(HISTORY_CSV, dtype={'race_id': str, 'honmei_umaban': str, 'partners': str}, encoding='cp932')
-            except Exception:
-                return pd.DataFrame()
-        if 'partners' not in df.columns:
-            df['partners'] = ""
+        try: df = pd.read_csv(HISTORY_CSV, dtype={'race_id': str, 'honmei_umaban': str, 'partners': str}, encoding='utf-8-sig')
+        except:
+            try: df = pd.read_csv(HISTORY_CSV, dtype={'race_id': str, 'honmei_umaban': str, 'partners': str}, encoding='cp932')
+            except: return pd.DataFrame()
+        if 'partners' not in df.columns: df['partners'] = ""
         for col in ['pay_tansho', 'pay_umaren', 'pay_wide', 'pay_sanrenpuku', 'pay_sanrentan_axis', 'pay_sanrentan_form']:
-            if col not in df.columns:
-                df[col] = 0
+            if col not in df.columns: df[col] = 0
         return df
     return pd.DataFrame(columns=['date', 'race_id', 'race_name', 'honmei_umaban', 'partners', 'honmei_name', 'result_pay', 'pay_tansho', 'pay_umaren', 'pay_wide', 'pay_sanrenpuku', 'pay_sanrentan_axis', 'pay_sanrentan_form'])
 
@@ -223,8 +182,6 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
         if not df_history.empty:
             updated = False
             headers = {"User-Agent": "Mozilla/5.0"}
-            
-            # 全てのレースを最後まで回すためのループ
             for idx, row in df_history.iterrows():
                 try:
                     axis = str(int(row['honmei_umaban']))
@@ -236,7 +193,6 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                         res = requests.get(url, headers=headers, timeout=5)
                         res.encoding = 'EUC-JP' if 'db.netkeiba' in url else 'utf-8'
                         soup = BeautifulSoup(res.text, "html.parser")
-                        
                         for tr in soup.find_all("tr"):
                             th = tr.find("th")
                             if th:
@@ -257,14 +213,12 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                             elif "ワイド" in kind_raw: kind = "ワイド"
                             elif "3連複" in kind_raw or "３連複" in kind_raw or "三連複" in kind_raw: kind = "三連複"
                             elif "3連単" in kind_raw or "３連単" in kind_raw or "三連単" in kind_raw: kind = "三連単"
-                            
                             if not kind: continue
                             
                             for br in w_td.find_all('br'): br.replace_with(' _SPLIT_ ')
                             for ul in w_td.find_all('ul'): ul.insert_before(' _SPLIT_ ')
                             for br in a_td.find_all('br'): br.replace_with(' _SPLIT_ ')
                             for ul in a_td.find_all('ul'): ul.insert_before(' _SPLIT_ ')
-                            
                             w_lines = [s for s in w_td.get_text(separator=" ").split('_SPLIT_') if s.strip()]
                             a_lines = [s for s in a_td.get_text(separator=" ").split('_SPLIT_') if s.strip()]
                             
@@ -272,31 +226,22 @@ if st.sidebar.button("🏆 終了したレースの配当を取得", use_contain
                                 amt_str = re.sub(r'\D', '', a_str)
                                 if not amt_str.isdigit(): continue
                                 amt = int(amt_str)
-                                
                                 w_nums = [str(int(n)) for n in re.findall(r'\d+', w_str)]
                                 if not w_nums: continue
                                 payout_found = True
 
-                                # 馬連やワイドなども「選んだ相手全頭」を対象に判定するよう統一
-                                if kind == "単勝" and len(w_nums) >= 1 and w_nums[0] == axis:
-                                    payouts['単勝'] += amt
+                                if kind == "単勝" and len(w_nums) >= 1 and w_nums[0] == axis: breakouts['単勝'] += amt
                                 elif kind == "馬連" and len(w_nums) >= 2:
-                                    if axis in w_nums[:2] and any(p in w_nums[:2] for p in partners):
-                                        payouts['馬連'] += amt
+                                    if axis in w_nums[:2] and any(p in w_nums[:2] for p in partners): payouts['馬連'] += amt
                                 elif kind == "ワイド" and len(w_nums) >= 2:
-                                    if axis in w_nums[:2] and any(p in w_nums[:2] for p in partners):
-                                        payouts['ワイド'] += amt
+                                    if axis in w_nums[:2] and any(p in w_nums[:2] for p in partners): payouts['ワイド'] += amt
                                 elif kind == "三連複" and len(w_nums) >= 3:
-                                    if all(n in ([axis] + partners) for n in w_nums[:3]):
-                                        payouts['三連複'] += amt
+                                    if all(n in ([axis] + partners) for n in w_nums[:3]): payouts['三連複'] += amt
                                 elif kind == "三連単" and len(w_nums) >= 3:
-                                    if w_nums[0] == axis and w_nums[1] in partners and w_nums[2] in partners:
-                                        payouts['三連単_軸'] += amt
+                                    if w_nums[0] == axis and w_nums[1] in partners and w_nums[2] in partners: payouts['三連単_軸'] += amt
                                     form_2nd = partners[:2] if len(partners) >= 2 else partners
-                                    if w_nums[0] == axis and w_nums[1] in form_2nd and w_nums[2] in partners:
-                                        payouts['三連単_F'] += amt
+                                    if w_nums[0] == axis and w_nums[1] in form_2nd and w_nums[2] in partners: payouts['三連単_F'] += amt
 
-                        # 結果を見つけたら「URL探しのループ」だけを抜ける
                         if payout_found:
                             df_history.at[idx, 'pay_tansho'] = payouts['単勝']
                             df_history.at[idx, 'pay_umaren'] = payouts['馬連']
@@ -328,7 +273,7 @@ if st.sidebar.button("💥 予想履歴を消去", type="primary", use_container
     except: pass
 
 # ==========================================
-# 3. AIスコア算出
+# 3. AIスコア算出（★Python側の印付けロジック大改修★）
 # ==========================================
 def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     if target_df.empty or model_data is None: return None
@@ -374,62 +319,46 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
 
     for orig_c, z_c in [('eff_time_idx', 'z_time_idx'), ('eff_last3f_idx', 'z_last3f_idx'), ('log_odds', 'z_odds')]:
         std_val = race_df[orig_c].std()
-        if pd.isna(std_val) or std_val < 1e-5:
-            race_df[z_c] = 0.0
-        else:
-            race_df[z_c] = (race_df[orig_c] - race_df[orig_c].mean()) / std_val
+        if pd.isna(std_val) or std_val < 1e-5: race_df[z_c] = 0.0
+        else: race_df[z_c] = (race_df[orig_c] - race_df[orig_c].mean()) / std_val
 
     for f in features:
-        if f not in race_df.columns:
-            race_df[f] = 0.0
+        if f not in race_df.columns: race_df[f] = 0.0
 
-    # 【追加】ユーザーが選択した馬場状態をセットして動的にAI予測へ反映させる
     race_df['condition'] = user_condition
     race_df['condition_code'] = user_condition
 
     X = race_df[features].copy()
-
-    if 'sex_code' in X.columns:
-        X['sex_code'] = X['sex_code'].replace({'牡': 0, '牝': 1, 'セ': 2})
-    if 'surface' in X.columns:
-        X['surface'] = X['surface'].replace({'芝': 0, 'ダート': 1, '障害': 2})
-    if 'surface_code' in X.columns:
-        X['surface_code'] = X['surface_code'].replace({'芝': 0, 'ダート': 1, '障害': 2})
-    if 'condition' in X.columns:
-        X['condition'] = X['condition'].replace({'良': 0, '稍重': 1, '稍': 1, '重': 2, '不良': 3})
-    if 'condition_code' in X.columns:
-        X['condition_code'] = X['condition_code'].replace({'良': 0, '稍重': 1, '稍': 1, '重': 2, '不良': 3})
+    if 'sex_code' in X.columns: X['sex_code'] = X['sex_code'].replace({'牡': 0, '牝': 1, 'セ': 2})
+    if 'surface' in X.columns: X['surface'] = X['surface'].replace({'芝': 0, 'ダート': 1, '障害': 2})
+    if 'surface_code' in X.columns: X['surface_code'] = X['surface_code'].replace({'芝': 0, 'ダート': 1, '障害': 2})
+    if 'condition' in X.columns: X['condition'] = X['condition'].replace({'良': 0, '稍重': 1, '稍': 1, '重': 2, '不良': 3})
+    if 'condition_code' in X.columns: X['condition_code'] = X['condition_code'].replace({'良': 0, '稍重': 1, '稍': 1, '重': 2, '不良': 3})
 
     X = X.apply(lambda x: pd.to_numeric(x, errors='coerce')).fillna(0.0)
 
     try:
-        if hasattr(model, "predict_proba"):
-            raw_scores = model.predict_proba(X)[:, 1]
-        else:
-            raw_scores = model.predict(X)
-    except Exception:
-        return None
+        if hasattr(model, "predict_proba"): raw_scores = model.predict_proba(X)[:, 1]
+        else: raw_scores = model.predict(X)
+    except Exception: return None
 
     s = raw_scores.sum()
     win_probs = raw_scores / s if s > 0 else np.ones(len(raw_scores))/len(raw_scores)
     race_df['win_prob'] = win_probs
 
     std_p = race_df['win_prob'].std()
-    if pd.isna(std_p) or std_p < 1e-5:
-        race_df['score_brain1'] = 100
-    else:
-        race_df['score_brain1'] = (100 + (race_df['win_prob'] - race_df['win_prob'].mean()) / std_p * 15).round().astype(int)
+    if pd.isna(std_p) or std_p < 1e-5: race_df['score_brain1'] = 100
+    else: race_df['score_brain1'] = (100 + (race_df['win_prob'] - race_df['win_prob'].mean()) / std_p * 15).round().astype(int)
 
     race_df['ev_brain2'] = race_df['win_prob'] * race_df['単勝_num']
     race_df['人気_sort'] = pd.to_numeric(race_df['人気'], errors='coerce').fillna(999)
 
-    # 🐴 スタート指数から「脚質」を自動計算
+    # 🐴 脚質の自動計算
     total_horses = len(race_df)
     if total_horses > 0:
         race_df['start_rank'] = race_df['eff_start_idx'].rank(ascending=False, method='min')
         def determine_style(row):
-            if pd.isna(row.get('last_date')): 
-                return "-" 
+            if pd.isna(row.get('last_date')): return "-" 
             pct = row['start_rank'] / total_horses
             if pct <= 0.15: return "逃げ"
             elif pct <= 0.40: return "先行"
@@ -439,25 +368,38 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     else:
         race_df['脚質'] = "-"
 
-    return race_df.sort_values(by=['score_brain1', '人気_sort'], ascending=[False, True]).reset_index(drop=True)
+    # まず純粋な勝率（スコア）順に並べる
+    race_df = race_df.sort_values(by=['score_brain1', '人気_sort'], ascending=[False, True]).reset_index(drop=True)
+    
+    # ★システム側の新しい「印」ロジック：軸は堅く、紐は期待値（EV）重視！
+    race_df['印'] = "消"
+    if len(race_df) > 0: race_df.loc[0, '印'] = "◎ 本命"
+    if len(race_df) > 1: race_df.loc[1, '印'] = "◯ 対抗"
+    
+    # 3位以下の馬から、期待値が最も高い3頭を探して紐馬（▲・△）に任命
+    if len(race_df) > 2:
+        remaining_df = race_df.iloc[2:].copy()
+        # 期待値順に並べ替え
+        ev_sorted_idx = remaining_df.sort_values(by=['ev_brain2', 'score_brain1'], ascending=[False, False]).index
+        
+        if len(ev_sorted_idx) > 0: race_df.loc[ev_sorted_idx[0], '印'] = "▲ 単穴"
+        if len(ev_sorted_idx) > 1: race_df.loc[ev_sorted_idx[1], '印'] = "△ 連下"
+        if len(ev_sorted_idx) > 2: race_df.loc[ev_sorted_idx[2], '印'] = "△ 連下"
+        
+        # さらに残った馬で、期待値が0.8以上、またはオッズが20倍以上なら一発狙いの穴馬
+        for idx in ev_sorted_idx[3:]:
+            if race_df.loc[idx, 'ev_brain2'] >= 0.8 or race_df.loc[idx, '単勝_num'] >= 20.0:
+                race_df.loc[idx, '印'] = "☆ 穴馬"
+
+    return race_df
 
 # ==========================================
 # 4. マーカーとHTMLテーブル生成
 # ==========================================
-def get_mark(idx, ev, odds, win_prob):
-    if idx == 0: return "◎ 本命"
-    if idx == 1: return "◯ 対抗"
-    if idx == 2: return "▲ 単穴"
-    if idx in [3, 4]: return "△ 連下"
-    if win_prob <= 0.07: return "消"
-    if ev >= 0.7 or odds >= 15.0: return "☆ 穴馬"
-    return "消"
-
 def get_all_markers():
     markers = {}
     if df_future.empty: return markers
     for rid in df_future['race_id'].unique():
-        # マーカー用はデフォルトの「良」で仮計算
         sdf = calculate_race_scores(rid, df_future, "良")
         if sdf is not None and len(sdf) >= 5:
             rname = str(sdf['race_name'].iloc[0]) if 'race_name' in sdf.columns else ""
@@ -473,10 +415,8 @@ def get_all_markers():
                     has_value = True
                     break
             
-            if has_value:
-                markers[rid] = "【🔥妙味】"
-            else:
-                markers[rid] = "【普通】"
+            if has_value: markers[rid] = "【🔥妙味】"
+            else: markers[rid] = "【普通】"
     return markers
 
 markers = get_all_markers()
@@ -492,11 +432,12 @@ def generate_beautiful_table(disp_df, is_newcomer):
         raw_o = r.get('単勝') if pd.notna(r.get('単勝')) else r.get('オッズ', 0)
         odds_val = float(pd.to_numeric(raw_o, errors='coerce')) if pd.notna(raw_o) else 0.0
         win_prob_val = float(r.get('win_prob', 0))
-        mark = get_mark(i, ev_val, odds_val, win_prob_val)
+        
+        # 新しいPythonの印ロジックを参照
+        mark = r.get('印', '消')
         
         kyakushitsu = r.get('脚質', '-')
-        if pd.isna(kyakushitsu) or str(kyakushitsu).strip() == '':
-            kyakushitsu = '-'
+        if pd.isna(kyakushitsu) or str(kyakushitsu).strip() == '': kyakushitsu = '-'
         
         badge_cls = "badge-keshi"
         if "◎" in mark: badge_cls = "badge-honmei"
@@ -509,7 +450,6 @@ def generate_beautiful_table(disp_df, is_newcomer):
         win_str = f"<b>{win_prob_val*100:.1f}%</b>"
         odds_str = f"{odds_val:.1f}倍" if odds_val > 0 else "-"
         ev_str = f"<b>{ev_val:.2f}</b>" if ev_val > 0 and not is_newcomer else "-"
-        
         mark_html = f"<span class='badge-mark {badge_cls}'>{mark}</span>"
         
         html += f"<tr><td style='font-weight:bold; font-size:1.1em; color:#34495e;'>{int(r['馬番']):02d}</td><td style='text-align:left; font-weight:bold; color:#2c3e50;'>{r.get('馬名', '-')}</td><td style='color:#7f8c8d;'>{r.get('騎手', '-')}</td><td style='font-weight:bold; color:#8e44ad;'>{kyakushitsu}</td><td style='color:#2c3e50;'>{score_str}</td><td style='color:#2c3e50;'>{win_str}</td><td style='color:#7f8c8d;'>{odds_str}</td><td style='color:#2c3e50;'>{ev_str}</td><td>{mark_html}</td></tr>"
@@ -548,10 +488,8 @@ with tab_forecast:
                         rname = str(race_rows['race_name'].iloc[0]).strip() if 'race_name' in race_rows.columns and pd.notna(race_rows['race_name'].iloc[0]) else ""
                         mark = markers.get(rid, "")
                         
-                        if rname and rname != "nan":
-                            label = f"{r}R {rname} {mark}".strip()
-                        else:
-                            label = f"{r}R {mark}".strip()
+                        if rname and rname != "nan": label = f"{r}R {rname} {mark}".strip()
+                        else: label = f"{r}R {mark}".strip()
                             
                         btn_type = "primary" if "🔥" in mark else "secondary"
                         if col.button(label, key=f"btn_{rid}", use_container_width=True, type=btn_type):
@@ -572,16 +510,15 @@ with tab_forecast:
         race_display_name = f"{target_race_info['place_name']} {target_race_info['r_num']}R 【{rname}】"
         st.markdown(f"<h2 style='color:#2c3e50;'>🚀 {race_display_name}</h2>", unsafe_allow_html=True)
         
-        # 【追加】馬場状態の選択UI
         st.markdown("<div style='margin-top: 10px; font-weight: bold; color: #34495e;'>☔ 想定馬場状態</div>", unsafe_allow_html=True)
         selected_condition = st.radio("想定馬場", ["良", "稍重", "重", "不良"], horizontal=True, label_visibility="collapsed")
         
-        # 選択された馬場状態を適用してAIスコアを再計算
         scored_df = calculate_race_scores(target_id, df_future, selected_condition)
         
         if scored_df is not None:
             st.markdown("<div class='section-header'>📊 1. 出走馬 期待値＆データ一覧</div>", unsafe_allow_html=True)
-            disp_df = scored_df.copy().sort_values(by=['score_brain1', 'win_prob'], ascending=[False, False]).reset_index(drop=True)
+            # ここはスコア順（本来の強さ順）のまま表示
+            disp_df = scored_df.copy()
             if is_newcomer:
                 st.info("🐣 新馬戦のため、過去データが存在せずベースAIスコアは参考値です。Geminiの自力予想に委ねます。")
             st.markdown(generate_beautiful_table(disp_df, is_newcomer), unsafe_allow_html=True)
@@ -600,37 +537,39 @@ with tab_forecast:
                 ev_val = float(row.get('ev_brain2', 0))
                 raw_o = row.get('単勝') if pd.notna(row.get('単勝')) else row.get('オッズ', 0)
                 odds_val = float(pd.to_numeric(raw_o, errors='coerce')) if pd.notna(raw_o) else 0.0
-                win_prob_val = float(row.get('win_prob', 0))
-                mark = get_mark(idx, ev_val, odds_val, win_prob_val)
+                mark = row.get('印', '消')
                 
                 kyakushitsu_val = row.get('脚質', '不明')
-                if pd.isna(kyakushitsu_val) or str(kyakushitsu_val).strip() == '':
-                    kyakushitsu_val = '不明'
+                if pd.isna(kyakushitsu_val) or str(kyakushitsu_val).strip() == '': kyakushitsu_val = '不明'
                 
                 table_summary.append(f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | 脚質:{kyakushitsu_val} | オッズ:{odds_val}倍 ({row.get('人気', 999)}人気) | 純粋スコア:{row.get('score_brain1', 0)} | 期待値:{ev_val:.2f} | システム評価:{mark}")
 
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」の最終意思決定者（Gemini脳）です。
 【⚠️絶対ルール】検索で全馬を個別に調べるのは禁止です。日付とレース名で一括検索してください。
+
+【🎯 予想の基本コンセプト：軸は堅実、紐は妙味（期待値）重視】
+1. 軸馬（◎・◯）の選定: システム評価の「◎」「◯」（純粋スコア上位）をベースに、脚質や馬場状態から確実に好走できる能力上位の馬を信頼して指名してください。（人気馬でも可）
+2. 紐馬（▲・△・☆）の選定: 1番人気・2番人気などの過剰人気馬でヒモを固めるのは避け、システムが推奨している高期待値馬（▲・△・☆が付いた馬）を積極的に抜擢してください。
+
 【出力フォーマット】
 ---
 ### 🌪️ レース展開とリアルタイム情報の統合
-* （プロの分析：脚質データと【想定馬場状態】を元にした展開・ペース・有利不利の考察を必ず含めてください）
+* （プロの分析：脚質データと【想定馬場状態】を元にした展開・有利不利の考察）
 ### 💥 勝ちぱかくんの最終ジャッジ（印と根拠）
-* **◎（本命）:** 〇〇番（馬名） - （抜擢理由）
-* **◯（対抗）:** 〇〇番（馬名） - （見解）
-* **▲（単穴）:** 〇〇番（馬名） - （見解）
-* **△（連下）:** 〇〇番、〇〇番
-* **☆（穴馬）:** 〇〇番 - （期待値馬など）
+* **◎（本命）:** 〇〇番（馬名） - （抜擢理由：純粋な能力や展開面での高評価）
+* **◯（対抗）:** 〇〇番（馬名） - （見解：◎を脅かす、または逆転可能な馬）
+* **▲（単穴）:** 〇〇番（馬名） - （見解：期待値が高く、一発の魅力がある舐められ馬）
+* **△（連下）:** 〇〇番、〇〇番 - （見解：期待値重視で馬券に絡めたい馬）
+* **☆（穴馬）:** 〇〇番 - （超絶舐められている特大期待値の穴馬）
 ### 💡 戦略的・推奨全買い目
 * **単勝:** ◎
 * **馬連:** ◎ - ◯▲△☆ (流し)
 * **ワイド:** ◎ - ◯▲△☆ (流し)
-* **三連複:** ◎◯▲△☆の印から選んだ4〜5頭のボックス
+* **三連複:** ◎ - ◯▲△☆ (◎を軸とした流し、またはフォーメーション)
 * **三連単:** ◎ 1着固定 - ◯▲△☆ (フォーメーション等)
 ---
 """
-            # 【追加】Geminiのプロンプトに想定馬場状態を追加
             prompt = f"対象レース: {selected_date} {race_display_name}\n"
             prompt += f"【想定馬場状態】: {selected_condition}\n\n"
             if is_newcomer: prompt += "【新馬戦】血統や調教を中心に予想を組み立ててください。\n\n"
@@ -702,16 +641,12 @@ with tab_dashboard:
                     p_list = [x for x in str(r.get('partners', '')).split(',') if x.strip().isdigit()]
                     p_len = len(p_list)
                     
-                    # 点数計算
                     if p_len > 0:
                         inv_tansho += 100
                         inv_umaren += p_len * 100
                         inv_wide += p_len * 100
-                        
                         box_count = p_len + 1
-                        if box_count >= 3:
-                            inv_sanrenpuku += int(box_count * (box_count - 1) * (box_count - 2) / 6) * 100
-                            
+                        if box_count >= 3: inv_sanrenpuku += int(box_count * (box_count - 1) * (box_count - 2) / 6) * 100
                         if p_len >= 2:
                             inv_sanrentan_axis += (p_len * (p_len - 1)) * 100
                             inv_sanrentan_form += (2 * (p_len - 1)) * 100
@@ -746,7 +681,6 @@ with tab_dashboard:
 
                 ticket_cols1 = st.columns(3)
                 ticket_cols2 = st.columns(3)
-
                 if 'pay_tansho' in finished_df.columns:
                     make_ticket_card(ticket_cols1[0], "単勝", len(finished_df[pd.to_numeric(finished_df['pay_tansho'], errors='coerce') > 0]), pd.to_numeric(finished_df['pay_tansho'], errors='coerce').sum(), inv_tansho)
                     make_ticket_card(ticket_cols1[1], "馬連", len(finished_df[pd.to_numeric(finished_df['pay_umaren'], errors='coerce') > 0]), pd.to_numeric(finished_df['pay_umaren'], errors='coerce').sum(), inv_umaren)
@@ -758,7 +692,6 @@ with tab_dashboard:
                 st.markdown("<br>", unsafe_allow_html=True)
             
             st.markdown("<h5 style='margin-top:20px;'>📋 レース履歴詳細</h5>", unsafe_allow_html=True)
-            
             history_html = ""
             for _, row in raw_df.sort_values(by='date', ascending=False).iterrows():
                 date_str = pd.to_datetime(row['date']).strftime('%m/%d %H:%M') if pd.notna(row['date']) else "-"
@@ -804,8 +737,7 @@ with tab_dashboard:
                 """
             st.markdown(history_html, unsafe_allow_html=True)
 
-        with tab_total:
-            render_dashboard_for_df(df_history, "総合")
+        with tab_total: render_dashboard_for_df(df_history, "総合")
         with tab_month:
             months = sorted(df_history['year_month'].dropna().unique(), reverse=True)
             if months:
