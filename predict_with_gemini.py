@@ -118,7 +118,13 @@ def load_future_data():
                     df['place_code'] = df['race_id'].str[4:6]
                     df['place_name'] = df['place_code'].map(PLACE_MAP_REV).fillna("不明")
                     df['r_num'] = df['race_id'].str[10:12].astype(int)
-                if 'race_name' not in df.columns: df['race_name'] = ""
+                
+                # 👇 ここを追加！👑 や不要な文字を自動除去します
+                if 'race_name' not in df.columns: 
+                    df['race_name'] = ""
+                else:
+                    df['race_name'] = df['race_name'].astype(str).str.replace('👑', '', regex=False).str.strip()
+
                 df['day_label'] = df['date'] if 'date' in df.columns else "不明"
                 return df
             except: continue
