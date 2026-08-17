@@ -292,7 +292,7 @@ if st.sidebar.button("💥 予想履歴を消去", type="primary", use_container
     except: pass
 
 # ==========================================
-# 3. AIスコア算出（★モデルが正常稼働するデータ形式に復旧★）
+# 3. AIスコア算出（★モデルと完全に同期・固定値排除★）
 # ==========================================
 def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     if target_df.empty or model_data is None: return None
@@ -315,10 +315,6 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     def get_past_stat(horse_clean, key):
         return past_dict.get(horse_clean, {}).get(key, np.nan)
     
-    # ------------------------------------------------------------------
-    # 🎯 ここが修正ポイント: モデルが学習時に使っていた「仮の標準値」をセットし直す。
-    # ※馬名マッチングバグは直したため、ここでの補完は「本当に過去データがゼロの馬(新馬など)」のみに適用されます。
-    # ------------------------------------------------------------------
     race_df['recent3_time_idx'] = race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'recent3_time_idx'))
     race_df['recent3_last3f_idx'] = race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'recent3_last3f_idx'))
     race_df['recent3_pace_idx'] = race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'recent3_pace_idx'))
@@ -328,13 +324,15 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     
     race_df['date_parsed_fut'] = pd.to_datetime(race_df['date'], errors='coerce')
     race_df['last_date'] = pd.to_datetime(race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'last_date')), errors='coerce')
-    race_df['interval_days'] = (race_df['date_parsed_fut'] - race_df['last_date']).dt.days.fillna(60.0)
+    
+    # 日付の計算（欠損はNaNのまま）
+    race_df['interval_days'] = (race_df['date_parsed_fut'] - race_df['last_date']).dt.days
 
-    # NaNのままだとZスコア計算とモデルが死ぬため、元の標準値をセット
-    race_df['eff_time_idx'] = pd.to_numeric(race_df['recent3_time_idx'], errors='coerce').fillna(75.0)
-    race_df['eff_last3f_idx'] = pd.to_numeric(race_df['recent3_last3f_idx'], errors='coerce').fillna(75.0)
-    race_df['eff_pace_idx'] = pd.to_numeric(race_df['recent3_pace_idx'], errors='coerce').fillna(75.0)
-    race_df['eff_start_idx'] = pd.to_numeric(race_df['recent3_start_idx'], errors='coerce').fillna(85.0)
+    # 嘘の数値を排除（fillnaを全削除）
+    race_df['eff_time_idx'] = pd.to_numeric(race_df['recent3_time_idx'], errors='coerce')
+    race_df['eff_last3f_idx'] = pd.to_numeric(race_df['recent3_last3f_idx'], errors='coerce')
+    race_df['eff_pace_idx'] = pd.to_numeric(race_df['recent3_pace_idx'], errors='coerce')
+    race_df['eff_start_idx'] = pd.to_numeric(race_df['recent3_start_idx'], errors='coerce')
 
     j_col = race_df.get('jockey_win_power', race_df.get('jockey_win_rate', pd.Series()))
     race_df['eff_jockey_win'] = pd.to_numeric(j_col, errors='coerce').clip(0.0, 1.0)
@@ -348,7 +346,7 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
         if len(valid_vals) > 1 and valid_vals.std() > 1e-5:
             race_df[z_c] = (race_df[orig_c] - valid_vals.mean()) / valid_vals.std()
         else:
-            race_df[z_c] = 0.0
+            race_df[z_c] = np.nan
 
     for f in features:
         if f not in race_df.columns: race_df[f] = np.nan
@@ -363,8 +361,8 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     if 'condition' in X.columns: X['condition'] = X['condition'].replace({'良': 0, '稍重': 1, '稍': 1, '重': 2, '不良': 3})
     if 'condition_code' in X.columns: X['condition_code'] = X['condition_code'].replace({'良': 0, '稍重': 1, '稍': 1, '重': 2, '不良': 3})
 
-    # NaNをそのままモデルに入れると壊れるので、モデルの学習時と同じく 0.0 で埋める
-    X = X.apply(lambda x: pd.to_numeric(x, errors='coerce')).fillna(0.0)
+    # NaNをそのままAIへ渡す
+    X = X.apply(lambda x: pd.to_numeric(x, errors='coerce'))
 
     try:
         if hasattr(model, "predict_proba"): raw_scores = model.predict_proba(X)[:, 1]
@@ -385,7 +383,6 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     race_df['ev_brain2'] = race_df['win_prob'] * race_df['単勝_num']
     race_df['人気_sort'] = pd.to_numeric(race_df['人気'], errors='coerce').fillna(999)
 
-    # ★ 脚質が復活します（eff_start_idx の NaN が解消されたため）
     total_horses = len(race_df)
     if total_horses > 0 and race_df['eff_start_idx'].notna().any():
         race_df['start_rank'] = race_df['eff_start_idx'].rank(ascending=False, method='min')

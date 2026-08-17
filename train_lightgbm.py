@@ -15,17 +15,17 @@ def preprocess_features(df):
         df_feat['date_parsed'] = pd.to_datetime(df_feat['date'], errors='coerce')
         df_feat = df_feat.sort_values(['馬名', 'date_parsed'])
 
-    # 2. 新ファクター：レース間隔（日数）
+    # 2. レース間隔（日数） ※欠損はNaNのまま
     if 'date_parsed' in df_feat.columns:
-        df_feat['interval_days'] = df_feat.groupby('馬名')['date_parsed'].diff().dt.days.fillna(60.0)
+        df_feat['interval_days'] = df_feat.groupby('馬名')['date_parsed'].diff().dt.days
     else:
-        df_feat['interval_days'] = 60.0
+        df_feat['interval_days'] = np.nan
 
-    # 3. 新ファクター：前走賞金
-    df_feat['prize_num'] = pd.to_numeric(df_feat.get('賞金(万円)'), errors='coerce').fillna(0.0)
-    df_feat['prev_prize'] = df_feat.groupby('馬名')['prize_num'].shift(1).fillna(0.0)
+    # 3. 前走賞金
+    df_feat['prize_num'] = pd.to_numeric(df_feat.get('賞金(万円)'), errors='coerce')
+    df_feat['prev_prize'] = df_feat.groupby('馬名')['prize_num'].shift(1)
 
-    # 4. 近走パフォーマンス
+    # 4. 近走パフォーマンス（過去3走の平均）
     target_cols = ['my_time_idx', 'my_last3f_idx', 'my_pace_idx', 'my_start_idx']
     for col in target_cols:
         if col in df_feat.columns:
@@ -36,29 +36,35 @@ def preprocess_features(df):
         else:
             df_feat[f'recent3_{col}'] = np.nan
 
-    df_feat['eff_time_idx'] = df_feat['recent3_my_time_idx'].fillna(75.0)
-    df_feat['eff_last3f_idx'] = df_feat['recent3_my_last3f_idx'].fillna(75.0)
-    df_feat['eff_pace_idx'] = df_feat['recent3_my_pace_idx'].fillna(75.0)
-    df_feat['eff_start_idx'] = df_feat['recent3_my_start_idx'].fillna(85.0)
+    # ★ 嘘の固定値(75.0など)補完を全廃。そのままの特徴量を使用
+    df_feat['eff_time_idx'] = df_feat['recent3_my_time_idx']
+    df_feat['eff_last3f_idx'] = df_feat['recent3_my_last3f_idx']
+    df_feat['eff_pace_idx'] = df_feat['recent3_my_pace_idx']
+    df_feat['eff_start_idx'] = df_feat['recent3_my_start_idx']
     
     # 5. 前走着順
-    df_feat['prev_rank_num'] = pd.to_numeric(df_feat.get('prev_rank'), errors='coerce').fillna(9.0)
+    df_feat['prev_rank_num'] = pd.to_numeric(df_feat.get('prev_rank'), errors='coerce')
 
     # 6. 騎手・環境・馬実績
     j_col = df_feat.get('jockey_win_power', df_feat.get('jockey_win_rate', pd.Series()))
-    df_feat['eff_jockey_win'] = pd.to_numeric(j_col, errors='coerce').fillna(0.05).clip(0.0, 1.0)
-    df_feat['eff_jockey_track_win'] = pd.to_numeric(df_feat.get('jockey_track_win_rate'), errors='coerce').fillna(0.05).clip(0.0, 1.0)
-    df_feat['horse_win_rate_val'] = pd.to_numeric(df_feat.get('horse_win_rate'), errors='coerce').fillna(0.0).clip(0.0, 1.0)
-    df_feat['horse_runs_val'] = pd.to_numeric(df_feat.get('horse_runs'), errors='coerce').fillna(0.0)
-    df_feat['course_avg_time_val'] = pd.to_numeric(df_feat.get('course_avg_time'), errors='coerce').fillna(100.0)
+    df_feat['eff_jockey_win'] = pd.to_numeric(j_col, errors='coerce').clip(0.0, 1.0)
+    df_feat['eff_jockey_track_win'] = pd.to_numeric(df_feat.get('jockey_track_win_rate'), errors='coerce').clip(0.0, 1.0)
+    df_feat['horse_win_rate_val'] = pd.to_numeric(df_feat.get('horse_win_rate'), errors='coerce').clip(0.0, 1.0)
+    df_feat['horse_runs_val'] = pd.to_numeric(df_feat.get('horse_runs'), errors='coerce')
+    df_feat['course_avg_time_val'] = pd.to_numeric(df_feat.get('course_avg_time'), errors='coerce')
 
-    # 7. レース内偏差値（z-score）
+    # 7. レース内偏差値（z-score）※欠損値は無理に計算せず無視
     if 'race_id' in df_feat.columns:
-        df_feat['z_time_idx'] = df_feat.groupby('race_id')['eff_time_idx'].transform(lambda x: (x - x.mean()) / (x.std() + 1e-5))
-        df_feat['z_last3f_idx'] = df_feat.groupby('race_id')['eff_last3f_idx'].transform(lambda x: (x - x.mean()) / (x.std() + 1e-5))
+        def calc_zscore(x):
+            std = x.std()
+            if pd.isna(std) or std < 1e-5:
+                return np.zeros_like(x)
+            return (x - x.mean()) / std
+        df_feat['z_time_idx'] = df_feat.groupby('race_id')['eff_time_idx'].transform(calc_zscore)
+        df_feat['z_last3f_idx'] = df_feat.groupby('race_id')['eff_last3f_idx'].transform(calc_zscore)
     else:
-        df_feat['z_time_idx'] = 0.0
-        df_feat['z_last3f_idx'] = 0.0
+        df_feat['z_time_idx'] = np.nan
+        df_feat['z_last3f_idx'] = np.nan
 
     return df_feat
 
@@ -73,7 +79,6 @@ def main():
     except Exception:
         df = pd.read_csv(INPUT_CSV, low_memory=False, encoding='cp932')
 
-    # ★【改修点】目的変数を「勝率（1着）」から「複勝率（3着以内）」へ変更
     if '着順' in df.columns:
         df['is_top3'] = (pd.to_numeric(df['着順'], errors='coerce') <= 3).astype(int)
     else:
@@ -98,9 +103,9 @@ def main():
     if 'sex_code' in df_prep.columns: candidate_features.append('sex_code')
 
     use_features = [f for f in candidate_features if f in df_prep.columns]
-    print(f"Selected Features ({len(use_features)}): {use_features}")
-
-    X = df_prep[use_features].apply(pd.to_numeric, errors='coerce').fillna(0.0)
+    
+    # ★ ここでも fillna(0.0) を廃止。NaNのままLightGBMに渡す
+    X = df_prep[use_features].apply(pd.to_numeric, errors='coerce')
     y = df_prep['is_top3']
 
     print(f"Training LightGBM model for TOP-3 probability with {len(X)} records...")
