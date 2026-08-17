@@ -67,7 +67,7 @@ with col1:
     except Exception:
         st.write("🐴")
 with col2:
-    st.title("AI予想 勝ちぱかくん")
+    st.title("AI予想 勝ちぱかくん 【3連系専用】")
 
 if 'selected_race_id' not in st.session_state:
     st.session_state['selected_race_id'] = None
@@ -88,7 +88,11 @@ def clean_horse_name(name):
 # ==========================================
 @st.cache_resource
 def load_model():
-    if os.path.exists("keiba_ai_model.pkl") and os.path.getsize("keiba_ai_model.pkl") > 0:
+    model_name = "勝ちパカくん.pkl"
+    if os.path.exists(model_name) and os.path.getsize(model_name) > 0:
+        try: return joblib.load(model_name)
+        except: return None
+    elif os.path.exists("keiba_ai_model.pkl") and os.path.getsize("keiba_ai_model.pkl") > 0:
         try: return joblib.load("keiba_ai_model.pkl")
         except: return None
     return None
@@ -124,6 +128,9 @@ def load_future_data():
                 else:
                     df['race_name'] = df['race_name'].astype(str).str.replace('👑', '', regex=False).str.strip()
 
+                if '馬名' in df.columns:
+                    df['馬名_clean'] = df['馬名'].astype(str).apply(clean_horse_name)
+
                 df['day_label'] = df['date'] if 'date' in df.columns else "不明"
                 return df
             except: continue
@@ -150,22 +157,31 @@ df_history = load_history_data()
 def build_past_horse_dict(df_p):
     if df_p.empty: return {}
     past = df_p.copy()
+    if '馬名_clean' not in past.columns and '馬名' in past.columns:
+        past['馬名_clean'] = past['馬名'].astype(str).apply(clean_horse_name)
+        
     past['date_parsed'] = pd.to_datetime(past['date'], errors='coerce')
-    past = past.dropna(subset=['date_parsed']).sort_values(['馬名', 'date_parsed'])
+    past = past.dropna(subset=['date_parsed']).sort_values(['馬名_clean', 'date_parsed'])
     
     horse_dict = {}
-    for horse, group in past.groupby('馬名'):
+    for horse_clean, group in past.groupby('馬名_clean'):
         last_date = group['date_parsed'].iloc[-1]
-        prize = pd.to_numeric(group['賞金(万円)'].iloc[-1], errors='coerce') if '賞金(万円)' in group.columns else 0.0
-        t3 = pd.to_numeric(group.get('my_time_idx'), errors='coerce').tail(3).mean()
-        l3 = pd.to_numeric(group.get('my_last3f_idx'), errors='coerce').tail(3).mean()
-        p3 = pd.to_numeric(group.get('my_pace_idx'), errors='coerce').tail(3).mean()
-        s3 = pd.to_numeric(group.get('my_start_idx'), errors='coerce').tail(3).mean()
+        prize = pd.to_numeric(group.get('賞金(万円)', pd.Series()).iloc[-1], errors='coerce')
+        prev_rank = pd.to_numeric(group.get('着順', group.get('prev_rank', pd.Series())).iloc[-1], errors='coerce')
         
-        horse_dict[horse] = {
-            'last_date': last_date, 'prev_prize': prize,
-            'recent3_time_idx': t3, 'recent3_last3f_idx': l3,
-            'recent3_pace_idx': p3, 'recent3_start_idx': s3
+        t3 = pd.to_numeric(group.get('my_time_idx', pd.Series()), errors='coerce').tail(3).mean()
+        l3 = pd.to_numeric(group.get('my_last3f_idx', pd.Series()), errors='coerce').tail(3).mean()
+        p3 = pd.to_numeric(group.get('my_pace_idx', pd.Series()), errors='coerce').tail(3).mean()
+        s3 = pd.to_numeric(group.get('my_start_idx', pd.Series()), errors='coerce').tail(3).mean()
+        
+        horse_dict[horse_clean] = {
+            'last_date': last_date, 
+            'prev_prize': prize if pd.notna(prize) else 0.0,
+            'prev_rank': prev_rank if pd.notna(prev_rank) else 9.0,
+            'recent3_time_idx': t3 if pd.notna(t3) else 75.0, 
+            'recent3_last3f_idx': l3 if pd.notna(l3) else 75.0,
+            'recent3_pace_idx': p3 if pd.notna(p3) else 75.0, 
+            'recent3_start_idx': s3 if pd.notna(s3) else 85.0
         }
     return horse_dict
 
@@ -267,7 +283,7 @@ if st.sidebar.button("💥 予想履歴を消去", type="primary", use_container
     except: pass
 
 # ==========================================
-# 3. AIスコア算出（★軸安定化＆印付けロジック★）
+# 3. AIスコア算出（★黄金バランス選定ロジック★）
 # ==========================================
 def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     if target_df.empty or model_data is None: return None
@@ -277,6 +293,9 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     features = model_data.get('features', [])
     model = model_data.get('model')
 
+    if '馬名_clean' not in race_df.columns:
+        race_df['馬名_clean'] = race_df['馬名'].astype(str).apply(clean_horse_name)
+
     raw_odds = pd.to_numeric(race_df.get('単勝', race_df.get('オッズ', pd.Series())), errors='coerce')
     race_df['単勝_num'] = raw_odds.fillna(15.0)
     if '人気' not in race_df.columns or race_df['人気'].isna().all():
@@ -284,25 +303,25 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     
     race_df['log_odds'] = np.log(race_df['単勝_num'].clip(lower=1.1))
     race_df['pop_num'] = pd.to_numeric(race_df['人気'], errors='coerce').fillna(99.0)
-    race_df['prev_rank_num'] = pd.to_numeric(race_df.get('prev_rank'), errors='coerce').fillna(9.0)
 
-    def get_past_stat(horse_name, key, default=np.nan):
-        return past_dict.get(horse_name, {}).get(key, default)
+    def get_past_stat(horse_clean, key, default):
+        return past_dict.get(horse_clean, {}).get(key, default)
     
-    race_df['recent3_time_idx'] = race_df['馬名'].apply(lambda x: get_past_stat(x, 'recent3_time_idx'))
-    race_df['recent3_last3f_idx'] = race_df['馬名'].apply(lambda x: get_past_stat(x, 'recent3_last3f_idx'))
-    race_df['recent3_pace_idx'] = race_df['馬名'].apply(lambda x: get_past_stat(x, 'recent3_pace_idx'))
-    race_df['recent3_start_idx'] = race_df['馬名'].apply(lambda x: get_past_stat(x, 'recent3_start_idx'))
-    race_df['prev_prize'] = race_df['馬名'].apply(lambda x: get_past_stat(x, 'prev_prize', 0.0))
+    race_df['recent3_time_idx'] = race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'recent3_time_idx', 75.0))
+    race_df['recent3_last3f_idx'] = race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'recent3_last3f_idx', 75.0))
+    race_df['recent3_pace_idx'] = race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'recent3_pace_idx', 75.0))
+    race_df['recent3_start_idx'] = race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'recent3_start_idx', 85.0))
+    race_df['prev_prize'] = race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'prev_prize', 0.0))
+    race_df['prev_rank_num'] = race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'prev_rank', 9.0))
     
     race_df['date_parsed_fut'] = pd.to_datetime(race_df['date'], errors='coerce')
-    race_df['last_date'] = race_df['馬名'].apply(lambda x: get_past_stat(x, 'last_date', pd.NaT))
+    race_df['last_date'] = race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'last_date', pd.NaT))
     race_df['interval_days'] = (race_df['date_parsed_fut'] - race_df['last_date']).dt.days.fillna(60.0)
 
-    race_df['eff_time_idx'] = pd.to_numeric(race_df.get('recent3_time_idx'), errors='coerce').fillna(75.0)
-    race_df['eff_last3f_idx'] = pd.to_numeric(race_df.get('recent3_last3f_idx'), errors='coerce').fillna(75.0)
-    race_df['eff_pace_idx'] = pd.to_numeric(race_df.get('recent3_pace_idx'), errors='coerce').fillna(75.0)
-    race_df['eff_start_idx'] = pd.to_numeric(race_df.get('recent3_start_idx'), errors='coerce').fillna(85.0)
+    race_df['eff_time_idx'] = pd.to_numeric(race_df['recent3_time_idx'], errors='coerce').fillna(75.0)
+    race_df['eff_last3f_idx'] = pd.to_numeric(race_df['recent3_last3f_idx'], errors='coerce').fillna(75.0)
+    race_df['eff_pace_idx'] = pd.to_numeric(race_df['recent3_pace_idx'], errors='coerce').fillna(75.0)
+    race_df['eff_start_idx'] = pd.to_numeric(race_df['recent3_start_idx'], errors='coerce').fillna(85.0)
 
     j_col = race_df.get('jockey_win_power', race_df.get('jockey_win_rate', pd.Series()))
     race_df['eff_jockey_win'] = pd.to_numeric(j_col, errors='coerce').fillna(0.05).clip(0.0, 1.0)
@@ -311,10 +330,12 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     race_df['horse_runs_val'] = pd.to_numeric(race_df.get('horse_runs'), errors='coerce').fillna(0.0)
     race_df['course_avg_time_val'] = pd.to_numeric(race_df.get('course_avg_time'), errors='coerce').fillna(100.0)
 
-    for orig_c, z_c in [('eff_time_idx', 'z_time_idx'), ('eff_last3f_idx', 'z_last3f_idx'), ('log_odds', 'z_odds')]:
+    for orig_c, z_c in [('eff_time_idx', 'z_time_idx'), ('eff_last3f_idx', 'z_last3f_idx')]:
         std_val = race_df[orig_c].std()
-        if pd.isna(std_val) or std_val < 1e-5: race_df[z_c] = 0.0
-        else: race_df[z_c] = (race_df[orig_c] - race_df[orig_c].mean()) / std_val
+        if pd.isna(std_val) or std_val < 1e-5: 
+            race_df[z_c] = 0.0
+        else: 
+            race_df[z_c] = (race_df[orig_c] - race_df[orig_c].mean()) / std_val
 
     for f in features:
         if f not in race_df.columns: race_df[f] = 0.0
@@ -347,7 +368,6 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     race_df['ev_brain2'] = race_df['win_prob'] * race_df['単勝_num']
     race_df['人気_sort'] = pd.to_numeric(race_df['人気'], errors='coerce').fillna(999)
 
-    # 脚質の自動計算
     total_horses = len(race_df)
     if total_horses > 0:
         race_df['start_rank'] = race_df['eff_start_idx'].rank(ascending=False, method='min')
@@ -362,37 +382,27 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     else:
         race_df['脚質'] = "-"
 
-    # ★【要件1追加】軸（◎・◯）決定用の軸安定スコア（複勝適性×前走安定度×人気補正）
-    # 軸スコア = AI能力スコア - (前走着順 * 2) - (人気 * 1.5)
-    race_df['axis_score'] = (
-        race_df['score_brain1'] 
-        - (race_df['prev_rank_num'].clip(upper=10) * 2.0)
-        - (race_df['人気_sort'].clip(upper=10) * 1.5)
-    )
-
-    # 1. まず「軸適性」でソートして軸馬（◎・◯）を仮決定
-    axis_sorted = race_df.sort_values(by=['axis_score', 'score_brain1'], ascending=[False, False]).reset_index(drop=True)
-    
+    # 🎯 軸は絶対能力重視（◎◯）、紐（▲△☆）のみ期待値評価
+    pure_sorted = race_df.sort_values(by=['score_brain1', '人気_sort'], ascending=[False, True]).reset_index(drop=True)
     race_df['印'] = "消"
-    if len(axis_sorted) > 0:
-        honmei_umaban = axis_sorted.loc[0, '馬番']
-        race_df.loc[race_df['馬番'] == honmei_umaban, '印'] = "◎ 本命"
-    if len(axis_sorted) > 1:
-        taikou_umaban = axis_sorted.loc[1, '馬番']
-        race_df.loc[race_df['馬番'] == taikou_umaban, '印'] = "◯ 対抗"
+    
+    if len(pure_sorted) > 0:
+        race_df.loc[race_df['馬番'] == pure_sorted.loc[0, '馬番'], '印'] = "◎ 本命"
+    if len(pure_sorted) > 1:
+        race_df.loc[race_df['馬番'] == pure_sorted.loc[1, '馬番'], '印'] = "◯ 対抗"
 
-    # 2. 残りの馬から期待値（EV）順で紐馬（▲・△・☆）を決定
     unmarked_mask = race_df['印'] == "消"
     if unmarked_mask.any():
-        remaining_indices = race_df[unmarked_mask].sort_values(by=['ev_brain2', 'score_brain1'], ascending=[False, False]).index
+        remaining_df = race_df[unmarked_mask].copy()
+        ev_sorted_idx = remaining_df.sort_values(by=['ev_brain2', 'score_brain1'], ascending=[False, False]).index
         
-        if len(remaining_indices) > 0: race_df.loc[remaining_indices[0], '印'] = "▲ 単穴"
-        if len(remaining_indices) > 1: race_df.loc[remaining_indices[1], '印'] = "△ 連下"
-        if len(remaining_indices) > 2: race_df.loc[remaining_indices[2], '印'] = "△ 連下"
+        if len(ev_sorted_idx) > 0: race_df.loc[ev_sorted_idx[0], '印'] = "▲ 単穴"
+        if len(ev_sorted_idx) > 1: race_df.loc[ev_sorted_idx[1], '印'] = "△ 連下"
+        if len(ev_sorted_idx) > 2: race_df.loc[ev_sorted_idx[2], '印'] = "△ 連下"
         
-        if len(remaining_indices) > 3:
-            for idx in remaining_indices[3:]:
-                if race_df.loc[idx, 'ev_brain2'] >= 1.0 or race_df.loc[idx, '単勝_num'] >= 20.0:
+        if len(ev_sorted_idx) > 3:
+            for idx in ev_sorted_idx[3:]:
+                if race_df.loc[idx, '単勝_num'] >= 15.0 and race_df.loc[idx, 'ev_brain2'] >= 0.8:
                     race_df.loc[idx, '印'] = "☆ 穴馬"
                     break
 
@@ -407,8 +417,8 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     race_df['mark_rank'] = race_df['印'].map(mark_order).fillna(99)
     
     race_df = race_df.sort_values(
-        by=['mark_rank', 'ev_brain2', 'score_brain1'], 
-        ascending=[True, False, False]
+        by=['mark_rank', 'score_brain1'], 
+        ascending=[True, False]
     ).reset_index(drop=True)
 
     return race_df
@@ -542,7 +552,6 @@ with tab_forecast:
                 st.error("出走頭数が少ない、またはデータが不足しているため予想をスキップします。")
                 st.stop()
 
-            # ★【要件3追加】レースの波乱度判定（オッズ差と1番人気の勝率から【固】か【荒】を判定）
             top_odds = disp_df['単勝_num'].min()
             prob_gap = disp_df['win_prob'].iloc[0] - disp_df['win_prob'].iloc[1] if len(disp_df) > 1 else 0
             
@@ -567,7 +576,6 @@ with tab_forecast:
                     f"複勝AIスコア:{row.get('score_brain1', 0)} | 期待値:{ev_val:.2f} | システム評価:{mark}"
                 )
 
-            # ★【要件3追加】波乱度（【固】/【荒】）に応じたプロンプト指示の動的構築
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」の最終意思決定者（Gemini脳）です。
 【⚠️絶対ルール】検索で全馬を個別に調べるのは禁止です。日付とレース名で一括検索してください。
@@ -578,9 +586,9 @@ with tab_forecast:
 
 【🎯 予想スタイルと戦略指示】
 1. レース判定が「【固】※本命信頼・3連単紐荒れ狙い」の場合:
-   - ◎1着固定の「三連単流し（1着: ◎ ➔ 2・3着: ◯▲△☆）」および、相手厳選の「三連複軸1頭流し」を中心に推奨買い目を構成してください。
+   - ◎1着固定の「三連単流し（1着: ◎ ➔ 2・3着: ◯▲△☆）」および「三連複軸1頭流し」を中心に推奨買い目を構成してください。
 2. レース判定が「【荒】※上位拮抗・三連複5頭BOX/手広くフォーメーション狙い」の場合:
-   - 軸飛びを警戒し、上位評価馬による「三連複5頭BOX（◎◯▲△☆）」または「三連単マルチ/フォーメーション」を中心に手広く回収率を狙う買い目を構成してください。
+   - 軸飛びを警戒し、上位評価馬による「三連複5頭BOX（◎◯▲△☆）」または「三連単フォーメーション」を中心に手広く構成してください。
 
 【出力フォーマット】
 ---
@@ -621,16 +629,28 @@ with tab_forecast:
                     
                 if res_text:
                     st.markdown(res_text)
-                    honmei_match = re.search(r'◎.*?[）:]\s*(\d+)番', res_text)
+                    
+                    honmei_match = re.search(r'◎[^\d]*(\d+)番', res_text)
                     h_umaban = int(honmei_match.group(1)) if honmei_match else int(disp_df.iloc[0]['馬番'])
-                    all_nums = re.findall(r'(\d+)番', res_text)
-                    partners_str = ",".join(list(dict.fromkeys([n for n in all_nums if int(n) != h_umaban]))[:5])
+                    
+                    partners_list = []
+                    for mark_symbol in ['◯', '▲', '☆']:
+                        m = re.search(rf'{mark_symbol}[^\n]*?(\d+)番', res_text)
+                        if m: partners_list.append(m.group(1))
+                            
+                    renka_line = re.search(r'△[^\n]*', res_text)
+                    if renka_line:
+                        renka_nums = re.findall(r'(\d+)番', renka_line.group(0))
+                        partners_list.extend(renka_nums)
+                        
+                    clean_partners = [p for p in dict.fromkeys(partners_list) if int(p) != h_umaban]
+                    partners_str = ",".join(clean_partners)
                     
                     if df_history.empty or str(target_id) not in df_history['race_id'].astype(str).values:
                         new_record = pd.DataFrame([{'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'race_id': str(target_id), 'race_name': race_display_name, 'honmei_umaban': h_umaban, 'partners': partners_str, 'honmei_name': "履歴参照", 'result_pay': "", 'pay_sanrenpuku': 0, 'pay_sanrentan_axis': 0, 'pay_sanrentan_form': 0}])
                         df_history = pd.concat([df_history, new_record], ignore_index=True)
                         df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig')
-                    st.success("📝 実戦履歴に記録しました！")
+                    st.success("📝 実戦履歴に正しい買い目を記録しました！")
                 else:
                     st.warning("⚠️ 回答を取得できませんでした。")
 
