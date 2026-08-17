@@ -46,17 +46,6 @@ st.markdown("""
     .badge-renka  { background: #f39c12; }
     .badge-ana    { background: #9b59b6; }
     .badge-keshi  { background: #e0e0e0; color: #7f8c8d; }
-
-    @media (max-width: 768px) {
-        .block-container { padding-top: 1rem; padding-bottom: 1rem; padding-left: 0.5rem; padding-right: 0.5rem; }
-        .kachi-table { font-size: 12px; }
-        .kachi-table th, .kachi-table td { padding: 4px 6px; }
-        .section-header { font-size: 1.1rem; }
-        .badge-mark { min-width: 45px; padding: 2px 4px; font-size: 0.75em; }
-        h1 { font-size: 1.3rem !important; } 
-        h2 { font-size: 1.1rem !important; } 
-        .stButton button p { font-size: 0.65rem !important; white-space: nowrap !important; letter-spacing: -0.5px; }
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -78,13 +67,9 @@ FUTURE_CSV = "future_races.csv"
 HISTORY_CSV = "prediction_history.csv"
 ML_TARGET_CSV = "ml_target_data.csv"
 
-# ------------------------------------------
-# 🧹 馬名照合用の厳密な正規化関数（★バグ修正済★）
-# ------------------------------------------
 def clean_horse_name(name):
     if pd.isna(name): return ""
     s = unicodedata.normalize('NFKC', str(name))
-    # \cdotのタイポを修正。空白、中黒、ドット、ハイフン、アンダーバーを削除
     return re.sub(r'[\s・･.\-ー_]+', '', s).strip()
 
 # ==========================================
@@ -307,7 +292,7 @@ if st.sidebar.button("💥 予想履歴を消去", type="primary", use_container
     except: pass
 
 # ==========================================
-# 3. AIスコア算出（★実数値のみで計算・補正値全廃★）
+# 3. AIスコア算出（★モデルが正常稼働するデータ形式に復旧★）
 # ==========================================
 def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     if target_df.empty or model_data is None: return None
@@ -330,6 +315,10 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     def get_past_stat(horse_clean, key):
         return past_dict.get(horse_clean, {}).get(key, np.nan)
     
+    # ------------------------------------------------------------------
+    # 🎯 ここが修正ポイント: モデルが学習時に使っていた「仮の標準値」をセットし直す。
+    # ※馬名マッチングバグは直したため、ここでの補完は「本当に過去データがゼロの馬(新馬など)」のみに適用されます。
+    # ------------------------------------------------------------------
     race_df['recent3_time_idx'] = race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'recent3_time_idx'))
     race_df['recent3_last3f_idx'] = race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'recent3_last3f_idx'))
     race_df['recent3_pace_idx'] = race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'recent3_pace_idx'))
@@ -338,14 +327,14 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     race_df['prev_rank_num'] = race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'prev_rank'))
     
     race_df['date_parsed_fut'] = pd.to_datetime(race_df['date'], errors='coerce')
-    # 欠損値を数値(nan)ではなく日付の欠損(NaT)として処理させる
     race_df['last_date'] = pd.to_datetime(race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'last_date')), errors='coerce')
-    race_df['interval_days'] = (race_df['date_parsed_fut'] - race_df['last_date']).dt.days
+    race_df['interval_days'] = (race_df['date_parsed_fut'] - race_df['last_date']).dt.days.fillna(60.0)
 
-    race_df['eff_time_idx'] = pd.to_numeric(race_df['recent3_time_idx'], errors='coerce')
-    race_df['eff_last3f_idx'] = pd.to_numeric(race_df['recent3_last3f_idx'], errors='coerce')
-    race_df['eff_pace_idx'] = pd.to_numeric(race_df['recent3_pace_idx'], errors='coerce')
-    race_df['eff_start_idx'] = pd.to_numeric(race_df['recent3_start_idx'], errors='coerce')
+    # NaNのままだとZスコア計算とモデルが死ぬため、元の標準値をセット
+    race_df['eff_time_idx'] = pd.to_numeric(race_df['recent3_time_idx'], errors='coerce').fillna(75.0)
+    race_df['eff_last3f_idx'] = pd.to_numeric(race_df['recent3_last3f_idx'], errors='coerce').fillna(75.0)
+    race_df['eff_pace_idx'] = pd.to_numeric(race_df['recent3_pace_idx'], errors='coerce').fillna(75.0)
+    race_df['eff_start_idx'] = pd.to_numeric(race_df['recent3_start_idx'], errors='coerce').fillna(85.0)
 
     j_col = race_df.get('jockey_win_power', race_df.get('jockey_win_rate', pd.Series()))
     race_df['eff_jockey_win'] = pd.to_numeric(j_col, errors='coerce').clip(0.0, 1.0)
@@ -374,19 +363,20 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     if 'condition' in X.columns: X['condition'] = X['condition'].replace({'良': 0, '稍重': 1, '稍': 1, '重': 2, '不良': 3})
     if 'condition_code' in X.columns: X['condition_code'] = X['condition_code'].replace({'良': 0, '稍重': 1, '稍': 1, '重': 2, '不良': 3})
 
-    X = X.apply(lambda x: pd.to_numeric(x, errors='coerce'))
+    # NaNをそのままモデルに入れると壊れるので、モデルの学習時と同じく 0.0 で埋める
+    X = X.apply(lambda x: pd.to_numeric(x, errors='coerce')).fillna(0.0)
 
     try:
         if hasattr(model, "predict_proba"): raw_scores = model.predict_proba(X)[:, 1]
         else: raw_scores = model.predict(X)
     except Exception: return None
 
-    s = np.nansum(raw_scores)
+    s = np.sum(raw_scores)
     win_probs = raw_scores / s if s > 0 else np.ones(len(raw_scores))/len(raw_scores)
     race_df['win_prob'] = win_probs
 
-    std_p = np.nanstd(race_df['win_prob'])
-    mean_p = np.nanmean(race_df['win_prob'])
+    std_p = np.std(race_df['win_prob'])
+    mean_p = np.mean(race_df['win_prob'])
     if pd.isna(std_p) or std_p < 1e-5: 
         race_df['score_brain1'] = 100
     else: 
@@ -395,6 +385,7 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     race_df['ev_brain2'] = race_df['win_prob'] * race_df['単勝_num']
     race_df['人気_sort'] = pd.to_numeric(race_df['人気'], errors='coerce').fillna(999)
 
+    # ★ 脚質が復活します（eff_start_idx の NaN が解消されたため）
     total_horses = len(race_df)
     if total_horses > 0 and race_df['eff_start_idx'].notna().any():
         race_df['start_rank'] = race_df['eff_start_idx'].rank(ascending=False, method='min')
