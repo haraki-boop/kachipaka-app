@@ -338,7 +338,8 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     race_df['prev_rank_num'] = race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'prev_rank'))
     
     race_df['date_parsed_fut'] = pd.to_datetime(race_df['date'], errors='coerce')
-    race_df['last_date'] = race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'last_date'))
+    # 欠損値を数値(nan)ではなく日付の欠損(NaT)として処理させる
+    race_df['last_date'] = pd.to_datetime(race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'last_date')), errors='coerce')
     race_df['interval_days'] = (race_df['date_parsed_fut'] - race_df['last_date']).dt.days
 
     race_df['eff_time_idx'] = pd.to_numeric(race_df['recent3_time_idx'], errors='coerce')
