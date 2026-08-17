@@ -141,8 +141,11 @@ def load_future_data():
                 if '馬名' in df.columns:
                     df['馬名_clean'] = df['馬名'].astype(str).apply(clean_horse_name)
 
-                if 'date' in df.columns:
-                    df['day_label'] = df['date'].astype(str)
+                # 日付カラムの安全な取得
+                if 'date' in df.columns and df['date'].notna().any():
+                    df['day_label'] = df['date'].astype(str).str.strip()
+                elif '開催日' in df.columns and df['開催日'].notna().any():
+                    df['day_label'] = df['開催日'].astype(str).str.strip()
                 else:
                     df['day_label'] = "当日"
 
