@@ -119,7 +119,7 @@ def load_future_data():
                     df['place_name'] = df['place_code'].map(PLACE_MAP_REV).fillna("不明")
                     df['r_num'] = df['race_id'].str[10:12].astype(int)
                 
-                # 👇 ここを追加！👑 や不要な文字を自動除去します
+                # 不要な文字を自動除去
                 if 'race_name' not in df.columns: 
                     df['race_name'] = ""
                 else:
@@ -393,9 +393,10 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
         if len(ev_sorted_idx) > 2: race_df.loc[ev_sorted_idx[2], '印'] = "△ 連下"
         
         # さらに残った馬の中から、条件を満たす【一番美味しい1頭だけ】を☆穴馬に指名
+        # 🔥 オッズがモデルから抜けることで EV は1.0を越えやすくなるため、条件を >= 1.0 に調整しました
         if len(ev_sorted_idx) > 3:
             for idx in ev_sorted_idx[3:]:
-                if race_df.loc[idx, 'ev_brain2'] >= 0.8 or race_df.loc[idx, '単勝_num'] >= 20.0:
+                if race_df.loc[idx, 'ev_brain2'] >= 1.0 or race_df.loc[idx, '単勝_num'] >= 20.0:
                     race_df.loc[idx, '印'] = "☆ 穴馬"
                     break  # 1頭見つけたらストップ
 
@@ -561,15 +562,23 @@ with tab_forecast:
                 kyakushitsu_val = row.get('脚質', '不明')
                 if pd.isna(kyakushitsu_val) or str(kyakushitsu_val).strip() == '': kyakushitsu_val = '不明'
                 
-                table_summary.append(f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | 脚質:{kyakushitsu_val} | オッズ:{odds_val}倍 ({row.get('人気', 999)}人気) | 純粋スコア:{row.get('score_brain1', 0)} | 期待値:{ev_val:.2f} | システム評価:{mark}")
+                # 🔥 プロンプト用：期待値が高い馬をGeminiに強く意識させる文章を追加
+                ev_text = f"{ev_val:.2f} (🌟期待値1.0超えの特大妙味！)" if ev_val >= 1.0 else f"{ev_val:.2f}"
 
+                table_summary.append(
+                    f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | "
+                    f"脚質:{kyakushitsu_val} | オッズ:{odds_val}倍 ({row.get('人気', 999)}人気) | "
+                    f"純粋AIスコア:{row.get('score_brain1', 0)} | 期待値:{ev_text} | システム評価:{mark}"
+                )
+
+            # 🔥 プロンプト指示の強化
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」の最終意思決定者（Gemini脳）です。
 【⚠️絶対ルール】検索で全馬を個別に調べるのは禁止です。日付とレース名で一括検索してください。
 
 【🎯 予想の基本コンセプト：軸は堅実、紐は妙味（期待値）重視】
 1. 軸馬（◎・◯）の選定: システム評価の「◎」「◯」（純粋スコア上位）をベースに、脚質や馬場状態から確実に好走できる能力上位の馬を信頼して指名してください。（人気馬でも可）
-2. 紐馬（▲・△・☆）の選定: 1番人気・2番人気などの過剰人気馬でヒモを固めるのは避け、システムが推奨している高期待値馬（▲・△・☆が付いた馬）を積極的に抜擢してください。
+2. 紐馬（▲・△・☆）の選定: 1番人気・2番人気などの過剰人気馬でヒモを固めるのは避け、システムが推奨している高期待値馬（▲・△・☆が付いた馬、特に「🌟期待値1.0超えの特大妙味！」と書かれている馬）の評価を爆上げして積極的に抜擢してください。
 
 【出力フォーマット】
 ---
@@ -591,7 +600,11 @@ with tab_forecast:
 """
             prompt = f"対象レース: {selected_date} {race_display_name}\n"
             prompt += f"【想定馬場状態】: {selected_condition}\n\n"
-            if is_newcomer: prompt += "【新馬戦】血統や調教を中心に予想を組み立ててください。\n\n"
+            
+            # 🔥 新馬戦のプロンプト分岐を強化（AIスコアへの依存を禁止する）
+            if is_newcomer: 
+                prompt += "【⚠️新馬戦に関する特別指示】\n新馬戦のため、過去データに基づく純粋AIスコアおよび期待値は参考外となります。システム印に囚われず、Web検索による血統、調教タイム、陣営のコメントなどを最重視して、あなた自身の判断で予想を完全に一から組み立ててください。\n\n"
+            
             prompt += f"出走馬データ:\n{chr(10).join(table_summary)}"
 
             with st.spinner(f"AIが【{selected_condition}】の馬場想定で検索・分析し、全買い目を生成中..."):
