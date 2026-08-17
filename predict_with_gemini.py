@@ -115,17 +115,25 @@ def load_past_data():
 
 def load_future_data():
     if os.path.exists(FUTURE_CSV) and os.path.getsize(FUTURE_CSV) > 0:
-        for enc in ['utf-8-sig', 'cp932', 'utf-8']:
+        for enc in ['utf-8-sig', 'cp932', 'utf-8', 'shift_jis']:
             try:
                 df = pd.read_csv(FUTURE_CSV, dtype={'race_id': str}, encoding=enc)
-                PLACE_MAP_REV = {
-                    "01": "札幌", "02": "函館", "03": "福島", "04": "新潟", "05": "東京",
-                    "06": "中山", "07": "中京", "08": "京都", "09": "阪神", "10": "小倉"
-                }
+                if df.empty:
+                    continue
+
+                # race_id の文字列化・ゼロ埋め補正 (12桁)
                 if 'race_id' in df.columns:
+                    df['race_id'] = df['race_id'].astype(str).str.zfill(12)
+                    PLACE_MAP_REV = {
+                        "01": "札幌", "02": "函館", "03": "福島", "04": "新潟", "05": "東京",
+                        "06": "中山", "07": "中京", "08": "京都", "09": "阪神", "10": "小倉"
+                    }
                     df['place_code'] = df['race_id'].str[4:6]
-                    df['place_name'] = df['place_code'].map(PLACE_MAP_REV).fillna("不明")
-                    df['r_num'] = df['race_id'].str[10:12].astype(int)
+                    df['place_name'] = df['place_code'].map(PLACE_MAP_REV).fillna("開催場")
+                    
+                    # r_num の安全な数値変換
+                    r_str = df['race_id'].str[10:12]
+                    df['r_num'] = pd.to_numeric(r_str, errors='coerce').fillna(1).astype(int)
                 
                 if 'race_name' not in df.columns: 
                     df['race_name'] = ""
@@ -135,9 +143,17 @@ def load_future_data():
                 if '馬名' in df.columns:
                     df['馬名_clean'] = df['馬名'].astype(str).apply(clean_horse_name)
 
-                df['day_label'] = df['date'] if 'date' in df.columns else "不明"
+                # 日付カラムの安全取得
+                if 'date' in df.columns:
+                    df['day_label'] = df['date'].astype(str)
+                else:
+                    df['day_label'] = "当日"
+
                 return df
-            except: continue
+            except Exception as e:
+                # デバッグ用エラー出力
+                st.sidebar.error(f"CSV読込エラー ({enc}): {e}")
+                continue
     return pd.DataFrame()
 
 def load_history_data():
