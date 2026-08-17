@@ -46,6 +46,17 @@ st.markdown("""
     .badge-renka  { background: #f39c12; }
     .badge-ana    { background: #9b59b6; }
     .badge-keshi  { background: #e0e0e0; color: #7f8c8d; }
+
+    @media (max-width: 768px) {
+        .block-container { padding-top: 1rem; padding-bottom: 1rem; padding-left: 0.5rem; padding-right: 0.5rem; }
+        .kachi-table { font-size: 12px; }
+        .kachi-table th, .kachi-table td { padding: 4px 6px; }
+        .section-header { font-size: 1.1rem; }
+        .badge-mark { min-width: 45px; padding: 2px 4px; font-size: 0.75em; }
+        h1 { font-size: 1.3rem !important; } 
+        h2 { font-size: 1.1rem !important; } 
+        .stButton button p { font-size: 0.65rem !important; white-space: nowrap !important; letter-spacing: -0.5px; }
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -67,13 +78,17 @@ FUTURE_CSV = "future_races.csv"
 HISTORY_CSV = "prediction_history.csv"
 ML_TARGET_CSV = "ml_target_data.csv"
 
+# ------------------------------------------
+# 🧹 馬名照合用の厳密な正規化関数（★バグ修正済★）
+# ------------------------------------------
 def clean_horse_name(name):
     if pd.isna(name): return ""
     s = unicodedata.normalize('NFKC', str(name))
-    return re.sub(r'[\s\u3000\cdot・.\-ー_]+', '', s).strip()
+    # \cdotのタイポを修正。空白、中黒、ドット、ハイフン、アンダーバーを削除
+    return re.sub(r'[\s・･.\-ー_]+', '', s).strip()
 
 # ==========================================
-# 1. データの読み込み（エラーを画面に出す仕様）
+# 1. データの読み込み
 # ==========================================
 @st.cache_resource
 def load_model():
@@ -137,8 +152,7 @@ def load_future_data():
             errors.append(f"[{enc}] {str(e)}")
             continue
             
-    # 全部の文字コードで失敗した場合、画面にエラー理由を晒す
-    st.error(f"⚠️ 出馬表（{FUTURE_CSV}）の読み込みに失敗しました。詳細エラー:\n" + "\n".join(errors))
+    st.error(f"⚠️ 出馬表（{FUTURE_CSV}）の処理中にエラーが発生しました。詳細:\n" + "\n".join(errors))
     return pd.DataFrame()
 
 def load_history_data():
@@ -481,7 +495,6 @@ tab_forecast, tab_dashboard = st.tabs(["🏇 レース予想", "📈 実戦成�
 
 with tab_forecast:
     if df_future.empty:
-        # エラーが起きている場合はすでに上部でst.errorが表示される設計です
         st.warning("⚠️ 出馬表データが存在しません。または読み込みに失敗しました。")
     else:
         st.markdown("<div class='section-header'>🎯 予想レースを選択</div>", unsafe_allow_html=True)
