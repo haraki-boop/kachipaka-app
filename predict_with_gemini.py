@@ -267,7 +267,7 @@ if st.sidebar.button("💥 予想履歴を消去", type="primary", use_container
     except: pass
 
 # ==========================================
-# 3. AIスコア算出
+# 3. AIスコア算出（★軸安定化＆印付けロジック★）
 # ==========================================
 def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     if target_df.empty or model_data is None: return None
@@ -362,23 +362,36 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     else:
         race_df['脚質'] = "-"
 
-    race_df = race_df.sort_values(by=['score_brain1', '人気_sort'], ascending=[False, True]).reset_index(drop=True)
+    # ★【要件1追加】軸（◎・◯）決定用の軸安定スコア（複勝適性×前走安定度×人気補正）
+    # 軸スコア = AI能力スコア - (前走着順 * 2) - (人気 * 1.5)
+    race_df['axis_score'] = (
+        race_df['score_brain1'] 
+        - (race_df['prev_rank_num'].clip(upper=10) * 2.0)
+        - (race_df['人気_sort'].clip(upper=10) * 1.5)
+    )
+
+    # 1. まず「軸適性」でソートして軸馬（◎・◯）を仮決定
+    axis_sorted = race_df.sort_values(by=['axis_score', 'score_brain1'], ascending=[False, False]).reset_index(drop=True)
     
-    # 印の付与ロジック
     race_df['印'] = "消"
-    if len(race_df) > 0: race_df.loc[0, '印'] = "◎ 本命"
-    if len(race_df) > 1: race_df.loc[1, '印'] = "◯ 対抗"
-    
-    if len(race_df) > 2:
-        remaining_df = race_df.iloc[2:].copy()
-        ev_sorted_idx = remaining_df.sort_values(by=['ev_brain2', 'score_brain1'], ascending=[False, False]).index
+    if len(axis_sorted) > 0:
+        honmei_umaban = axis_sorted.loc[0, '馬番']
+        race_df.loc[race_df['馬番'] == honmei_umaban, '印'] = "◎ 本命"
+    if len(axis_sorted) > 1:
+        taikou_umaban = axis_sorted.loc[1, '馬番']
+        race_df.loc[race_df['馬番'] == taikou_umaban, '印'] = "◯ 対抗"
+
+    # 2. 残りの馬から期待値（EV）順で紐馬（▲・△・☆）を決定
+    unmarked_mask = race_df['印'] == "消"
+    if unmarked_mask.any():
+        remaining_indices = race_df[unmarked_mask].sort_values(by=['ev_brain2', 'score_brain1'], ascending=[False, False]).index
         
-        if len(ev_sorted_idx) > 0: race_df.loc[ev_sorted_idx[0], '印'] = "▲ 単穴"
-        if len(ev_sorted_idx) > 1: race_df.loc[ev_sorted_idx[1], '印'] = "△ 連下"
-        if len(ev_sorted_idx) > 2: race_df.loc[ev_sorted_idx[2], '印'] = "△ 連下"
+        if len(remaining_indices) > 0: race_df.loc[remaining_indices[0], '印'] = "▲ 単穴"
+        if len(remaining_indices) > 1: race_df.loc[remaining_indices[1], '印'] = "△ 連下"
+        if len(remaining_indices) > 2: race_df.loc[remaining_indices[2], '印'] = "△ 連下"
         
-        if len(ev_sorted_idx) > 3:
-            for idx in ev_sorted_idx[3:]:
+        if len(remaining_indices) > 3:
+            for idx in remaining_indices[3:]:
                 if race_df.loc[idx, 'ev_brain2'] >= 1.0 or race_df.loc[idx, '単勝_num'] >= 20.0:
                     race_df.loc[idx, '印'] = "☆ 穴馬"
                     break
@@ -406,7 +419,7 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
 def generate_beautiful_table(disp_df, is_newcomer):
     html = "<div class='table-container'>"
     html += "<table class='kachi-table'>"
-    html += "<thead><tr><th>馬番</th><th style='text-align:left;'>馬名</th><th>騎手</th><th>脚質</th><th>AIスコア</th><th>勝率</th><th>予想オッズ</th><th>期待値</th><th>印</th></tr></thead>"
+    html += "<thead><tr><th>馬番</th><th style='text-align:left;'>馬名</th><th>騎手</th><th>脚質</th><th>AIスコア</th><th>複勝確率</th><th>予想オッズ</th><th>期待値</th><th>印</th></tr></thead>"
     html += "<tbody>"
     
     for i, r in disp_df.iterrows():
@@ -502,7 +515,7 @@ with tab_forecast:
             
             sort_option = st.selectbox(
                 "🔄 テーブルの表示順（ソート項目）を選択",
-                ["システム推奨（印順）", "馬番順（昇順）", "AIスコア順（高い順）", "勝率順（高い順）", "予想オッズ順（低い順）", "期待値順（高い順）"],
+                ["システム推奨（印順）", "馬番順（昇順）", "AIスコア順（高い順）", "複勝確率順（高い順）", "予想オッズ順（低い順）", "期待値順（高い順）"],
                 index=0
             )
 
@@ -511,7 +524,7 @@ with tab_forecast:
                 disp_df = disp_df.sort_values(by='馬番_num', ascending=True)
             elif sort_option == "AIスコア順（高い順）":
                 disp_df = disp_df.sort_values(by=['score_brain1', '馬番'], ascending=[False, True])
-            elif sort_option == "勝率順（高い順）":
+            elif sort_option == "複勝確率順（高い順）":
                 disp_df = disp_df.sort_values(by=['win_prob', '馬番'], ascending=[False, True])
             elif sort_option == "予想オッズ順（低い順）":
                 disp_df = disp_df.sort_values(by=['単勝_num', '馬番'], ascending=[True, True])
@@ -529,6 +542,15 @@ with tab_forecast:
                 st.error("出走頭数が少ない、またはデータが不足しているため予想をスキップします。")
                 st.stop()
 
+            # ★【要件3追加】レースの波乱度判定（オッズ差と1番人気の勝率から【固】か【荒】を判定）
+            top_odds = disp_df['単勝_num'].min()
+            prob_gap = disp_df['win_prob'].iloc[0] - disp_df['win_prob'].iloc[1] if len(disp_df) > 1 else 0
+            
+            if top_odds <= 2.5 or prob_gap >= 0.15:
+                race_type = "【固】※本命信頼・3連単紐荒れ狙い"
+            else:
+                race_type = "【荒】※上位拮抗・三連複5頭BOX/手広くフォーメーション狙い"
+
             table_summary = []
             for idx, row in disp_df.iterrows():
                 ev_val = float(row.get('ev_brain2', 0))
@@ -542,44 +564,49 @@ with tab_forecast:
                 table_summary.append(
                     f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | "
                     f"脚質:{kyakushitsu_val} | オッズ:{odds_val}倍 ({row.get('人気', 999)}人気) | "
-                    f"純粋AIスコア:{row.get('score_brain1', 0)} | 期待値:{ev_val:.2f} | システム評価:{mark}"
+                    f"複勝AIスコア:{row.get('score_brain1', 0)} | 期待値:{ev_val:.2f} | システム評価:{mark}"
                 )
 
-            # ★3連複・3連単 専用のシステムプロンプト指示
+            # ★【要件3追加】波乱度（【固】/【荒】）に応じたプロンプト指示の動的構築
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」の最終意思決定者（Gemini脳）です。
 【⚠️絶対ルール】検索で全馬を個別に調べるのは禁止です。日付とレース名で一括検索してください。
 【⚠️買い目指示】このシステムは「三連複」と「三連単」専用機です。単勝・馬連・ワイドの買い目は一切出力しないでください。
 
-【🎯 予想の基本コンセプト：軸は堅実、紐は妙味（期待値）重視】
-1. 軸馬（◎・◯）の選定: システム評価の「◎」「◯」（純粋スコア上位）をベースに、脚質や馬場状態から確実に3着以内に好走できる能力上位の馬を指名してください。
-2. 紐馬（▲・△・☆）の選定: 1番人気・2番人気などの過剰人気馬だけでヒモを固めるのは避け、システムが推奨している高期待値馬（▲・△・☆が付いた馬）を積極的に抜擢してください。
+【判定されたレース性質】
+現在のレース判定: {race_type}
+
+【🎯 予想スタイルと戦略指示】
+1. レース判定が「【固】※本命信頼・3連単紐荒れ狙い」の場合:
+   - ◎1着固定の「三連単流し（1着: ◎ ➔ 2・3着: ◯▲△☆）」および、相手厳選の「三連複軸1頭流し」を中心に推奨買い目を構成してください。
+2. レース判定が「【荒】※上位拮抗・三連複5頭BOX/手広くフォーメーション狙い」の場合:
+   - 軸飛びを警戒し、上位評価馬による「三連複5頭BOX（◎◯▲△☆）」または「三連単マルチ/フォーメーション」を中心に手広く回収率を狙う買い目を構成してください。
 
 【出力フォーマット】
 ---
-### 🌪️ レース展開とリアルタイム情報の統合
-* （プロの分析：脚質データと【想定馬場状態】を元にした展開・有利不利の考察）
+### 🌪️ レース判定・展開とリアルタイム情報の統合
+* **レース性質判定:** {race_type}
+* **展開考察:** （脚質データと【想定馬場状態】を元にした展開・有利不利の考察）
 ### 💥 勝ちぱかくんの最終ジャッジ（印と根拠）
-* **◎（本命）:** 〇〇番（馬名） - （抜擢理由：純粋な能力や展開面での高評価）
-* **◯（対抗）:** 〇〇番（馬名） - （見解：◎を脅かす、または逆転可能な馬）
-* **▲（単穴）:** 〇〇番（馬名） - （見解：期待値が高く、一発の魅力がある舐められ馬）
-* **△（連下）:** 〇〇番、〇〇番 - （見解：期待値重視で馬券に絡めたい馬）
+* **◎（本命）:** 〇〇番（馬名） - （抜擢理由：複勝圏・軸としての高い信頼度）
+* **◯（対抗）:** 〇〇番（馬名） - （見解：◎に匹敵する安定感または対抗馬）
+* **▲（単穴）:** 〇〇番（馬名） - （見解：一発の魅力を秘めた高期待値馬）
+* **△（連下）:** 〇〇番、〇〇番 - （見解：ヒモ穴として絡めたい馬）
 * **☆（穴馬）:** 〇〇番 - （超絶舐められている特大期待値の穴馬）
 ### 💡 戦略的・推奨全買い目（3連系専用）
-* **三連複 (軸1頭流し):** ◎ - ◯▲△☆ (合計 6〜10点)
-* **三連単 (1着固定流し):** 1着: ◎ ➔ 2・3着: ◯▲△☆ (合計 12〜20点)
-* **三連単 (高配当フォーメーション):** 1着: ◎◯ ➔ 2着: ◎◯▲ ➔ 3着: ◯▲△☆ (厳選フォーメーション)
+* **三連複:** （【固】なら軸1頭流し、【荒】なら5頭BOX等）
+* **三連単:** （【固】なら1着固定流し、【荒】ならフォーメーション/マルチ等）
 ---
 """
             prompt = f"対象レース: {selected_date} {race_display_name}\n"
             prompt += f"【想定馬場状態】: {selected_condition}\n\n"
             
             if is_newcomer: 
-                prompt += "【⚠️新馬戦に関する特別指示】\n新馬戦のため、過去データに基づく純粋AIスコアおよび期待値は参考外となります。システム印に囚われず、Web検索による血統、調教タイム、陣営のコメントなどを最重視して、あなた自身の判断で予想を完全に一から組み立ててください。\n\n"
+                prompt += "【⚠️新馬戦に関する特別指示】\n新馬戦のため過去データは参考外となります。血統、調教タイム、コメントを中心に、あなた自身の判断で予想を一から組み立ててください。\n\n"
             
             prompt += f"出走馬データ:\n{chr(10).join(table_summary)}"
 
-            with st.spinner(f"AIが【{selected_condition}】の馬場想定で検索・分析し、3連系買い目を生成中..."):
+            with st.spinner(f"AIが【{selected_condition}】馬場・{race_type} の戦略で検索・分析中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 res_text = ""
                 for attempt in range(3):
@@ -608,7 +635,7 @@ with tab_forecast:
                     st.warning("⚠️ 回答を取得できませんでした。")
 
 # ==========================================
-# 6. ダッシュボード（3連系専用検証画面）
+# 6. ダッシュボード
 # ==========================================
 with tab_dashboard:
     st.markdown("<div class='section-header'>📈 実戦成績ダッシュボード (3連系検証)</div>", unsafe_allow_html=True)

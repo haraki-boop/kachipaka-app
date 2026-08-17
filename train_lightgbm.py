@@ -10,7 +10,7 @@ MODEL_FILE = "keiba_ai_model.pkl"
 def preprocess_features(df):
     df_feat = df.copy()
 
-    # 1. 日付と馬名でソート（時系列の担保）
+    # 1. 日付と馬名でソート
     if 'date' in df_feat.columns and '馬名' in df_feat.columns:
         df_feat['date_parsed'] = pd.to_datetime(df_feat['date'], errors='coerce')
         df_feat = df_feat.sort_values(['馬名', 'date_parsed'])
@@ -21,11 +21,11 @@ def preprocess_features(df):
     else:
         df_feat['interval_days'] = 60.0
 
-    # 3. 新ファクター：前走の賞金（レースレベル・格）
+    # 3. 新ファクター：前走賞金
     df_feat['prize_num'] = pd.to_numeric(df_feat.get('賞金(万円)'), errors='coerce').fillna(0.0)
     df_feat['prev_prize'] = df_feat.groupby('馬名')['prize_num'].shift(1).fillna(0.0)
 
-    # 4. カンニング防止＆近走パフォーマンス（新ファクター：展開/脚質を統合）
+    # 4. 近走パフォーマンス
     target_cols = ['my_time_idx', 'my_last3f_idx', 'my_pace_idx', 'my_start_idx']
     for col in target_cols:
         if col in df_feat.columns:
@@ -52,7 +52,7 @@ def preprocess_features(df):
     df_feat['horse_runs_val'] = pd.to_numeric(df_feat.get('horse_runs'), errors='coerce').fillna(0.0)
     df_feat['course_avg_time_val'] = pd.to_numeric(df_feat.get('course_avg_time'), errors='coerce').fillna(100.0)
 
-    # 7. レース内偏差値（z-score）の算出（オッズ関連のz-scoreは除外）
+    # 7. レース内偏差値（z-score）
     if 'race_id' in df_feat.columns:
         df_feat['z_time_idx'] = df_feat.groupby('race_id')['eff_time_idx'].transform(lambda x: (x - x.mean()) / (x.std() + 1e-5))
         df_feat['z_last3f_idx'] = df_feat.groupby('race_id')['eff_last3f_idx'].transform(lambda x: (x - x.mean()) / (x.std() + 1e-5))
@@ -73,17 +73,16 @@ def main():
     except Exception:
         df = pd.read_csv(INPUT_CSV, low_memory=False, encoding='cp932')
 
-    if 'is_win' not in df.columns:
-        if '着順' in df.columns:
-            df['is_win'] = (pd.to_numeric(df['着順'], errors='coerce') == 1).astype(int)
-        else:
-            print("Error: Target variable not found.")
-            return
+    # ★【改修点】目的変数を「勝率（1着）」から「複勝率（3着以内）」へ変更
+    if '着順' in df.columns:
+        df['is_top3'] = (pd.to_numeric(df['着順'], errors='coerce') <= 3).astype(int)
+    else:
+        print("Error: Target variable '着順' not found.")
+        return
 
-    df_clean = df.dropna(subset=['is_win']).copy()
+    df_clean = df.dropna(subset=['is_top3']).copy()
     df_prep = preprocess_features(df_clean)
 
-    # ★オッズ・人気要因（log_odds, pop_num, z_odds）を完全に除外したリスト
     candidate_features = [
         '馬番', '枠番', '斤量', 'distance',
         'interval_days', 'prev_prize', 
@@ -102,9 +101,9 @@ def main():
     print(f"Selected Features ({len(use_features)}): {use_features}")
 
     X = df_prep[use_features].apply(pd.to_numeric, errors='coerce').fillna(0.0)
-    y = df_prep['is_win']
+    y = df_prep['is_top3']
 
-    print(f"Training LightGBM model with {len(X)} records...")
+    print(f"Training LightGBM model for TOP-3 probability with {len(X)} records...")
     
     train_data = lgb.Dataset(X, label=y)
     params = {
