@@ -27,32 +27,10 @@ st.markdown("""
         margin-top: 1rem; margin-bottom: 1rem;
         border-bottom: 2px solid #ecf0f1; padding-bottom: 5px;
     }
-    .table-container {
-        width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch;
-        margin-bottom: 20px; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,0.06);
-    }
-    .kachi-table {
-        width: 100%; border-collapse: collapse; margin-bottom: 0;
-        font-family: 'Helvetica Neue', Arial, sans-serif; background-color: #ffffff; white-space: nowrap;
-    }
-    .kachi-table thead tr { background: #fdfdfd; color: #2c3e50; font-weight: bold; border-bottom: 2px solid #eaeaea; }
-    .kachi-table th { padding: 8px 10px; text-align: center; }
-    .kachi-table td { padding: 6px 10px; text-align: center; border-bottom: 1px solid #f4f4f4; color: #34495e; }
-    .kachi-table tbody tr:hover td { background: #f9fbfd; }
-    .badge-mark { color: #fff; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 0.85em; display: inline-block; min-width: 60px;}
-    .badge-honmei { background: #e74c3c; }
-    .badge-taikou { background: #3498db; }
-    .badge-tana   { background: #2ecc71; }
-    .badge-renka  { background: #f39c12; }
-    .badge-ana    { background: #9b59b6; }
-    .badge-keshi  { background: #e0e0e0; color: #7f8c8d; }
 
     @media (max-width: 768px) {
         .block-container { padding-top: 1rem; padding-bottom: 1rem; padding-left: 0.5rem; padding-right: 0.5rem; }
-        .kachi-table { font-size: 12px; }
-        .kachi-table th, .kachi-table td { padding: 4px 6px; }
         .section-header { font-size: 1.1rem; }
-        .badge-mark { min-width: 45px; padding: 2px 4px; font-size: 0.75em; }
         h1 { font-size: 1.3rem !important; } 
         h2 { font-size: 1.1rem !important; } 
         .stButton button p { font-size: 0.65rem !important; white-space: nowrap !important; letter-spacing: -0.5px; }
@@ -279,7 +257,7 @@ if st.sidebar.button("💥 予想履歴を消去", type="primary", use_container
     except: pass
 
 # ==========================================
-# 3. AIスコア算出（★Python側の印付けロジック・並び順改修★）
+# 3. AIスコア算出
 # ==========================================
 def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     if target_df.empty or model_data is None: return None
@@ -377,30 +355,25 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     # まず純粋な勝率（スコア）順に並べる
     race_df = race_df.sort_values(by=['score_brain1', '人気_sort'], ascending=[False, True]).reset_index(drop=True)
     
-    # ★システム側の新しい「印」ロジック：軸は堅く、紐は期待値（EV）重視！
+    # 印の付与ロジック
     race_df['印'] = "消"
     if len(race_df) > 0: race_df.loc[0, '印'] = "◎ 本命"
     if len(race_df) > 1: race_df.loc[1, '印'] = "◯ 対抗"
     
-    # 3位以下の馬から、期待値が最も高い3頭を探して紐馬（▲・△）に任命
     if len(race_df) > 2:
         remaining_df = race_df.iloc[2:].copy()
-        # 期待値順に並べ替え
         ev_sorted_idx = remaining_df.sort_values(by=['ev_brain2', 'score_brain1'], ascending=[False, False]).index
         
         if len(ev_sorted_idx) > 0: race_df.loc[ev_sorted_idx[0], '印'] = "▲ 単穴"
         if len(ev_sorted_idx) > 1: race_df.loc[ev_sorted_idx[1], '印'] = "△ 連下"
         if len(ev_sorted_idx) > 2: race_df.loc[ev_sorted_idx[2], '印'] = "△ 連下"
         
-        # さらに残った馬の中から、条件を満たす【一番美味しい1頭だけ】を☆穴馬に指名
-        # 🔥 オッズがモデルから抜けることで EV は1.0を越えやすくなるため、条件を >= 1.0 に調整しました
         if len(ev_sorted_idx) > 3:
             for idx in ev_sorted_idx[3:]:
                 if race_df.loc[idx, 'ev_brain2'] >= 1.0 or race_df.loc[idx, '単勝_num'] >= 20.0:
                     race_df.loc[idx, '印'] = "☆ 穴馬"
-                    break  # 1頭見つけたらストップ
+                    break
 
-    # 印の順番に並び替えるための設定
     mark_order = {
         "◎ 本命": 1,
         "◯ 対抗": 2,
@@ -411,7 +384,6 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     }
     race_df['mark_rank'] = race_df['印'].map(mark_order).fillna(99)
     
-    # 印順 ＞ 期待値順 ＞ AIスコア順 で最終ソート
     race_df = race_df.sort_values(
         by=['mark_rank', 'ev_brain2', 'score_brain1'], 
         ascending=[True, False, False]
@@ -420,7 +392,7 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     return race_df
 
 # ==========================================
-# 4. マーカーとHTMLテーブル生成
+# 4. マーカーとソート対応テーブル生成（★ここを改修★）
 # ==========================================
 def get_all_markers():
     markers = {}
@@ -433,49 +405,45 @@ def get_all_markers():
                 markers[rid] = "【🐣新馬】"
                 continue
             
-            # ☆穴馬または高期待値馬がいれば妙味マークをつける
             has_value = any((sdf['印'].str.contains("☆")) | (sdf['印'].str.contains("▲")))
-            
             if has_value: markers[rid] = "【🔥妙味】"
             else: markers[rid] = "【普通】"
     return markers
 
 markers = get_all_markers()
 
-def generate_beautiful_table(disp_df, is_newcomer):
-    html = "<div class='table-container'>"
-    html += "<table class='kachi-table'>"
-    html += "<thead><tr><th>馬番</th><th style='text-align:left;'>馬名</th><th>騎手</th><th>脚質</th><th>AIスコア</th><th>勝率</th><th>予想オッズ</th><th>期待値</th><th>印</th></tr></thead>"
-    html += "<tbody>"
+def display_sortable_table(disp_df, is_newcomer):
+    show_df = disp_df.copy()
     
-    for i, r in disp_df.iterrows():
-        ev_val = float(r.get('ev_brain2', 0))
-        raw_o = r.get('単勝') if pd.notna(r.get('単勝')) else r.get('オッズ', 0)
-        odds_val = float(pd.to_numeric(raw_o, errors='coerce')) if pd.notna(raw_o) else 0.0
-        win_prob_val = float(r.get('win_prob', 0))
-        
-        mark = r.get('印', '消')
-        
-        kyakushitsu = r.get('脚質', '-')
-        if pd.isna(kyakushitsu) or str(kyakushitsu).strip() == '': kyakushitsu = '-'
-        
-        badge_cls = "badge-keshi"
-        if "◎" in mark: badge_cls = "badge-honmei"
-        elif "◯" in mark: badge_cls = "badge-taikou"
-        elif "▲" in mark: badge_cls = "badge-tana"
-        elif "△" in mark: badge_cls = "badge-renka"
-        elif "☆" in mark: badge_cls = "badge-ana"
-        
-        score_str = f"<b>{int(r['score_brain1'])}</b>" if not is_newcomer else "-"
-        win_str = f"<b>{win_prob_val*100:.1f}%</b>"
-        odds_str = f"{odds_val:.1f}倍" if odds_val > 0 else "-"
-        ev_str = f"<b>{ev_val:.2f}</b>" if ev_val > 0 and not is_newcomer else "-"
-        mark_html = f"<span class='badge-mark {badge_cls}'>{mark}</span>"
-        
-        html += f"<tr><td style='font-weight:bold; font-size:1.1em; color:#34495e;'>{int(r['馬番']):02d}</td><td style='text-align:left; font-weight:bold; color:#2c3e50;'>{r.get('馬名', '-')}</td><td style='color:#7f8c8d;'>{r.get('騎手', '-')}</td><td style='font-weight:bold; color:#8e44ad;'>{kyakushitsu}</td><td style='color:#2c3e50;'>{score_str}</td><td style='color:#2c3e50;'>{win_str}</td><td style='color:#7f8c8d;'>{odds_str}</td><td style='color:#2c3e50;'>{ev_str}</td><td>{mark_html}</td></tr>"
-        
-    html += "</tbody></table></div>"
-    return html
+    # 表示データの型変換とフォーマット処理（数値としてソートできるように数値を保持）
+    show_df['馬番'] = show_df['馬番'].astype(int)
+    show_df['予想オッズ'] = show_df.apply(
+        lambda r: float(pd.to_numeric(r.get('単勝') if pd.notna(r.get('単勝')) else r.get('オッズ', 0), errors='coerce')), axis=1
+    )
+    show_df['勝率'] = (show_df['win_prob'] * 100).round(1)
+    show_df['AIスコア'] = show_df['score_brain1'].astype(int) if not is_newcomer else 0
+    show_df['期待値'] = show_df['ev_brain2'].round(2) if not is_newcomer else 0.0
+    
+    cols = ['馬番', '馬名', '騎手', '脚質', 'AIスコア', '勝率', '予想オッズ', '期待値', '印']
+    view_df = show_df[cols]
+    
+    # Streamlit標準のインターフェースで綺麗にソート可能にする
+    st.dataframe(
+        view_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "馬番": st.column_config.NumberColumn("馬番", format="%02d"),
+            "馬名": st.column_config.TextColumn("馬名"),
+            "騎手": st.column_config.TextColumn("騎手"),
+            "脚質": st.column_config.TextColumn("脚質"),
+            "AIスコア": st.column_config.NumberColumn("AIスコア", format="%d") if not is_newcomer else st.column_config.TextColumn("AIスコア"),
+            "勝率": st.column_config.NumberColumn("勝率", format="%.1f%%"),
+            "予想オッズ": st.column_config.NumberColumn("予想オッズ", format="%.1f倍"),
+            "期待値": st.column_config.NumberColumn("期待値", format="%.2f") if not is_newcomer else st.column_config.TextColumn("期待値"),
+            "印": st.column_config.TextColumn("印")
+        }
+    )
 
 # ==========================================
 # 5. メインUI
@@ -537,11 +505,12 @@ with tab_forecast:
         
         if scored_df is not None:
             st.markdown("<div class='section-header'>📊 1. 出走馬 期待値＆データ一覧</div>", unsafe_allow_html=True)
-            # ここは並び替え済みのデータをそのまま表示
             disp_df = scored_df.copy()
             if is_newcomer:
                 st.info("🐣 新馬戦のため、過去データが存在せずベースAIスコアは参考値です。Geminiの自力予想に委ねます。")
-            st.markdown(generate_beautiful_table(disp_df, is_newcomer), unsafe_allow_html=True)
+            
+            # ソート可能なテーブルを出力
+            display_sortable_table(disp_df, is_newcomer)
 
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("🧠 Geminiで最終適正化＆買い目生成", type="primary", use_container_width=True):
@@ -562,7 +531,6 @@ with tab_forecast:
                 kyakushitsu_val = row.get('脚質', '不明')
                 if pd.isna(kyakushitsu_val) or str(kyakushitsu_val).strip() == '': kyakushitsu_val = '不明'
                 
-                # 🔥 プロンプト用：期待値が高い馬をGeminiに強く意識させる文章を追加
                 ev_text = f"{ev_val:.2f} (🌟期待値1.0超えの特大妙味！)" if ev_val >= 1.0 else f"{ev_val:.2f}"
 
                 table_summary.append(
@@ -571,7 +539,6 @@ with tab_forecast:
                     f"純粋AIスコア:{row.get('score_brain1', 0)} | 期待値:{ev_text} | システム評価:{mark}"
                 )
 
-            # 🔥 プロンプト指示の強化
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」の最終意思決定者（Gemini脳）です。
 【⚠️絶対ルール】検索で全馬を個別に調べるのは禁止です。日付とレース名で一括検索してください。
@@ -601,7 +568,6 @@ with tab_forecast:
             prompt = f"対象レース: {selected_date} {race_display_name}\n"
             prompt += f"【想定馬場状態】: {selected_condition}\n\n"
             
-            # 🔥 新馬戦のプロンプト分岐を強化（AIスコアへの依存を禁止する）
             if is_newcomer: 
                 prompt += "【⚠️新馬戦に関する特別指示】\n新馬戦のため、過去データに基づく純粋AIスコアおよび期待値は参考外となります。システム印に囚われず、Web検索による血統、調教タイム、陣営のコメントなどを最重視して、あなた自身の判断で予想を完全に一から組み立ててください。\n\n"
             
