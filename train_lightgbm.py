@@ -16,7 +16,7 @@ def clean_horse_name(name):
     return re.sub(r'[\s・･.\-ー_]+', '', s).strip()
 
 def preprocess_features(df):
-    """学習用の特徴量エンジニアリング（嘘の穴埋めは一切しない）"""
+    """学習用の特徴量エンジニアリング"""
     df_feat = df.copy()
 
     # 馬名の正規化と日付ソート
@@ -67,14 +67,13 @@ def main():
         print("Error: '着順' column missing.")
         return
 
-    # 目的変数：3着以内に入る確率（複勝率）
-    df['is_top3'] = (pd.to_numeric(df['着順'], errors='coerce') <= 3).astype(int)
-    df_clean = df.dropna(subset=['is_top3']).copy()
+    # ★ 目的変数を「1着になる確率（勝率）」に修正
+    df['is_win'] = (pd.to_numeric(df['着順'], errors='coerce') == 1).astype(int)
+    df_clean = df.dropna(subset=['is_win']).copy()
     
     print("Processing features...")
     df_prep = preprocess_features(df_clean)
 
-    # 実際にモデルに食わせる特徴量のリスト
     candidate_features = [
         '馬番', '枠番', '斤量', 'distance',
         'interval_days', 'prev_prize', 'prev_rank_num', 
@@ -85,18 +84,16 @@ def main():
 
     use_features = [f for f in candidate_features if f in df_prep.columns]
     
-    # カテゴリ変数の処理
     cat_cols = ['surface_code', 'condition_code', 'sex_code']
     for cat in cat_cols:
         if cat in df_prep.columns:
             df_prep[cat] = df_prep[cat].astype('category')
             use_features.append(cat)
 
-    # X(特徴量)と y(正解ラベル)の定義
     X = df_prep[use_features].copy()
-    y = df_prep['is_top3']
+    y = df_prep['is_win']
 
-    print(f"Training LightGBM model with {len(X)} records...")
+    print(f"Training LightGBM model for WIN probability with {len(X)} records...")
     
     train_data = lgb.Dataset(X, label=y)
     params = {
@@ -109,7 +106,6 @@ def main():
         'seed': 42
     }
     
-    # 欠損値(NaN)はLightGBMが自動で最適に分岐処理します
     model = lgb.train(params, train_data, num_boost_round=150)
     
     joblib.dump({'model': model, 'features': use_features}, MODEL_FILE)
