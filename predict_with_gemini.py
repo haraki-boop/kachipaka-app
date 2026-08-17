@@ -46,17 +46,6 @@ st.markdown("""
     .badge-renka  { background: #f39c12; }
     .badge-ana    { background: #9b59b6; }
     .badge-keshi  { background: #e0e0e0; color: #7f8c8d; }
-
-    @media (max-width: 768px) {
-        .block-container { padding-top: 1rem; padding-bottom: 1rem; padding-left: 0.5rem; padding-right: 0.5rem; }
-        .kachi-table { font-size: 12px; }
-        .kachi-table th, .kachi-table td { padding: 4px 6px; }
-        .section-header { font-size: 1.1rem; }
-        .badge-mark { min-width: 45px; padding: 2px 4px; font-size: 0.75em; }
-        h1 { font-size: 1.3rem !important; } 
-        h2 { font-size: 1.1rem !important; } 
-        .stButton button p { font-size: 0.65rem !important; white-space: nowrap !important; letter-spacing: -0.5px; }
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -74,97 +63,97 @@ if 'selected_race_id' not in st.session_state:
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 
-FUTURE_CSV = os.path.normpath("future_races.csv")
-HISTORY_CSV = os.path.normpath("prediction_history.csv")
-ML_TARGET_CSV = os.path.normpath("ml_target_data.csv")
+FUTURE_CSV = "future_races.csv"
+HISTORY_CSV = "prediction_history.csv"
+ML_TARGET_CSV = "ml_target_data.csv"
 
-# ------------------------------------------
-# 🧹 馬名照合用の厳密な正規化関数
-# ------------------------------------------
 def clean_horse_name(name):
     if pd.isna(name): return ""
     s = unicodedata.normalize('NFKC', str(name))
     return re.sub(r'[\s\u3000\cdot・.\-ー_]+', '', s).strip()
 
 # ==========================================
-# 1. データとAIモデルの読み込み
+# 1. データの読み込み（エラーを画面に出す仕様）
 # ==========================================
 @st.cache_resource
 def load_model():
-    model_name = "勝ちパカくん.pkl"
-    if os.path.exists(model_name) and os.path.getsize(model_name) > 0:
-        try: return joblib.load(model_name)
-        except: return None
-    elif os.path.exists("keiba_ai_model.pkl") and os.path.getsize("keiba_ai_model.pkl") > 0:
-        try: return joblib.load("keiba_ai_model.pkl")
-        except: return None
+    for m_name in ["勝ちパカくん.pkl", "keiba_ai_model.pkl"]:
+        if os.path.exists(m_name) and os.path.getsize(m_name) > 0:
+            try: return joblib.load(m_name)
+            except: continue
     return None
 
 @st.cache_data
 def load_past_data():
-    if os.path.exists(ML_TARGET_CSV) and os.path.getsize(ML_TARGET_CSV) > 0:
-        for enc in ['utf-8-sig', 'utf-8', 'cp932', 'shift_jis']:
-            try:
-                df = pd.read_csv(ML_TARGET_CSV, low_memory=False, dtype={'race_id': str}, encoding=enc, engine='python')
-                if 'date' in df.columns: df = df.sort_values(by='date')
-                if '馬名' in df.columns: df['馬名_clean'] = df['馬名'].astype(str).apply(clean_horse_name)
-                return df
-            except Exception:
-                continue
+    if not os.path.exists(ML_TARGET_CSV): return pd.DataFrame()
+    for enc in ['utf-8-sig', 'utf-8', 'cp932']:
+        try:
+            df = pd.read_csv(ML_TARGET_CSV, low_memory=False, dtype={'race_id': str}, encoding=enc)
+            if 'date' in df.columns: df = df.sort_values(by='date')
+            if '馬名' in df.columns: df['馬名_clean'] = df['馬名'].astype(str).apply(clean_horse_name)
+            return df
+        except Exception:
+            continue
     return pd.DataFrame()
 
 def load_future_data():
-    if os.path.exists(FUTURE_CSV) and os.path.getsize(FUTURE_CSV) > 0:
-        for enc in ['utf-8-sig', 'utf-8', 'cp932', 'shift_jis']:
-            try:
-                df = pd.read_csv(FUTURE_CSV, dtype={'race_id': str}, encoding=enc, engine='python')
-                if df.empty:
-                    continue
+    if not os.path.exists(FUTURE_CSV):
+        st.error(f"⚠️ ファイルが見つかりません: {FUTURE_CSV}")
+        return pd.DataFrame()
+    
+    errors = []
+    for enc in ['utf-8-sig', 'utf-8', 'cp932']:
+        try:
+            df = pd.read_csv(FUTURE_CSV, dtype={'race_id': str}, encoding=enc)
+            if df.empty: continue
 
-                if 'race_id' in df.columns:
-                    df['race_id'] = df['race_id'].astype(str).str.zfill(12)
-                    PLACE_MAP_REV = {
-                        "01": "札幌", "02": "函館", "03": "福島", "04": "新潟", "05": "東京",
-                        "06": "中山", "07": "中京", "08": "京都", "09": "阪神", "10": "小倉"
-                    }
-                    df['place_code'] = df['race_id'].str[4:6]
-                    df['place_name'] = df['place_code'].map(PLACE_MAP_REV).fillna("開催場")
-                    
-                    r_str = df['race_id'].str[10:12]
-                    df['r_num'] = pd.to_numeric(r_str, errors='coerce').fillna(1).astype(int)
-                
-                if 'race_name' not in df.columns: 
-                    df['race_name'] = ""
-                else:
-                    df['race_name'] = df['race_name'].astype(str).str.replace('👑', '', regex=False).str.strip()
+            if 'race_id' in df.columns:
+                df['race_id'] = df['race_id'].astype(str).str.zfill(12)
+                PLACE_MAP_REV = {
+                    "01": "札幌", "02": "函館", "03": "福島", "04": "新潟", "05": "東京",
+                    "06": "中山", "07": "中京", "08": "京都", "09": "阪神", "10": "小倉"
+                }
+                df['place_code'] = df['race_id'].str[4:6]
+                df['place_name'] = df['place_code'].map(PLACE_MAP_REV).fillna("開催場")
+                df['r_num'] = pd.to_numeric(df['race_id'].str[10:12], errors='coerce').fillna(1).astype(int)
+            
+            if 'race_name' not in df.columns: 
+                df['race_name'] = ""
+            else:
+                df['race_name'] = df['race_name'].astype(str).str.replace('👑', '', regex=False).str.strip()
 
-                if '馬名' in df.columns:
-                    df['馬名_clean'] = df['馬名'].astype(str).apply(clean_horse_name)
+            if '馬名' in df.columns:
+                df['馬名_clean'] = df['馬名'].astype(str).apply(clean_horse_name)
 
-                # 日付カラムの安全な取得
-                if 'date' in df.columns and df['date'].notna().any():
-                    df['day_label'] = df['date'].astype(str).str.strip()
-                elif '開催日' in df.columns and df['開催日'].notna().any():
-                    df['day_label'] = df['開催日'].astype(str).str.strip()
-                else:
-                    df['day_label'] = "当日"
+            if 'date' in df.columns and df['date'].notna().any():
+                df['day_label'] = df['date'].astype(str).str.strip()
+            elif '開催日' in df.columns and df['開催日'].notna().any():
+                df['day_label'] = df['開催日'].astype(str).str.strip()
+            else:
+                df['day_label'] = "当日"
 
-                return df
-            except Exception:
-                continue
+            return df
+        except Exception as e:
+            errors.append(f"[{enc}] {str(e)}")
+            continue
+            
+    # 全部の文字コードで失敗した場合、画面にエラー理由を晒す
+    st.error(f"⚠️ 出馬表（{FUTURE_CSV}）の読み込みに失敗しました。詳細エラー:\n" + "\n".join(errors))
     return pd.DataFrame()
 
 def load_history_data():
-    if os.path.exists(HISTORY_CSV) and os.path.getsize(HISTORY_CSV) > 0:
-        for enc in ['utf-8-sig', 'utf-8', 'cp932', 'shift_jis']:
-            try:
-                df = pd.read_csv(HISTORY_CSV, dtype={'race_id': str, 'honmei_umaban': str, 'partners': str}, encoding=enc, engine='python')
-                if 'partners' not in df.columns: df['partners'] = ""
-                for col in ['pay_sanrenpuku', 'pay_sanrentan_axis', 'pay_sanrentan_form']:
-                    if col not in df.columns: df[col] = 0
-                return df
-            except Exception:
-                continue
+    if not os.path.exists(HISTORY_CSV):
+        return pd.DataFrame(columns=['date', 'race_id', 'race_name', 'honmei_umaban', 'partners', 'honmei_name', 'result_pay', 'pay_sanrenpuku', 'pay_sanrentan_axis', 'pay_sanrentan_form'])
+    
+    for enc in ['utf-8-sig', 'utf-8', 'cp932']:
+        try:
+            df = pd.read_csv(HISTORY_CSV, dtype={'race_id': str, 'honmei_umaban': str, 'partners': str}, encoding=enc)
+            if 'partners' not in df.columns: df['partners'] = ""
+            for col in ['pay_sanrenpuku', 'pay_sanrentan_axis', 'pay_sanrentan_form']:
+                if col not in df.columns: df[col] = 0
+            return df
+        except Exception:
+            continue
     return pd.DataFrame(columns=['date', 'race_id', 'race_name', 'honmei_umaban', 'partners', 'honmei_name', 'result_pay', 'pay_sanrenpuku', 'pay_sanrentan_axis', 'pay_sanrentan_form'])
 
 model_data = load_model()
@@ -173,7 +162,7 @@ df_future = load_future_data()
 df_history = load_history_data()
 
 # ------------------------------------------
-# 📦 実過去データからの厳密な指標抽出
+# 📦 過去データ辞書化
 # ------------------------------------------
 @st.cache_data
 def build_past_horse_dict(df_p):
@@ -188,31 +177,21 @@ def build_past_horse_dict(df_p):
     horse_dict = {}
     for horse_clean, group in past.groupby('馬名_clean'):
         if not horse_clean: continue
-        
         last_row = group.iloc[-1]
         
-        # 実数値データのみを取得
         time_vals = pd.to_numeric(group.get('my_time_idx', pd.Series()), errors='coerce').dropna()
         l3f_vals = pd.to_numeric(group.get('my_last3f_idx', pd.Series()), errors='coerce').dropna()
         pace_vals = pd.to_numeric(group.get('my_pace_idx', pd.Series()), errors='coerce').dropna()
         start_vals = pd.to_numeric(group.get('my_start_idx', pd.Series()), errors='coerce').dropna()
         
-        t3 = time_vals.tail(3).mean() if not time_vals.empty else np.nan
-        l3 = l3f_vals.tail(3).mean() if not l3f_vals.empty else np.nan
-        p3 = pace_vals.tail(3).mean() if not pace_vals.empty else np.nan
-        s3 = start_vals.tail(3).mean() if not start_vals.empty else np.nan
-        
-        prev_rank = pd.to_numeric(last_row.get('着順', last_row.get('prev_rank')), errors='coerce')
-        prev_prize = pd.to_numeric(last_row.get('賞金(万円)'), errors='coerce')
-        
         horse_dict[horse_clean] = {
             'last_date': last_row['date_parsed'], 
-            'prev_prize': prev_prize if pd.notna(prev_prize) else 0.0,
-            'prev_rank': prev_rank if pd.notna(prev_rank) else np.nan,
-            'recent3_time_idx': t3, 
-            'recent3_last3f_idx': l3,
-            'recent3_pace_idx': p3, 
-            'recent3_start_idx': s3
+            'prev_prize': pd.to_numeric(last_row.get('賞金(万円)'), errors='coerce') if pd.notna(last_row.get('賞金(万円)')) else 0.0,
+            'prev_rank': pd.to_numeric(last_row.get('着順', last_row.get('prev_rank')), errors='coerce') if pd.notna(last_row.get('着順', last_row.get('prev_rank'))) else np.nan,
+            'recent3_time_idx': time_vals.tail(3).mean() if not time_vals.empty else np.nan, 
+            'recent3_last3f_idx': l3f_vals.tail(3).mean() if not l3f_vals.empty else np.nan,
+            'recent3_pace_idx': pace_vals.tail(3).mean() if not pace_vals.empty else np.nan, 
+            'recent3_start_idx': start_vals.tail(3).mean() if not start_vals.empty else np.nan
         }
     return horse_dict
 
@@ -230,7 +209,7 @@ if st.sidebar.button("🔄 最新の情報にリロード", use_container_width=
 st.sidebar.markdown("---")
 st.sidebar.header("🏁 実戦結果の検証")
 if st.sidebar.button("🏆 終了したレースの配当を取得", use_container_width=True):
-    with st.spinner("🏁 3連複・3連単の確定配当を検索中..."):
+    with st.spinner("🏁 確定配当を検索中..."):
         if not df_history.empty:
             updated = False
             headers = {"User-Agent": "Mozilla/5.0"}
@@ -337,7 +316,6 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     def get_past_stat(horse_clean, key):
         return past_dict.get(horse_clean, {}).get(key, np.nan)
     
-    # 実数値データのみを取得（架空の補正値は一切排除）
     race_df['recent3_time_idx'] = race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'recent3_time_idx'))
     race_df['recent3_last3f_idx'] = race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'recent3_last3f_idx'))
     race_df['recent3_pace_idx'] = race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'recent3_pace_idx'))
@@ -361,7 +339,6 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     race_df['horse_runs_val'] = pd.to_numeric(race_df.get('horse_runs'), errors='coerce')
     race_df['course_avg_time_val'] = pd.to_numeric(race_df.get('course_avg_time'), errors='coerce')
 
-    # レース内での相対評価（偏差値）の計算
     for orig_c, z_c in [('eff_time_idx', 'z_time_idx'), ('eff_last3f_idx', 'z_last3f_idx')]:
         valid_vals = race_df[orig_c].dropna()
         if len(valid_vals) > 1 and valid_vals.std() > 1e-5:
@@ -403,7 +380,6 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     race_df['ev_brain2'] = race_df['win_prob'] * race_df['単勝_num']
     race_df['人気_sort'] = pd.to_numeric(race_df['人気'], errors='coerce').fillna(999)
 
-    # 脚質の判定
     total_horses = len(race_df)
     if total_horses > 0 and race_df['eff_start_idx'].notna().any():
         race_df['start_rank'] = race_df['eff_start_idx'].rank(ascending=False, method='min')
@@ -418,7 +394,6 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     else:
         race_df['脚質'] = "-"
 
-    # 実力・人気最上位をそのまま本命（◎・◯）へ
     pure_sorted = race_df.sort_values(by=['pop_num', 'score_brain1'], ascending=[True, False]).reset_index(drop=True)
     race_df['印'] = "消"
     
@@ -506,7 +481,8 @@ tab_forecast, tab_dashboard = st.tabs(["🏇 レース予想", "📈 実戦成�
 
 with tab_forecast:
     if df_future.empty:
-        st.warning("⚠️ 出馬表データが存在しません。")
+        # エラーが起きている場合はすでに上部でst.errorが表示される設計です
+        st.warning("⚠️ 出馬表データが存在しません。または読み込みに失敗しました。")
     else:
         st.markdown("<div class='section-header'>🎯 予想レースを選択</div>", unsafe_allow_html=True)
         date_options = sorted(df_future['day_label'].unique())
