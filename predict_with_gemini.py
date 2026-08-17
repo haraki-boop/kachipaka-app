@@ -74,9 +74,9 @@ if 'selected_race_id' not in st.session_state:
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 
-HISTORY_CSV = "prediction_history.csv"
-FUTURE_CSV = "future_races.csv"
-ML_TARGET_CSV = "ml_target_data.csv"
+FUTURE_CSV = os.path.normpath("future_races.csv")
+HISTORY_CSV = os.path.normpath("prediction_history.csv")
+ML_TARGET_CSV = os.path.normpath("ml_target_data.csv")
 
 # ------------------------------------------
 # 🧹 馬名照合用の厳密な正規化関数
@@ -84,7 +84,6 @@ ML_TARGET_CSV = "ml_target_data.csv"
 def clean_horse_name(name):
     if pd.isna(name): return ""
     s = unicodedata.normalize('NFKC', str(name))
-    # 全角・半角記号や空白をすべて排除
     return re.sub(r'[\s\u3000\cdot・.\-ー_]+', '', s).strip()
 
 # ==========================================
@@ -104,24 +103,24 @@ def load_model():
 @st.cache_data
 def load_past_data():
     if os.path.exists(ML_TARGET_CSV) and os.path.getsize(ML_TARGET_CSV) > 0:
-        for enc in ['utf-8-sig', 'cp932', 'utf-8', 'shift_jis']:
+        for enc in ['utf-8-sig', 'utf-8', 'cp932', 'shift_jis']:
             try:
-                df = pd.read_csv(ML_TARGET_CSV, low_memory=False, dtype={'race_id': str}, encoding=enc)
+                df = pd.read_csv(ML_TARGET_CSV, low_memory=False, dtype={'race_id': str}, encoding=enc, engine='python')
                 if 'date' in df.columns: df = df.sort_values(by='date')
                 if '馬名' in df.columns: df['馬名_clean'] = df['馬名'].astype(str).apply(clean_horse_name)
                 return df
-            except: continue
+            except Exception:
+                continue
     return pd.DataFrame()
 
 def load_future_data():
     if os.path.exists(FUTURE_CSV) and os.path.getsize(FUTURE_CSV) > 0:
-        for enc in ['utf-8-sig', 'cp932', 'utf-8', 'shift_jis']:
+        for enc in ['utf-8-sig', 'utf-8', 'cp932', 'shift_jis']:
             try:
-                df = pd.read_csv(FUTURE_CSV, dtype={'race_id': str}, encoding=enc)
+                df = pd.read_csv(FUTURE_CSV, dtype={'race_id': str}, encoding=enc, engine='python')
                 if df.empty:
                     continue
 
-                # race_id の文字列化・ゼロ埋め補正 (12桁)
                 if 'race_id' in df.columns:
                     df['race_id'] = df['race_id'].astype(str).str.zfill(12)
                     PLACE_MAP_REV = {
@@ -131,7 +130,6 @@ def load_future_data():
                     df['place_code'] = df['race_id'].str[4:6]
                     df['place_name'] = df['place_code'].map(PLACE_MAP_REV).fillna("開催場")
                     
-                    # r_num の安全な数値変換
                     r_str = df['race_id'].str[10:12]
                     df['r_num'] = pd.to_numeric(r_str, errors='coerce').fillna(1).astype(int)
                 
@@ -143,29 +141,27 @@ def load_future_data():
                 if '馬名' in df.columns:
                     df['馬名_clean'] = df['馬名'].astype(str).apply(clean_horse_name)
 
-                # 日付カラムの安全取得
                 if 'date' in df.columns:
                     df['day_label'] = df['date'].astype(str)
                 else:
                     df['day_label'] = "当日"
 
                 return df
-            except Exception as e:
-                # デバッグ用エラー出力
-                st.sidebar.error(f"CSV読込エラー ({enc}): {e}")
+            except Exception:
                 continue
     return pd.DataFrame()
 
 def load_history_data():
     if os.path.exists(HISTORY_CSV) and os.path.getsize(HISTORY_CSV) > 0:
-        try: df = pd.read_csv(HISTORY_CSV, dtype={'race_id': str, 'honmei_umaban': str, 'partners': str}, encoding='utf-8-sig')
-        except:
-            try: df = pd.read_csv(HISTORY_CSV, dtype={'race_id': str, 'honmei_umaban': str, 'partners': str}, encoding='cp932')
-            except: return pd.DataFrame()
-        if 'partners' not in df.columns: df['partners'] = ""
-        for col in ['pay_sanrenpuku', 'pay_sanrentan_axis', 'pay_sanrentan_form']:
-            if col not in df.columns: df[col] = 0
-        return df
+        for enc in ['utf-8-sig', 'utf-8', 'cp932', 'shift_jis']:
+            try:
+                df = pd.read_csv(HISTORY_CSV, dtype={'race_id': str, 'honmei_umaban': str, 'partners': str}, encoding=enc, engine='python')
+                if 'partners' not in df.columns: df['partners'] = ""
+                for col in ['pay_sanrenpuku', 'pay_sanrentan_axis', 'pay_sanrentan_form']:
+                    if col not in df.columns: df[col] = 0
+                return df
+            except Exception:
+                continue
     return pd.DataFrame(columns=['date', 'race_id', 'race_name', 'honmei_umaban', 'partners', 'honmei_name', 'result_pay', 'pay_sanrenpuku', 'pay_sanrentan_axis', 'pay_sanrentan_form'])
 
 model_data = load_model()
@@ -192,13 +188,12 @@ def build_past_horse_dict(df_p):
         
         last_row = group.iloc[-1]
         
-        # 指数データを実数値で安全に取得
+        # 実数値データのみを取得
         time_vals = pd.to_numeric(group.get('my_time_idx', pd.Series()), errors='coerce').dropna()
         l3f_vals = pd.to_numeric(group.get('my_last3f_idx', pd.Series()), errors='coerce').dropna()
         pace_vals = pd.to_numeric(group.get('my_pace_idx', pd.Series()), errors='coerce').dropna()
         start_vals = pd.to_numeric(group.get('my_start_idx', pd.Series()), errors='coerce').dropna()
         
-        # 存在する走数分だけで正確に平均を算出
         t3 = time_vals.tail(3).mean() if not time_vals.empty else np.nan
         l3 = l3f_vals.tail(3).mean() if not l3f_vals.empty else np.nan
         p3 = pace_vals.tail(3).mean() if not pace_vals.empty else np.nan
@@ -339,7 +334,7 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     def get_past_stat(horse_clean, key):
         return past_dict.get(horse_clean, {}).get(key, np.nan)
     
-    # 実数値データのみを取得（架空の穴埋め値は一切排除）
+    # 実数値データのみを取得（架空の補正値は一切排除）
     race_df['recent3_time_idx'] = race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'recent3_time_idx'))
     race_df['recent3_last3f_idx'] = race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'recent3_last3f_idx'))
     race_df['recent3_pace_idx'] = race_df['馬名_clean'].apply(lambda x: get_past_stat(x, 'recent3_pace_idx'))
