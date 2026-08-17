@@ -13,7 +13,7 @@ from google import genai
 from google.genai import types
 
 # ==========================================
-# 🎨 アプリの基本設定とカスタムCSS
+# 🎨 アプリの基本設定とカスタムCSS（元の美しいデザインを完全維持）
 # ==========================================
 st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="🐴", layout="wide")
 
@@ -27,10 +27,32 @@ st.markdown("""
         margin-top: 1rem; margin-bottom: 1rem;
         border-bottom: 2px solid #ecf0f1; padding-bottom: 5px;
     }
+    .table-container {
+        width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch;
+        margin-bottom: 20px; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    }
+    .kachi-table {
+        width: 100%; border-collapse: collapse; margin-bottom: 0;
+        font-family: 'Helvetica Neue', Arial, sans-serif; background-color: #ffffff; white-space: nowrap;
+    }
+    .kachi-table thead tr { background: #fdfdfd; color: #2c3e50; font-weight: bold; border-bottom: 2px solid #eaeaea; }
+    .kachi-table th { padding: 8px 10px; text-align: center; }
+    .kachi-table td { padding: 6px 10px; text-align: center; border-bottom: 1px solid #f4f4f4; color: #34495e; }
+    .kachi-table tbody tr:hover td { background: #f9fbfd; }
+    .badge-mark { color: #fff; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 0.85em; display: inline-block; min-width: 60px;}
+    .badge-honmei { background: #e74c3c; }
+    .badge-taikou { background: #3498db; }
+    .badge-tana   { background: #2ecc71; }
+    .badge-renka  { background: #f39c12; }
+    .badge-ana    { background: #9b59b6; }
+    .badge-keshi  { background: #e0e0e0; color: #7f8c8d; }
 
     @media (max-width: 768px) {
         .block-container { padding-top: 1rem; padding-bottom: 1rem; padding-left: 0.5rem; padding-right: 0.5rem; }
+        .kachi-table { font-size: 12px; }
+        .kachi-table th, .kachi-table td { padding: 4px 6px; }
         .section-header { font-size: 1.1rem; }
+        .badge-mark { min-width: 45px; padding: 2px 4px; font-size: 0.75em; }
         h1 { font-size: 1.3rem !important; } 
         h2 { font-size: 1.1rem !important; } 
         .stButton button p { font-size: 0.65rem !important; white-space: nowrap !important; letter-spacing: -0.5px; }
@@ -392,7 +414,7 @@ def calculate_race_scores(race_id_target, target_df, user_condition="良"):
     return race_df
 
 # ==========================================
-# 4. マーカーとソート対応テーブル生成（★ここを改修★）
+# 4. マーカーとHTMLテーブル生成（★元デザイン維持・バッジ付き★）
 # ==========================================
 def get_all_markers():
     markers = {}
@@ -412,38 +434,40 @@ def get_all_markers():
 
 markers = get_all_markers()
 
-def display_sortable_table(disp_df, is_newcomer):
-    show_df = disp_df.copy()
+def generate_beautiful_table(disp_df, is_newcomer):
+    html = "<div class='table-container'>"
+    html += "<table class='kachi-table'>"
+    html += "<thead><tr><th>馬番</th><th style='text-align:left;'>馬名</th><th>騎手</th><th>脚質</th><th>AIスコア</th><th>勝率</th><th>予想オッズ</th><th>期待値</th><th>印</th></tr></thead>"
+    html += "<tbody>"
     
-    # 表示データの型変換とフォーマット処理（数値としてソートできるように数値を保持）
-    show_df['馬番'] = show_df['馬番'].astype(int)
-    show_df['予想オッズ'] = show_df.apply(
-        lambda r: float(pd.to_numeric(r.get('単勝') if pd.notna(r.get('単勝')) else r.get('オッズ', 0), errors='coerce')), axis=1
-    )
-    show_df['勝率'] = (show_df['win_prob'] * 100).round(1)
-    show_df['AIスコア'] = show_df['score_brain1'].astype(int) if not is_newcomer else 0
-    show_df['期待値'] = show_df['ev_brain2'].round(2) if not is_newcomer else 0.0
-    
-    cols = ['馬番', '馬名', '騎手', '脚質', 'AIスコア', '勝率', '予想オッズ', '期待値', '印']
-    view_df = show_df[cols]
-    
-    # Streamlit標準のインターフェースで綺麗にソート可能にする
-    st.dataframe(
-        view_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "馬番": st.column_config.NumberColumn("馬番", format="%02d"),
-            "馬名": st.column_config.TextColumn("馬名"),
-            "騎手": st.column_config.TextColumn("騎手"),
-            "脚質": st.column_config.TextColumn("脚質"),
-            "AIスコア": st.column_config.NumberColumn("AIスコア", format="%d") if not is_newcomer else st.column_config.TextColumn("AIスコア"),
-            "勝率": st.column_config.NumberColumn("勝率", format="%.1f%%"),
-            "予想オッズ": st.column_config.NumberColumn("予想オッズ", format="%.1f倍"),
-            "期待値": st.column_config.NumberColumn("期待値", format="%.2f") if not is_newcomer else st.column_config.TextColumn("期待値"),
-            "印": st.column_config.TextColumn("印")
-        }
-    )
+    for i, r in disp_df.iterrows():
+        ev_val = float(r.get('ev_brain2', 0))
+        raw_o = r.get('単勝') if pd.notna(r.get('単勝')) else r.get('オッズ', 0)
+        odds_val = float(pd.to_numeric(raw_o, errors='coerce')) if pd.notna(raw_o) else 0.0
+        win_prob_val = float(r.get('win_prob', 0))
+        
+        mark = r.get('印', '消')
+        
+        kyakushitsu = r.get('脚質', '-')
+        if pd.isna(kyakushitsu) or str(kyakushitsu).strip() == '': kyakushitsu = '-'
+        
+        badge_cls = "badge-keshi"
+        if "◎" in mark: badge_cls = "badge-honmei"
+        elif "◯" in mark: badge_cls = "badge-taikou"
+        elif "▲" in mark: badge_cls = "badge-tana"
+        elif "△" in mark: badge_cls = "badge-renka"
+        elif "☆" in mark: badge_cls = "badge-ana"
+        
+        score_str = f"<b>{int(r['score_brain1'])}</b>" if not is_newcomer else "-"
+        win_str = f"<b>{win_prob_val*100:.1f}%</b>"
+        odds_str = f"{odds_val:.1f}倍" if odds_val > 0 else "-"
+        ev_str = f"<b>{ev_val:.2f}</b>" if ev_val > 0 and not is_newcomer else "-"
+        mark_html = f"<span class='badge-mark {badge_cls}'>{mark}</span>"
+        
+        html += f"<tr><td style='font-weight:bold; font-size:1.1em; color:#34495e;'>{int(r['馬番']):02d}</td><td style='text-align:left; font-weight:bold; color:#2c3e50;'>{r.get('馬名', '-')}</td><td style='color:#7f8c8d;'>{r.get('騎手', '-')}</td><td style='font-weight:bold; color:#8e44ad;'>{kyakushitsu}</td><td style='color:#2c3e50;'>{score_str}</td><td style='color:#2c3e50;'>{win_str}</td><td style='color:#7f8c8d;'>{odds_str}</td><td style='color:#2c3e50;'>{ev_str}</td><td>{mark_html}</td></tr>"
+        
+    html += "</tbody></table></div>"
+    return html
 
 # ==========================================
 # 5. メインUI
@@ -509,8 +533,29 @@ with tab_forecast:
             if is_newcomer:
                 st.info("🐣 新馬戦のため、過去データが存在せずベースAIスコアは参考値です。Geminiの自力予想に委ねます。")
             
-            # ソート可能なテーブルを出力
-            display_sortable_table(disp_df, is_newcomer)
+            # ★【新機能】元のHTMLデザインを保ったまま、並び替え項目を選べるように改善！
+            sort_option = st.selectbox(
+                "🔄 テーブルの表示順（ソート項目）を選択",
+                ["システム推奨（印順）", "馬番順（昇順）", "AIスコア順（高い順）", "勝率順（高い順）", "予想オッズ順（低い順）", "期待値順（高い順）"],
+                index=0
+            )
+
+            # 選択された条件でDataFrameを並び替え
+            if sort_option == "馬番順（昇順）":
+                disp_df['馬番_num'] = pd.to_numeric(disp_df['馬番'], errors='coerce')
+                disp_df = disp_df.sort_values(by='馬番_num', ascending=True)
+            elif sort_option == "AIスコア順（高い順）":
+                disp_df = disp_df.sort_values(by=['score_brain1', '馬番'], ascending=[False, True])
+            elif sort_option == "勝率順（高い順）":
+                disp_df = disp_df.sort_values(by=['win_prob', '馬番'], ascending=[False, True])
+            elif sort_option == "予想オッズ順（低い順）":
+                disp_df = disp_df.sort_values(by=['単勝_num', '馬番'], ascending=[True, True])
+            elif sort_option == "期待値順（高い順）":
+                disp_df = disp_df.sort_values(by=['ev_brain2', '馬番'], ascending=[False, True])
+            # デフォルトの「システム推奨（印順）」は calculate_race_scores の出力のまま（mark_rank順）
+
+            # 元の美しいHTMLテーブルを出力
+            st.markdown(generate_beautiful_table(disp_df, is_newcomer), unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("🧠 Geminiで最終適正化＆買い目生成", type="primary", use_container_width=True):
@@ -685,7 +730,7 @@ with tab_dashboard:
                     make_ticket_card(ticket_cols1[2], "ワイド", len(finished_df[pd.to_numeric(finished_df['pay_wide'], errors='coerce') > 0]), pd.to_numeric(finished_df['pay_wide'], errors='coerce').sum(), inv_wide)
                     make_ticket_card(ticket_cols2[0], "三連複", len(finished_df[pd.to_numeric(finished_df['pay_sanrenpuku'], errors='coerce') > 0]), pd.to_numeric(finished_df['pay_sanrenpuku'], errors='coerce').sum(), inv_sanrenpuku)
                     make_ticket_card(ticket_cols2[1], "三連単 (1着固定流し)", len(finished_df[pd.to_numeric(finished_df['pay_sanrentan_axis'], errors='coerce') > 0]), pd.to_numeric(finished_df['pay_sanrentan_axis'], errors='coerce').sum(), inv_sanrentan_axis)
-                    make_ticket_card(ticket_cols2[2], "三連単 (ﾌｫｰﾒｰｼｮﾝ)", len(finished_df[pd.to_numeric(finished_df['pay_sanrentan_form'], errors='coerce') > 0]), pd.to_numeric(finished_df['pay_sanrentan_form'], errors='coerce').sum(), inv_sanrentan_form)
+                    make_ticket_card(ticket_cols2[2], "三连単 (ﾌｫｰﾒｰｼｮﾝ)", len(finished_df[pd.to_numeric(finished_df['pay_sanrentan_form'], errors='coerce') > 0]), pd.to_numeric(finished_df['pay_sanrentan_form'], errors='coerce').sum(), inv_sanrentan_form)
 
                 st.markdown("<br>", unsafe_allow_html=True)
             
