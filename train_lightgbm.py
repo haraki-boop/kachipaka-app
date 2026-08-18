@@ -21,7 +21,6 @@ def get_dist_cat(d):
     else: return 'stayer'
 
 def parse_weight(val):
-    """馬体重文字列（例: 480(+4)）から馬体重と増減を抽出"""
     if pd.isna(val): return np.nan, np.nan
     s = str(val).strip()
     m = re.match(r'(\d+)(?:\(([-+]?\d+)\))?', s)
@@ -44,6 +43,15 @@ def preprocess_features(df):
     df_feat['is_top3_past'] = (df_feat['rank_num'] <= 3).astype(int)
     df_feat['is_win_past'] = (df_feat['rank_num'] == 1).astype(int)
 
+    # 1. 着順実績（地力・安定度）特徴量 ★最重要★
+    df_feat['eff_rank_avg'] = df_feat.groupby('馬名_clean')['rank_num'].apply(
+        lambda x: x.shift(1).rolling(3, min_periods=1).mean()
+    ).reset_index(level=0, drop=True)
+    
+    df_feat['eff_top3_rate'] = df_feat.groupby('馬名_clean')['is_top3_past'].apply(
+        lambda x: x.shift(1).rolling(5, min_periods=1).mean()
+    ).reset_index(level=0, drop=True)
+
     # 数値変換
     df_feat['kinryo_num'] = pd.to_numeric(df_feat.get('斤量'), errors='coerce')
     df_feat['wakuban_num'] = pd.to_numeric(df_feat.get('枠番'), errors='coerce')
@@ -53,16 +61,14 @@ def preprocess_features(df):
     weights_parsed = df_feat.get('馬体重', pd.Series()).apply(parse_weight)
     df_feat['body_weight'] = [p[0] for p in weights_parsed]
     df_feat['body_weight_diff'] = [p[1] for p in weights_parsed]
-    # 斤量比（斤量 / 馬体重）
     df_feat['kinryo_body_ratio'] = df_feat['kinryo_num'] / df_feat['body_weight']
 
-    # コースIDの作成（例: 札幌_芝_1800m）
+    # コースIDの作成
     if 'place_code' in df_feat.columns and 'surface' in df_feat.columns:
         df_feat['course_id'] = df_feat['place_code'].astype(str) + "_" + df_feat['surface'].astype(str) + "_" + df_feat['distance_num'].astype(str)
     else:
         df_feat['course_id'] = "default"
 
-    # コース×枠順勝率マップ（コースごとの枠順勝率）
     df_feat['course_frame_id'] = df_feat['course_id'] + "_frame_" + df_feat['wakuban_num'].fillna(0).astype(int).astype(str)
     course_frame_win_rates = df_feat.groupby('course_frame_id')['is_win_past'].mean().to_dict()
     df_feat['course_frame_win_rate'] = df_feat['course_frame_id'].map(course_frame_win_rates).fillna(0.08)
@@ -95,15 +101,12 @@ def preprocess_features(df):
             else:
                 prev_row = past_rows.iloc[-1]
                 
-                # 1. 斤量差（今回 - 前走）
                 prev_kinryo = prev_row['kinryo_num']
                 kinryo_diffs.append(curr_kinryo - prev_kinryo if pd.notna(curr_kinryo) and pd.notna(prev_kinryo) else 0.0)
 
-                # 2. 継続騎乗フラグ（前走と同じ騎手か）
                 prev_jockey = str(prev_row.get('騎手', '')).strip()
                 is_same_jockeys.append(1 if (curr_jockey and curr_jockey == prev_jockey) else 0)
 
-                # 3. 距離差（好走平均との差）
                 top3_past = past_rows[past_rows['is_top3_past'] == 1]
                 if not top3_past.empty and pd.notna(curr_dist):
                     best_dist_avg = top3_past['distance_num'].mean()
@@ -111,13 +114,11 @@ def preprocess_features(df):
                 else:
                     dist_diffs.append(np.nan)
 
-                # 4. 同距離カテゴリ勝率
                 cat_past = past_rows[past_rows['dist_cat'] == curr_cat]
                 c_runs = len(cat_past)
                 cat_runs_list.append(c_runs)
                 cat_win_rates.append(cat_past['is_win_past'].sum() / c_runs if c_runs > 0 else np.nan)
 
-                # 5. 前走賞金（クラス格差の代理指標）
                 prev_prizes.append(pd.to_numeric(prev_row.get('賞金(万円)'), errors='coerce'))
 
     df_feat['kinryo_diff'] = kinryo_diffs
@@ -127,29 +128,25 @@ def preprocess_features(df):
     df_feat['cat_runs'] = cat_runs_list
     df_feat['prev_prize'] = prev_prizes
 
-    # コース×脚質適合度
-    s_vals = pd.to_numeric(df_feat.get('my_start_idx', pd.Series()), errors='coerce')
-    df_feat['eff_my_start_idx'] = s_vals.groupby(df_feat['馬名_clean']).apply(
-        lambda x: x.shift(1).rolling(3, min_periods=1).mean()
-    ).reset_index(level=0, drop=True)
-    
-    course_front_rates = df_feat.groupby('course_id')['is_top3_past'].mean().to_dict()
-    df_feat['course_front_rate'] = df_feat['course_id'].map(course_front_rates).fillna(0.3)
-    df_feat['style_course_fit'] = df_feat['eff_my_start_idx'].fillna(50) * df_feat['course_front_rate']
-
-    # レース間隔
+    # 長期休養判定（180日以上）
     df_feat['interval_days'] = df_feat.groupby('馬名_clean')['date_parsed'].diff().dt.days
+    df_feat['is_long_rest'] = (df_feat['interval_days'] >= 180).astype(int)
 
-    # 近走パフォーマンス
-    target_cols = ['my_time_idx', 'my_last3f_idx', 'my_pace_idx']
+    # 2. 指数のノイズ除去（メディアンとクリッピング）
+    target_cols = ['my_time_idx', 'my_last3f_idx', 'my_pace_idx', 'my_start_idx']
     for col in target_cols:
         if col in df_feat.columns:
-            num_col = pd.to_numeric(df_feat[col], errors='coerce')
+            num_col = pd.to_numeric(df_feat[col], errors='coerce').clip(30, 90)
             df_feat[f'eff_{col}'] = num_col.groupby(df_feat['馬名_clean']).apply(
-                lambda x: x.shift(1).rolling(3, min_periods=1).mean()
+                lambda x: x.shift(1).rolling(3, min_periods=1).median()
             ).reset_index(level=0, drop=True)
         else:
             df_feat[f'eff_{col}'] = np.nan
+
+    # コース×脚質適合度
+    course_front_rates = df_feat.groupby('course_id')['is_top3_past'].mean().to_dict()
+    df_feat['course_front_rate'] = df_feat['course_id'].map(course_front_rates).fillna(0.3)
+    df_feat['style_course_fit'] = df_feat['eff_my_start_idx'].fillna(50) * df_feat['course_front_rate']
 
     df_feat['prev_rank_num'] = df_feat['rank_num'].groupby(df_feat['馬名_clean']).shift(1)
 
@@ -180,16 +177,18 @@ def main():
     df['is_win'] = (pd.to_numeric(df['着順'], errors='coerce') == 1).astype(int)
     df_clean = df.dropna(subset=['is_win']).copy()
     
-    print("Processing ALL features (Distance + Course/Frame + Kinryo + Jockey + Weight + Class)...")
+    print("Processing Features (Focus on Rank Stability & Noise Reduction)...")
     df_prep = preprocess_features(df_clean)
 
     candidate_features = [
+        'eff_rank_avg', 'eff_top3_rate',
         'umaban_num', 'wakuban_num', 'kinryo_num', 'distance_num',
-        'kinryo_diff', 'kinryo_body_ratio', 'body_weight_diff', # 斤量・馬体重系
-        'is_same_jockey', 'course_frame_win_rate', # 騎手継続・枠順適性
-        'dist_diff', 'cat_win_rate', 'cat_runs', # 距離適性
-        'course_front_rate', 'style_course_fit', # コース脚質適合度
-        'interval_days', 'prev_prize', 'prev_rank_num', # クラス・展開系
+        'kinryo_diff', 'kinryo_body_ratio', 'body_weight_diff',
+        'is_same_jockey', 'course_frame_win_rate',
+        'dist_diff', 'cat_win_rate', 'cat_runs',
+        'course_front_rate', 'style_course_fit',
+        'interval_days', 'is_long_rest',
+        'prev_prize', 'prev_rank_num',
         'horse_win_rate_val', 'horse_runs_val',
         'eff_my_time_idx', 'eff_my_last3f_idx', 'eff_my_pace_idx', 'eff_my_start_idx',
         'eff_jockey_win', 'eff_jockey_track_win'
@@ -206,15 +205,16 @@ def main():
     X = df_prep[use_features].copy()
     y = df_prep['is_win']
 
-    print(f"Training LightGBM model for WIN probability with {len(X)} records and {len(use_features)} features...")
+    print(f"Training LightGBM model for STABLE WIN probability with {len(X)} records...")
     
     train_data = lgb.Dataset(X, label=y)
     params = {
         'objective': 'binary',
         'metric': 'binary_logloss',
         'boosting_type': 'gbdt',
-        'learning_rate': 0.05,
-        'num_leaves': 31,
+        'learning_rate': 0.03,
+        'num_leaves': 20,
+        'min_data_in_leaf': 50,
         'verbose': -1,
         'seed': 42
     }

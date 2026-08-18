@@ -58,6 +58,16 @@ def get_dist_cat(d):
     elif d <= 2200: return 'mile_middle'
     else: return 'stayer'
 
+def parse_weight(val):
+    if pd.isna(val): return np.nan, np.nan
+    s = str(val).strip()
+    m = re.match(r'(\d+)(?:\(([-+]?\d+)\))?', s)
+    if m:
+        w = float(m.group(1))
+        diff = float(m.group(2)) if m.group(2) else 0.0
+        return w, diff
+    return np.nan, np.nan
+
 # ==========================================
 # 1. データとモデルの読み込み
 # ==========================================
@@ -81,10 +91,15 @@ def load_data():
                 df_past['distance_num'] = pd.to_numeric(df_past.get('distance'), errors='coerce')
                 df_past['dist_cat'] = df_past['distance_num'].apply(get_dist_cat)
                 df_past['rank_num'] = pd.to_numeric(df_past.get('着順'), errors='coerce')
+                df_past['kinryo_num'] = pd.to_numeric(df_past.get('斤量'), errors='coerce')
+                df_past['wakuban_num'] = pd.to_numeric(df_past.get('枠番'), errors='coerce')
+                
                 if 'place_code' in df_past.columns and 'surface' in df_past.columns:
                     df_past['course_id'] = df_past['place_code'].astype(str) + "_" + df_past['surface'].astype(str) + "_" + df_past['distance_num'].astype(str)
                 else:
                     df_past['course_id'] = "default"
+                
+                df_past['course_frame_id'] = df_past['course_id'] + "_frame_" + df_past['wakuban_num'].fillna(0).astype(int).astype(str)
                 df_past = df_past.sort_values(by='date_parsed')
                 break
             except: pass
@@ -102,10 +117,16 @@ def load_data():
                     df_f['day_label'] = df_f['date'].astype(str).str.strip() if 'date' in df_f.columns else "当日"
                     df_f['distance_num'] = pd.to_numeric(df_f.get('distance'), errors='coerce')
                     df_f['dist_cat'] = df_f['distance_num'].apply(get_dist_cat)
+                    df_f['kinryo_num'] = pd.to_numeric(df_f.get('斤量'), errors='coerce')
+                    df_f['wakuban_num'] = pd.to_numeric(df_f.get('枠番'), errors='coerce')
+                    df_f['umaban_num'] = pd.to_numeric(df_f.get('馬番'), errors='coerce')
+                    
                     if 'place_code' in df_f.columns and 'surface' in df_f.columns:
                         df_f['course_id'] = df_f['place_code'].astype(str) + "_" + df_f['surface'].astype(str) + "_" + df_f['distance_num'].astype(str)
                     else:
                         df_f['course_id'] = "default"
+                    
+                    df_f['course_frame_id'] = df_f['course_id'] + "_frame_" + df_f['wakuban_num'].fillna(0).astype(int).astype(str)
                     df_future = df_f
                     break
             except: pass
@@ -116,21 +137,22 @@ model_data = load_model()
 df_past, df_future = load_data()
 
 # ==========================================
-# 📦 過去データ辞書化（距離適性・脚質適合度付き）
+# 📦 過去データ辞書化（安定度・実績強化）
 # ==========================================
 @st.cache_data
 def build_past_horse_dict(df_p):
-    if df_p.empty: return {}, {}
+    if df_p.empty: return {}, {}, {}
     horse_dict = {}
     for horse, group in df_p.groupby('馬名_clean'):
         if not horse: continue
         last_row = group.iloc[-1]
         
-        t_vals = pd.to_numeric(group.get('my_time_idx', pd.Series()), errors='coerce').dropna()
-        l_vals = pd.to_numeric(group.get('my_last3f_idx', pd.Series()), errors='coerce').dropna()
-        p_vals = pd.to_numeric(group.get('my_pace_idx', pd.Series()), errors='coerce').dropna()
-        s_vals = pd.to_numeric(group.get('my_start_idx', pd.Series()), errors='coerce').dropna()
-        
+        t_vals = pd.to_numeric(group.get('my_time_idx', pd.Series()), errors='coerce').clip(30, 90).dropna()
+        l_vals = pd.to_numeric(group.get('my_last3f_idx', pd.Series()), errors='coerce').clip(30, 90).dropna()
+        p_vals = pd.to_numeric(group.get('my_pace_idx', pd.Series()), errors='coerce').clip(30, 90).dropna()
+        s_vals = pd.to_numeric(group.get('my_start_idx', pd.Series()), errors='coerce').clip(30, 90).dropna()
+        ranks = pd.to_numeric(group.get('rank_num', pd.Series()), errors='coerce').dropna()
+
         top3_rows = group[group['rank_num'] <= 3]
         best_dist_avg = top3_rows['distance_num'].mean() if not top3_rows.empty else np.nan
 
@@ -146,22 +168,26 @@ def build_past_horse_dict(df_p):
 
         horse_dict[horse] = {
             'last_date': last_row['date_parsed'],
+            'last_jockey': str(last_row.get('騎手', '')).strip(),
+            'last_kinryo': last_row['kinryo_num'],
             'prev_prize': pd.to_numeric(last_row.get('賞金(万円)'), errors='coerce'),
             'prev_rank_num': last_row['rank_num'],
             'best_dist_avg': best_dist_avg,
             'cat_stats': cat_stats,
-            'eff_my_time_idx': t_vals.tail(3).mean() if not t_vals.empty else np.nan,
-            'eff_my_last3f_idx': l_vals.tail(3).mean() if not l_vals.empty else np.nan,
-            'eff_my_pace_idx': p_vals.tail(3).mean() if not p_vals.empty else np.nan,
-            'eff_my_start_idx': s_vals.tail(3).mean() if not s_vals.empty else np.nan
+            'eff_rank_avg': ranks.tail(3).mean() if not ranks.empty else np.nan,
+            'eff_top3_rate': (ranks.tail(5) <= 3).mean() if not ranks.empty else np.nan,
+            'eff_my_time_idx': t_vals.tail(3).median() if not t_vals.empty else np.nan,
+            'eff_my_last3f_idx': l_vals.tail(3).median() if not l_vals.empty else np.nan,
+            'eff_my_pace_idx': p_vals.tail(3).median() if not p_vals.empty else np.nan,
+            'eff_my_start_idx': s_vals.tail(3).median() if not s_vals.empty else np.nan
         }
 
-    # コースごとの前残り傾向マップ
     course_front_map = df_p.groupby('course_id')['rank_num'].apply(lambda x: (x <= 3).mean()).to_dict()
+    course_frame_map = df_p.groupby('course_frame_id')['rank_num'].apply(lambda x: (x == 1).mean()).to_dict()
 
-    return horse_dict, course_front_map
+    return horse_dict, course_front_map, course_frame_map
 
-past_dict, course_front_map = build_past_horse_dict(df_past)
+past_dict, course_front_map, course_frame_map = build_past_horse_dict(df_past)
 
 # ==========================================
 # 3. AI推論ロジック
@@ -174,12 +200,32 @@ def calculate_predictions(race_id_target, df_fut, cond):
     model = model_data['model']
     features = model_data['features']
 
-    for col in ['last_date', 'prev_prize', 'prev_rank_num', 'eff_my_time_idx', 'eff_my_last3f_idx', 'eff_my_pace_idx', 'eff_my_start_idx']:
+    target_cols = [
+        'last_date', 'prev_prize', 'prev_rank_num', 
+        'eff_rank_avg', 'eff_top3_rate',
+        'eff_my_time_idx', 'eff_my_last3f_idx',
+        'eff_my_pace_idx', 'eff_my_start_idx'
+    ]
+    for col in target_cols:
         race_df[col] = race_df['馬名_clean'].apply(lambda x: past_dict.get(x, {}).get(col, np.nan))
 
+    weights_parsed = race_df.get('馬体重', pd.Series()).apply(parse_weight)
+    race_df['body_weight'] = [p[0] for p in weights_parsed]
+    race_df['body_weight_diff'] = [p[1] for p in weights_parsed]
+    race_df['kinryo_body_ratio'] = race_df['kinryo_num'] / race_df['body_weight']
+
+    def calc_kinryo_diff(row):
+        p_kinryo = past_dict.get(row['馬名_clean'], {}).get('last_kinryo', np.nan)
+        c_kinryo = row['kinryo_num']
+        return c_kinryo - p_kinryo if pd.notna(c_kinryo) and pd.notna(p_kinryo) else 0.0
+
+    def calc_is_same_jockey(row):
+        p_jockey = past_dict.get(row['馬名_clean'], {}).get('last_jockey', '')
+        c_jockey = str(row.get('騎手', '')).strip()
+        return 1 if (c_jockey and c_jockey == p_jockey) else 0
+
     def calc_dist_diff(row):
-        p_info = past_dict.get(row['馬名_clean'], {})
-        b_avg = p_info.get('best_dist_avg', np.nan)
+        b_avg = past_dict.get(row['馬名_clean'], {}).get('best_dist_avg', np.nan)
         c_dist = row['distance_num']
         return abs(c_dist - b_avg) if pd.notna(b_avg) and pd.notna(c_dist) else np.nan
 
@@ -189,16 +235,19 @@ def calculate_predictions(race_id_target, df_fut, cond):
     def calc_cat_runs(row):
         return past_dict.get(row['馬名_clean'], {}).get('cat_stats', {}).get(row['dist_cat'], {}).get('runs', 0)
 
+    race_df['kinryo_diff'] = race_df.apply(calc_kinryo_diff, axis=1)
+    race_df['is_same_jockey'] = race_df.apply(calc_is_same_jockey, axis=1)
     race_df['dist_diff'] = race_df.apply(calc_dist_diff, axis=1)
     race_df['cat_win_rate'] = race_df.apply(calc_cat_win_rate, axis=1)
     race_df['cat_runs'] = race_df.apply(calc_cat_runs, axis=1)
 
-    # コース×脚質適合度
+    race_df['course_frame_win_rate'] = race_df['course_frame_id'].map(course_frame_map).fillna(0.08)
     race_df['course_front_rate'] = race_df['course_id'].map(course_front_map).fillna(0.3)
     race_df['style_course_fit'] = race_df['eff_my_start_idx'].fillna(50) * race_df['course_front_rate']
 
     race_df['date_parsed_fut'] = pd.to_datetime(race_df['date'], errors='coerce')
     race_df['interval_days'] = (race_df['date_parsed_fut'] - race_df['last_date']).dt.days
+    race_df['is_long_rest'] = (race_df['interval_days'] >= 180).astype(int)
 
     j_col = race_df.get('jockey_win_power', race_df.get('jockey_win_rate', pd.Series()))
     race_df['eff_jockey_win'] = pd.to_numeric(j_col, errors='coerce').clip(0.0, 1.0)
@@ -232,13 +281,17 @@ def calculate_predictions(race_id_target, df_fut, cond):
         st.error(f"モデル予測エラー: {e}")
         return None
 
+    # レース内での確率の正規化（合計を100%にする）
     prob_sum = np.sum(raw_probs)
     if prob_sum > 0:
         race_df['win_prob'] = raw_probs / prob_sum
     else:
         race_df['win_prob'] = 1.0 / len(race_df)
+
     race_df['単勝_num'] = pd.to_numeric(race_df.get('単勝', race_df.get('オッズ', pd.Series())), errors='coerce')
     race_df['人気'] = race_df['単勝_num'].rank(method='min')
+
+    # 素直な期待値算出（AI勝率 × 単勝オッズ）
     race_df['ev'] = race_df['win_prob'] * race_df['単勝_num']
 
     mean_p = race_df['win_prob'].mean()
@@ -260,6 +313,7 @@ def calculate_predictions(race_id_target, df_fut, cond):
     else:
         race_df['脚質'] = "-"
 
+    # スコアで降順ソート
     race_df = race_df.sort_values(by=['ai_score', 'ev'], ascending=[False, False]).reset_index(drop=True)
     race_df['印'] = "消"
     
@@ -269,10 +323,11 @@ def calculate_predictions(race_id_target, df_fut, cond):
     if len(race_df) > 3: race_df.loc[3, '印'] = "△"
     if len(race_df) > 4: race_df.loc[4, '印'] = "△"
     
+    # ☆（穴馬）選出：1.00〜1.20付近の「現実的で旨みのあるゾーン」からスマートピックアップ
     if len(race_df) > 5:
-        ana_candidates = race_df.iloc[5:][race_df['単勝_num'] >= 10.0]
+        ana_candidates = race_df.iloc[5:][(race_df['単勝_num'] >= 8.0) & (race_df['ev'] >= 0.90)]
         if not ana_candidates.empty:
-            ana_idx = ana_candidates['ev'].idxmax()
+            ana_idx = (ana_candidates['ev'] - 1.10).abs().idxmin()
             race_df.loc[ana_idx, '印'] = "☆"
 
     mark_order = {"◎":1, "◯":2, "▲":3, "△":4, "☆":5, "消":6}
@@ -415,7 +470,6 @@ if st.session_state['selected_race_id']:
                 win_val = float(row.get('win_prob', 0)) * 100 if pd.notna(row.get('win_prob')) else 0.0
                 table_summary.append(f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | 脚質:{row.get('脚質', '不明')} | オッズ:{odds_val}倍 | AI勝率:{win_val:.1f}% | 期待値:{ev_val:.2f} | Python印:{row.get('印', '消')}")
 
-            # ★ Geminiプロンプト：3大定性チェック（調教・血統・前走敗因）の徹底深掘り命令
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」の最終意思決定者（Gemini脳）です。
 
