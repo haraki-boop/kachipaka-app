@@ -229,7 +229,7 @@ def calculate_predictions(race_id_target, df_fut, cond):
     return race_df
 
 # ==========================================
-# 4. ベーステーブル生成
+# 4. テーブル生成
 # ==========================================
 def generate_base_table(disp_df, is_newcomer):
     html = "<div class='table-container'><table class='kachi-table'>"
@@ -259,7 +259,6 @@ def generate_base_table(disp_df, is_newcomer):
     html += "</table></div>"
     return html
 
-# ★ Gemini融合版テーブル生成
 def generate_fusion_table(merged_df, is_newcomer):
     html = "<div class='table-container'><table class='kachi-table'>"
     html += "<tr><th>馬番</th><th style='text-align:left;'>馬名</th><th>AIｽｺア</th><th>AI勝率</th><th>期待値</th><th>Python印</th><th>Gemini印</th><th style='text-align:left;'>Gemini短評</th></tr>"
@@ -348,7 +347,7 @@ if st.session_state['selected_race_id']:
             st.markdown(generate_base_table(res_df, is_newcomer), unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("🧠 表にGeminiの見解を組み込む＆買い目生成", type="primary", use_container_width=True):
+        if st.button("🧠 定性データを検索し、表を最強アップデートする", type="primary", use_container_width=True):
             if not GEMINI_API_KEY:
                 st.error("【設定エラー】APIキーが見つかりません。")
                 st.stop()
@@ -363,40 +362,48 @@ if st.session_state['selected_race_id']:
                 win_val = float(row.get('win_prob', 0)) * 100 if pd.notna(row.get('win_prob')) else 0.0
                 table_summary.append(f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | 脚質:{row.get('脚質', '不明')} | オッズ:{odds_val}倍 | AI勝率:{win_val:.1f}% | 期待値:{ev_val:.2f} | Python印:{row.get('印', '消')}")
 
-            # ★ カンニング防止指示を追加
+            # ★ Geminiへの指示を「Pythonデータ×定性検索の融合」に特化
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」の最終意思決定者（Gemini脳）です。
-【重要】あなたは現在、レース前の時点にいます。インターネット検索などで実際のレース結果を知ることはできません。絶対に与えられた事前データのみから推論してください。
 
-Pythonが算出したデータ（AI勝率や期待値など）と、あなた自身の推論（血統、展開、馬場適性など）を組み合わせ、全馬の評価を行ってください。
-必ず以下のJSONフォーマットのみで出力してください（マークダウンの ```json などは絶対に入れないでください）。
+【あなたの役割とワークフロー】
+1. まず、提供された「Pythonが算出したベース予測データ（AI勝率、期待値、Python印）」を確認してください。
+2. 次に、Google検索ツールを駆使して、Pythonの定量データだけでは測れない「定性的な補足データ（血統の馬場適性、最新の追い切りタイム、陣営の勝負気配コメントなど）」を積極的に収集してください。
+3. Pythonの定量データと、あなたが検索した定性データを掛け合わせ、総合的に判断したあなたの最終評価（Gemini印と短評）を下してください。
+
+【重要：カンニング絶対禁止ルール】
+現在、過去のレースを用いてモデルの精度検証を行っています。そのため【実際のレース結果（着順・配当など）を検索してカンニングすること】は絶対に禁止です。あくまで「レース発走前の事前情報」のみを検索して評価を構成してください。
+
+【出力フォーマット】
+テキストによる解説は一切不要です。必ず以下のJSON形式のみで出力してください（マークダウンの ```json などは絶対に入れないでください）。
 
 {{
   "evaluations": [
-    {{"馬番": 1, "Gemini印": "◎", "短評": "展開向く。本命視。"}},
-    {{"馬番": 2, "Gemini印": "消", "短評": "実績不足で厳しい。"}}
-  ],
-  "summary": "【レース見解】上位拮抗だが展開次第で波乱も... \n【推奨買い目】\n三連複: 1 - 2,3,4\n三連単: 1 -> 2,3 -> 2,3,4"
+    {{"馬番": 1, "Gemini印": "◎", "短評": "Python高評価に加え、調教も抜群"}},
+    {{"馬番": 2, "Gemini印": "消", "短評": "期待値は高いが、血統的に洋芝は不向き"}}
+  ]
 }}
 
 【予想ルール】
 1. 「evaluations」配列には、提供された出走全頭分のデータを含めてください。
 2. 「Gemini印」は ◎, ◯, ▲, △, ☆, 消 のいずれかを必ず使用してください。
-3. 「短評」は15文字以内で、選んだ（または消した）明確な理由を書いてください。
-4. 単勝・馬連などは不要です。推奨買い目は3連複と3連単のみを「summary」内に記載してください。
+3. 「短評」は15文字以内で、Pythonデータと検索情報を融合した明確な理由を簡潔に書いてください。
 """
-            prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R\n【想定馬場状態】: {cond}\n\n出走馬データ:\n{chr(10).join(table_summary)}"
+            prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R\n【想定馬場状態】: {cond}\n\n【Python算定データ】:\n{chr(10).join(table_summary)}"
 
-            with st.spinner("🧠 Geminiがデータを咀嚼し、評価を組み込んでいます..."):
+            with st.spinner("🧠 GeminiがPythonデータを基に定性情報を検索し、表をアップデート中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 res_text = ""
                 for _ in range(3):
                     try:
-                        # ★ tools=[{"googleSearch": {}}] を削除し、物理的に検索ツールを遮断
                         response = client.models.generate_content(
                             model='gemini-2.5-flash', 
                             contents=prompt, 
-                            config=types.GenerateContentConfig(system_instruction=system_instruction, temperature=0.3)
+                            config=types.GenerateContentConfig(
+                                system_instruction=system_instruction, 
+                                temperature=0.3,
+                                tools=[{"googleSearch": {}}]
+                            )
                         )
                         res_text = response.text if response.text else (response.candidates[0].content.parts[0].text if response.candidates else "")
                         if res_text: break
@@ -420,9 +427,7 @@ Pythonが算出したデータ（AI勝率や期待値など）と、あなた自
                                 st.markdown("<div class='section-header'>🔥 Python × Gemini 融合データ</div>", unsafe_allow_html=True)
                                 st.markdown(generate_fusion_table(merged_df, is_newcomer), unsafe_allow_html=True)
                             
-                            st.markdown("### 💡 Geminiの最終見解と推奨買い目")
-                            st.info(gemini_data.get("summary", "見解データを取得できませんでした。"))
-                            
+                            # 履歴保存処理（印から軸と相手を抽出して保存）
                             h_umaban = int(res_df.iloc[0]['馬番'])
                             partners_list = []
                             for item in evals:
@@ -440,7 +445,7 @@ Pythonが算出したデータ（AI勝率や期待値など）と、あなた自
                                 new_record = pd.DataFrame([{'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'race_id': str(t_id), 'race_name': r_name, 'honmei_umaban': h_umaban, 'partners': clean_partners, 'result_pay': ""}])
                                 df_history = pd.concat([df_history, new_record], ignore_index=True)
                                 df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig')
-                            st.success("📝 実戦履歴にGeminiの予想を記録しました！")
+                            st.success("📝 表を最強アップデートし、実戦履歴にGeminiの予想印を記録しました！")
 
                     except json.JSONDecodeError:
                         st.error("Geminiからのデータ解析に失敗しました。もう一度お試しください。")
