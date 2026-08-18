@@ -81,6 +81,10 @@ def load_data():
                 df_past['distance_num'] = pd.to_numeric(df_past.get('distance'), errors='coerce')
                 df_past['dist_cat'] = df_past['distance_num'].apply(get_dist_cat)
                 df_past['rank_num'] = pd.to_numeric(df_past.get('着順'), errors='coerce')
+                if 'place_code' in df_past.columns and 'surface' in df_past.columns:
+                    df_past['course_id'] = df_past['place_code'].astype(str) + "_" + df_past['surface'].astype(str) + "_" + df_past['distance_num'].astype(str)
+                else:
+                    df_past['course_id'] = "default"
                 df_past = df_past.sort_values(by='date_parsed')
                 break
             except: pass
@@ -98,6 +102,10 @@ def load_data():
                     df_f['day_label'] = df_f['date'].astype(str).str.strip() if 'date' in df_f.columns else "当日"
                     df_f['distance_num'] = pd.to_numeric(df_f.get('distance'), errors='coerce')
                     df_f['dist_cat'] = df_f['distance_num'].apply(get_dist_cat)
+                    if 'place_code' in df_f.columns and 'surface' in df_f.columns:
+                        df_f['course_id'] = df_f['place_code'].astype(str) + "_" + df_f['surface'].astype(str) + "_" + df_f['distance_num'].astype(str)
+                    else:
+                        df_f['course_id'] = "default"
                     df_future = df_f
                     break
             except: pass
@@ -108,11 +116,11 @@ model_data = load_model()
 df_past, df_future = load_data()
 
 # ==========================================
-# 📦 過去データ辞書化（距離適性付き）
+# 📦 過去データ辞書化（距離適性・脚質適合度付き）
 # ==========================================
 @st.cache_data
 def build_past_horse_dict(df_p):
-    if df_p.empty: return {}
+    if df_p.empty: return {}, {}
     horse_dict = {}
     for horse, group in df_p.groupby('馬名_clean'):
         if not horse: continue
@@ -126,7 +134,6 @@ def build_past_horse_dict(df_p):
         top3_rows = group[group['rank_num'] <= 3]
         best_dist_avg = top3_rows['distance_num'].mean() if not top3_rows.empty else np.nan
 
-        # カテゴリ別成績
         cat_stats = {}
         for cat_name in ['sprint', 'mile_middle', 'stayer']:
             c_rows = group[group['dist_cat'] == cat_name]
@@ -148,9 +155,13 @@ def build_past_horse_dict(df_p):
             'eff_my_pace_idx': p_vals.tail(3).mean() if not p_vals.empty else np.nan,
             'eff_my_start_idx': s_vals.tail(3).mean() if not s_vals.empty else np.nan
         }
-    return horse_dict
 
-past_dict = build_past_horse_dict(df_past)
+    # コースごとの前残り傾向マップ
+    course_front_map = df_p.groupby('course_id')['rank_num'].apply(lambda x: (x <= 3).mean()).to_dict()
+
+    return horse_dict, course_front_map
+
+past_dict, course_front_map = build_past_horse_dict(df_past)
 
 # ==========================================
 # 3. AI推論ロジック
@@ -163,32 +174,28 @@ def calculate_predictions(race_id_target, df_fut, cond):
     model = model_data['model']
     features = model_data['features']
 
-    # 過去スタッツ紐付け
     for col in ['last_date', 'prev_prize', 'prev_rank_num', 'eff_my_time_idx', 'eff_my_last3f_idx', 'eff_my_pace_idx', 'eff_my_start_idx']:
         race_df[col] = race_df['馬名_clean'].apply(lambda x: past_dict.get(x, {}).get(col, np.nan))
 
-    # 距離適性特徴量の動的算出
     def calc_dist_diff(row):
         p_info = past_dict.get(row['馬名_clean'], {})
         b_avg = p_info.get('best_dist_avg', np.nan)
         c_dist = row['distance_num']
-        if pd.notna(b_avg) and pd.notna(c_dist):
-            return abs(c_dist - b_avg)
-        return np.nan
+        return abs(c_dist - b_avg) if pd.notna(b_avg) and pd.notna(c_dist) else np.nan
 
     def calc_cat_win_rate(row):
-        p_info = past_dict.get(row['馬名_clean'], {})
-        c_cat = row['dist_cat']
-        return p_info.get('cat_stats', {}).get(c_cat, {}).get('win_rate', np.nan)
+        return past_dict.get(row['馬名_clean'], {}).get('cat_stats', {}).get(row['dist_cat'], {}).get('win_rate', np.nan)
 
     def calc_cat_runs(row):
-        p_info = past_dict.get(row['馬名_clean'], {})
-        c_cat = row['dist_cat']
-        return p_info.get('cat_stats', {}).get(c_cat, {}).get('runs', 0)
+        return past_dict.get(row['馬名_clean'], {}).get('cat_stats', {}).get(row['dist_cat'], {}).get('runs', 0)
 
     race_df['dist_diff'] = race_df.apply(calc_dist_diff, axis=1)
     race_df['cat_win_rate'] = race_df.apply(calc_cat_win_rate, axis=1)
     race_df['cat_runs'] = race_df.apply(calc_cat_runs, axis=1)
+
+    # コース×脚質適合度
+    race_df['course_front_rate'] = race_df['course_id'].map(course_front_map).fillna(0.3)
+    race_df['style_course_fit'] = race_df['eff_my_start_idx'].fillna(50) * race_df['course_front_rate']
 
     race_df['date_parsed_fut'] = pd.to_datetime(race_df['date'], errors='coerce')
     race_df['interval_days'] = (race_df['date_parsed_fut'] - race_df['last_date']).dt.days
@@ -389,7 +396,7 @@ if st.session_state['selected_race_id']:
             st.markdown(generate_base_table(res_df, is_newcomer), unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("🧠 定性データを検索し、表を最強アップデートする", type="primary", use_container_width=True):
+        if st.button("🧠 調教・血統・敗因データを検索し、表を最強アップデートする", type="primary", use_container_width=True):
             if not GEMINI_API_KEY:
                 st.error("【設定エラー】APIキーが見つかりません。")
                 st.stop()
@@ -404,13 +411,17 @@ if st.session_state['selected_race_id']:
                 win_val = float(row.get('win_prob', 0)) * 100 if pd.notna(row.get('win_prob')) else 0.0
                 table_summary.append(f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | 脚質:{row.get('脚質', '不明')} | オッズ:{odds_val}倍 | AI勝率:{win_val:.1f}% | 期待値:{ev_val:.2f} | Python印:{row.get('印', '消')}")
 
+            # ★ Geminiプロンプト：3大定性チェック（調教・血統・前走敗因）の徹底深掘り命令
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」の最終意思決定者（Gemini脳）です。
 
-【あなたの役割とワークフロー】
+【あなたの役割と3大定性チェックワークフロー】
 1. まず、提供された「Pythonが算出したベース予測データ（AI勝率、期待値、Python印）」を確認してください。
-2. 次に、Google検索ツールを駆使して、Pythonの定量データだけでは測れない「定性的な補足データ（血統の馬場適性、最新の追い切りタイム、陣営の勝負気配コメントなど）」を積極的に収集してください。
-3. Pythonの定量データと、あなたが検索した定性データを掛け合わせ、総合的に判断したあなたの最終評価（Gemini印と短評）を下してください。
+2. 次に、Google検索ツールを駆使して、各出走馬に関する以下の【3大定性情報】を深掘り検索してください。
+   ①【調教（追い切り状態）】: 前走時と比較した追い切りタイムの向上や坂路/CWでの状態、勝負気配
+   ②【血統（コース/馬場適性）】: 今日のコース・馬場状態（洋芝・ダート・重馬場など）に対する血統的適性
+   ③【前走敗因・不利】: 前走の大敗に明確な理由（直線での不利、不向きな距離/馬場など）があり、今回巻き返せるか
+3. Pythonの定量データと、検索で得た3大定性情報を掛け合わせ、総合的に判断したあなたの最終評価（Gemini印と短評）を下してください。
 
 【重要：カンニング絶対禁止ルール】
 現在、過去のレースを用いてモデルの精度検証を行っています。そのため【実際のレース結果（着順・配当など）を検索してカンニングすること】は絶対に禁止です。あくまで「レース発走前の事前情報」のみを検索して評価を構成してください。
@@ -420,19 +431,19 @@ if st.session_state['selected_race_id']:
 
 {{
   "evaluations": [
-    {{"馬番": 1, "Gemini印": "◎", "短評": "Python高評価に加え、調教も抜群"}},
-    {{"馬番": 2, "Gemini印": "消", "短評": "期待値は高いが、血統的に洋芝は不向き"}}
+    {{"馬番": 1, "Gemini印": "◎", "短評": "調教自己ベスト。血統も洋芝向き"}},
+    {{"馬番": 2, "Gemini印": "☆", "短評": "前走は不完全燃焼。血統一変期待"}}
   ]
 }}
 
 【予想ルール】
 1. 「evaluations」配列には、提供された出走全頭分のデータを含めてください。
 2. 「Gemini印」は ◎, ◯, ▲, △, ☆, 消 のいずれかを必ず使用してください。
-3. 「短評」は15文字以内で、Pythonデータと検索情報を融合した明確な理由を簡潔に書いてください。
+3. 「短評」は15文字以内で、調教・血統・敗因分析に基づく明確な理由を書いてください。
 """
             prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R\n【想定馬場状態】: {cond}\n\n【Python算定データ】:\n{chr(10).join(table_summary)}"
 
-            with st.spinner("🧠 GeminiがPythonデータを基に定性情報を検索し、表をアップデート中..."):
+            with st.spinner("🧠 Geminiが調教・血統・敗因データを検索し、表をアップデート中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 res_text = ""
                 for _ in range(3):
