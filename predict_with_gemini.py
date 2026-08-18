@@ -2,14 +2,11 @@ import os
 import re
 import time
 import json
-import requests
 import pandas as pd
 import numpy as np
 import joblib
 import unicodedata
 import streamlit as st
-from bs4 import BeautifulSoup
-from datetime import datetime
 from google import genai
 from google.genai import types
 
@@ -40,7 +37,6 @@ if 'selected_race_id' not in st.session_state:
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 
 FUTURE_CSV = "future_races.csv"
-HISTORY_CSV = "prediction_history.csv"
 ML_TARGET_CSV = "ml_target_data.csv"
 
 def clean_horse_name(name):
@@ -95,15 +91,10 @@ def load_data():
                     break
             except: pass
 
-    df_hist = pd.DataFrame(columns=['date', 'race_id', 'race_name', 'honmei_umaban', 'partners', 'result_pay'])
-    if os.path.exists(HISTORY_CSV):
-        try: df_hist = pd.read_csv(HISTORY_CSV, dtype=str, encoding='utf-8-sig')
-        except: pass
-
-    return df_past, df_future, df_hist
+    return df_past, df_future
 
 model_data = load_model()
-df_past, df_future, df_history = load_data()
+df_past, df_future = load_data()
 
 # ==========================================
 # 📦 過去データ辞書化
@@ -288,7 +279,7 @@ def generate_fusion_table(merged_df, is_newcomer):
     return html
 
 # ==========================================
-# 5. メインUI (タブ構成)
+# 5. メインUI
 # ==========================================
 st.sidebar.button("🔄 画面リロード", on_click=lambda: st.cache_data.clear(), use_container_width=True)
 
@@ -302,9 +293,9 @@ sel_date = st.radio("開催日", dates, horizontal=True, label_visibility="colla
 day_df = df_future[df_future['day_label'] == sel_date]
 places = day_df['place_name'].unique()
 
-tabs = st.tabs([f"📍 {p}" for p in places])
+place_tabs = st.tabs([f"📍 {p}" for p in places])
 for i, place in enumerate(places):
-    with tabs[i]:
+    with place_tabs[i]:
         place_df = day_df[day_df['place_name'] == place]
         races = sorted(place_df['r_num'].unique())
         cols = st.columns(6)
@@ -362,7 +353,6 @@ if st.session_state['selected_race_id']:
                 win_val = float(row.get('win_prob', 0)) * 100 if pd.notna(row.get('win_prob')) else 0.0
                 table_summary.append(f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | 脚質:{row.get('脚質', '不明')} | オッズ:{odds_val}倍 | AI勝率:{win_val:.1f}% | 期待値:{ev_val:.2f} | Python印:{row.get('印', '消')}")
 
-            # ★ Geminiへの指示を「Pythonデータ×定性検索の融合」に特化
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」の最終意思決定者（Gemini脳）です。
 
@@ -427,80 +417,9 @@ if st.session_state['selected_race_id']:
                                 st.markdown("<div class='section-header'>🔥 Python × Gemini 融合データ</div>", unsafe_allow_html=True)
                                 st.markdown(generate_fusion_table(merged_df, is_newcomer), unsafe_allow_html=True)
                             
-                            # 履歴保存処理（印から軸と相手を抽出して保存）
-                            h_umaban = int(res_df.iloc[0]['馬番'])
-                            partners_list = []
-                            for item in evals:
-                                mark = item.get("Gemini印", "")
-                                ub = str(item.get("馬番", ""))
-                                if not ub.isdigit(): continue
-                                if "◎" in mark:
-                                    h_umaban = int(ub)
-                                elif any(s in mark for s in ["◯", "▲", "△", "☆"]):
-                                    partners_list.append(ub)
-                            
-                            clean_partners = ",".join([p for p in dict.fromkeys(partners_list) if int(p) != h_umaban])
-                            
-                            if df_history.empty or str(t_id) not in df_history['race_id'].astype(str).values:
-                                new_record = pd.DataFrame([{'date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'race_id': str(t_id), 'race_name': r_name, 'honmei_umaban': h_umaban, 'partners': clean_partners, 'result_pay': ""}])
-                                df_history = pd.concat([df_history, new_record], ignore_index=True)
-                                df_history.to_csv(HISTORY_CSV, index=False, encoding='utf-8-sig')
-                            st.success("📝 表を最強アップデートし、実戦履歴にGeminiの予想印を記録しました！")
+                            st.success("📝 表を最強アップデートしました！")
 
                     except json.JSONDecodeError:
                         st.error("Geminiからのデータ解析に失敗しました。もう一度お試しください。")
                 else:
                     st.warning("⚠️ 回答を取得できませんでした。")
-
-# ==========================================
-# 6. ダッシュボード
-# ==========================================
-with tab_dashboard:
-    st.markdown("<div class='section-header'>📈 実戦成績ダッシュボード (3連系検証)</div>", unsafe_allow_html=True)
-    if df_history.empty: 
-        st.info("まだ予想履歴がありません。")
-    else:
-        df_history['result_pay'] = df_history['result_pay'].replace(['None', 'nan', 'NaN', ''], np.nan)
-        df_history['datetime'] = pd.to_datetime(df_history['date'], errors='coerce')
-        df_history['year_month'] = df_history['datetime'].dt.strftime('%Y年%m月')
-        df_history['just_date'] = df_history['datetime'].dt.strftime('%Y-%m-%d')
-        
-        tab_total, tab_month, tab_day = st.tabs(["🏆 総合成績", "📅 月別成績", "📆 日別成績"])
-        
-        def render_dashboard_for_df(raw_df, title_prefix):
-            total_races = len(raw_df)
-            if total_races == 0: return
-            
-            finished_df = raw_df[pd.to_numeric(raw_df['result_pay'], errors='coerce').notna()]
-            pending_df = raw_df[pd.to_numeric(raw_df['result_pay'], errors='coerce').isna()]
-            total = len(finished_df)
-            
-            if total == 0:
-                st.markdown(f"**{title_prefix} 確定レース**: 0 件 （結果待ち: {total_races} 件）")
-                return
-
-            hits = len(finished_df[pd.to_numeric(finished_df['result_pay'], errors='coerce') > 0])
-            returns = pd.to_numeric(finished_df['result_pay'], errors='coerce').sum()
-            
-            invested_total = inv_sanrenpuku = inv_sanrentan_axis = inv_sanrentan_form = 0
-            for _, r in finished_df.iterrows():
-                p_list = [x for x in str(r.get('partners', '')).split(',') if x.strip().isdigit()]
-                p_len = len(p_list)
-                if p_len > 0:
-                    box_count = p_len + 1
-                    if box_count >= 3: inv_sanrenpuku += int(box_count * (box_count - 1) * (box_count - 2) / 6) * 100
-                    if p_len >= 2:
-                        inv_sanrentan_axis += (p_len * (p_len - 1)) * 100
-                        inv_sanrentan_form += (2 * (p_len - 1)) * 100
-            
-            invested_total = inv_sanrenpuku + inv_sanrentan_axis
-            roi_total = (returns / invested_total) * 100 if invested_total > 0 else 0.0
-            profit_total = int(returns - invested_total)
-            
-            st.markdown(f"**{title_prefix} 確定レース**: {total} 件 （結果待ち: {len(pending_df)} 件）")
-            col1, col2, col3 = st.columns(3)
-            col1.metric("🎯 的中率", f"{(hits/total)*100:.1f}%")
-            col2.metric("💰 回収率", f"{roi_total:.1f}%")
-            col3.metric("💴 収支", f"{profit_total:,} 円")
-
-        with tab_total: render_dashboard_for_df(df_history, "総合")
