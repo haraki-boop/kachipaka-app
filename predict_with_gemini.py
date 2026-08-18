@@ -255,7 +255,8 @@ def generate_fusion_table(merged_df, is_newcomer):
     html += "<tr><th>馬番</th><th style='text-align:left;'>馬名</th><th>AIｽｺア</th><th>AI勝率</th><th>期待値</th><th>Python印</th><th>Gemini印</th><th style='text-align:left;'>Gemini短評</th></tr>"
     
     for _, r in merged_df.iterrows():
-        sys_mark = r.get('印_x', r.get('印', '消')) 
+        # 列被りを防ぐために安全に取得
+        sys_mark = r.get('印', '消') 
         gem_mark = r.get('Gemini印', '消')
         sys_cls = get_badge_class(sys_mark)
         gem_cls = get_badge_class(gem_mark)
@@ -407,10 +408,15 @@ if st.session_state['selected_race_id']:
                         evals = gemini_data.get("evaluations", [])
                         eval_df = pd.DataFrame(evals)
                         if not eval_df.empty and '馬番' in eval_df.columns:
-                            eval_df['馬番'] = pd.to_numeric(eval_df['馬番'], errors='coerce')
+                            # ★ここで必要な列だけを抽出して合体させる（列名被りエラーを防止）
+                            eval_df['馬番_num'] = pd.to_numeric(eval_df['馬番'], errors='coerce')
+                            if 'Gemini印' not in eval_df.columns: eval_df['Gemini印'] = '消'
+                            if '短評' not in eval_df.columns: eval_df['短評'] = '-'
+                            eval_df_clean = eval_df[['馬番_num', 'Gemini印', '短評']]
+                            
                             res_df['馬番_num'] = pd.to_numeric(res_df['馬番'], errors='coerce')
                             
-                            merged_df = pd.merge(res_df, eval_df, left_on='馬番_num', right_on='馬番', how='left')
+                            merged_df = pd.merge(res_df, eval_df_clean, on='馬番_num', how='left')
                             
                             table_placeholder.empty()
                             with table_placeholder.container():
