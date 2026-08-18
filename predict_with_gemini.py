@@ -232,7 +232,11 @@ def calculate_predictions(race_id_target, df_fut, cond):
         st.error(f"モデル予測エラー: {e}")
         return None
 
-    race_df['win_prob'] = raw_probs
+    prob_sum = np.sum(raw_probs)
+    if prob_sum > 0:
+        race_df['win_prob'] = raw_probs / prob_sum
+    else:
+        race_df['win_prob'] = 1.0 / len(race_df)
     race_df['単勝_num'] = pd.to_numeric(race_df.get('単勝', race_df.get('オッズ', pd.Series())), errors='coerce')
     race_df['人気'] = race_df['単勝_num'].rank(method='min')
     race_df['ev'] = race_df['win_prob'] * race_df['単勝_num']
