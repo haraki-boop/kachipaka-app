@@ -52,6 +52,12 @@ def get_badge_class(mark):
     elif "☆" in mark: return "badge-ana"
     return "badge-keshi"
 
+def get_dist_cat(d):
+    if pd.isna(d): return np.nan
+    if d <= 1400: return 'sprint'
+    elif d <= 2200: return 'mile_middle'
+    else: return 'stayer'
+
 # ==========================================
 # 1. データとモデルの読み込み
 # ==========================================
@@ -72,6 +78,9 @@ def load_data():
                 df_past = pd.read_csv(ML_TARGET_CSV, low_memory=False, dtype={'race_id': str}, encoding=enc)
                 df_past['馬名_clean'] = df_past['馬名'].astype(str).apply(clean_horse_name)
                 df_past['date_parsed'] = pd.to_datetime(df_past['date'], errors='coerce')
+                df_past['distance_num'] = pd.to_numeric(df_past.get('distance'), errors='coerce')
+                df_past['dist_cat'] = df_past['distance_num'].apply(get_dist_cat)
+                df_past['rank_num'] = pd.to_numeric(df_past.get('着順'), errors='coerce')
                 df_past = df_past.sort_values(by='date_parsed')
                 break
             except: pass
@@ -87,6 +96,8 @@ def load_data():
                     df_f['r_num'] = pd.to_numeric(df_f['race_id'].str[10:12], errors='coerce').fillna(1).astype(int)
                     df_f['馬名_clean'] = df_f['馬名'].astype(str).apply(clean_horse_name)
                     df_f['day_label'] = df_f['date'].astype(str).str.strip() if 'date' in df_f.columns else "当日"
+                    df_f['distance_num'] = pd.to_numeric(df_f.get('distance'), errors='coerce')
+                    df_f['dist_cat'] = df_f['distance_num'].apply(get_dist_cat)
                     df_future = df_f
                     break
             except: pass
@@ -97,7 +108,7 @@ model_data = load_model()
 df_past, df_future = load_data()
 
 # ==========================================
-# 📦 過去データ辞書化
+# 📦 過去データ辞書化（距離適性付き）
 # ==========================================
 @st.cache_data
 def build_past_horse_dict(df_p):
@@ -112,10 +123,26 @@ def build_past_horse_dict(df_p):
         p_vals = pd.to_numeric(group.get('my_pace_idx', pd.Series()), errors='coerce').dropna()
         s_vals = pd.to_numeric(group.get('my_start_idx', pd.Series()), errors='coerce').dropna()
         
+        top3_rows = group[group['rank_num'] <= 3]
+        best_dist_avg = top3_rows['distance_num'].mean() if not top3_rows.empty else np.nan
+
+        # カテゴリ別成績
+        cat_stats = {}
+        for cat_name in ['sprint', 'mile_middle', 'stayer']:
+            c_rows = group[group['dist_cat'] == cat_name]
+            c_runs = len(c_rows)
+            c_wins = (c_rows['rank_num'] == 1).sum()
+            cat_stats[cat_name] = {
+                'runs': c_runs,
+                'win_rate': (c_wins / c_runs) if c_runs > 0 else np.nan
+            }
+
         horse_dict[horse] = {
             'last_date': last_row['date_parsed'],
             'prev_prize': pd.to_numeric(last_row.get('賞金(万円)'), errors='coerce'),
-            'prev_rank_num': pd.to_numeric(last_row.get('着順', last_row.get('prev_rank')), errors='coerce'),
+            'prev_rank_num': last_row['rank_num'],
+            'best_dist_avg': best_dist_avg,
+            'cat_stats': cat_stats,
             'eff_my_time_idx': t_vals.tail(3).mean() if not t_vals.empty else np.nan,
             'eff_my_last3f_idx': l_vals.tail(3).mean() if not l_vals.empty else np.nan,
             'eff_my_pace_idx': p_vals.tail(3).mean() if not p_vals.empty else np.nan,
@@ -136,8 +163,32 @@ def calculate_predictions(race_id_target, df_fut, cond):
     model = model_data['model']
     features = model_data['features']
 
+    # 過去スタッツ紐付け
     for col in ['last_date', 'prev_prize', 'prev_rank_num', 'eff_my_time_idx', 'eff_my_last3f_idx', 'eff_my_pace_idx', 'eff_my_start_idx']:
         race_df[col] = race_df['馬名_clean'].apply(lambda x: past_dict.get(x, {}).get(col, np.nan))
+
+    # 距離適性特徴量の動的算出
+    def calc_dist_diff(row):
+        p_info = past_dict.get(row['馬名_clean'], {})
+        b_avg = p_info.get('best_dist_avg', np.nan)
+        c_dist = row['distance_num']
+        if pd.notna(b_avg) and pd.notna(c_dist):
+            return abs(c_dist - b_avg)
+        return np.nan
+
+    def calc_cat_win_rate(row):
+        p_info = past_dict.get(row['馬名_clean'], {})
+        c_cat = row['dist_cat']
+        return p_info.get('cat_stats', {}).get(c_cat, {}).get('win_rate', np.nan)
+
+    def calc_cat_runs(row):
+        p_info = past_dict.get(row['馬名_clean'], {})
+        c_cat = row['dist_cat']
+        return p_info.get('cat_stats', {}).get(c_cat, {}).get('runs', 0)
+
+    race_df['dist_diff'] = race_df.apply(calc_dist_diff, axis=1)
+    race_df['cat_win_rate'] = race_df.apply(calc_cat_win_rate, axis=1)
+    race_df['cat_runs'] = race_df.apply(calc_cat_runs, axis=1)
 
     race_df['date_parsed_fut'] = pd.to_datetime(race_df['date'], errors='coerce')
     race_df['interval_days'] = (race_df['date_parsed_fut'] - race_df['last_date']).dt.days
@@ -255,7 +306,6 @@ def generate_fusion_table(merged_df, is_newcomer):
     html += "<tr><th>馬番</th><th style='text-align:left;'>馬名</th><th>AIｽｺア</th><th>AI勝率</th><th>期待値</th><th>Python印</th><th>Gemini印</th><th style='text-align:left;'>Gemini短評</th></tr>"
     
     for _, r in merged_df.iterrows():
-        # 列被りを防ぐために安全に取得
         sys_mark = r.get('印', '消') 
         gem_mark = r.get('Gemini印', '消')
         sys_cls = get_badge_class(sys_mark)
@@ -408,7 +458,6 @@ if st.session_state['selected_race_id']:
                         evals = gemini_data.get("evaluations", [])
                         eval_df = pd.DataFrame(evals)
                         if not eval_df.empty and '馬番' in eval_df.columns:
-                            # ★ここで必要な列だけを抽出して合体させる（列名被りエラーを防止）
                             eval_df['馬番_num'] = pd.to_numeric(eval_df['馬番'], errors='coerce')
                             if 'Gemini印' not in eval_df.columns: eval_df['Gemini印'] = '消'
                             if '短評' not in eval_df.columns: eval_df['短評'] = '-'
