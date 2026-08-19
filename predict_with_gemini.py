@@ -11,7 +11,7 @@ from google import genai
 from google.genai import types
 
 # ==========================================
-# 🎨 アプリの基本設定（文字サイズ特大化）
+# 🎨 アプリの基本設定（見やすい特大文字サイズ）
 # ==========================================
 st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="🐴", layout="wide")
 
@@ -73,7 +73,7 @@ def parse_weight(val):
         return w, diff
     return np.nan, np.nan
 
-# 重賞判定フラグ
+# 重賞判定
 def check_is_graded(race_name):
     keywords = ["G1", "G2", "G3", "GⅠ", "GⅡ", "GⅢ", "GI", "GII", "GIII", "J.G1", "J.G2", "J.G3", "重賞"]
     return any(k in str(race_name) for k in keywords)
@@ -370,7 +370,7 @@ def calculate_predictions(race_id_target, df_fut, cond):
     return race_df
 
 # ==========================================
-# 4. テーブル生成（文字サイズ拡大対応）
+# 4. テーブル生成
 # ==========================================
 def generate_base_table(disp_df, is_newcomer):
     html = "<div class='table-container'><table class='kachi-table'>"
@@ -488,35 +488,41 @@ if st.session_state['selected_race_id']:
 
         st.markdown("<br>", unsafe_allow_html=True)
         
-        btn_label = "🏆 重賞深掘り検索（調教・陣営コメント）で表をアップデート" if is_graded else "🏇 馬場傾向・血統適性を検索して表を高速アップデート"
-        
-        if st.button(f"🧠 {btn_label}", type="primary", use_container_width=True):
-            if not GEMINI_API_KEY:
-                st.error("【設定エラー】APIキーが見つかりません。")
-                st.stop()
-            if res_df is None or len(res_df) < 6:
-                st.error("データが不足しているため予想をスキップします。")
-                st.stop()
+        # 重賞のときだけGemini検索＆表アップデートボタンを表示
+        if is_graded:
+            if st.button("🧠 重賞深掘り検索（調教・血統・敗因）で表をアップデートする", type="primary", use_container_width=True):
+                if not GEMINI_API_KEY:
+                    st.error("【設定エラー】APIキーが見つかりません。")
+                    st.stop()
+                if res_df is None or len(res_df) < 6:
+                    st.error("データが不足しているため予想をスキップします。")
+                    st.stop()
 
-            table_summary = []
-            for idx, row in res_df.iterrows():
-                ev_val = float(row.get('ev', 0)) if pd.notna(row.get('ev')) else 0.0
-                odds_val = float(row.get('単勝_num', 0)) if pd.notna(row.get('単勝_num')) else 0.0
-                win_val = float(row.get('win_prob', 0)) * 100 if pd.notna(row.get('win_prob')) else 0.0
-                table_summary.append(f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | 脚質:{row.get('脚質', '不明')} | オッズ:{odds_val}倍 | AI勝率:{win_val:.1f}% | 期待値:{ev_val:.2f} | Python印:{row.get('印', '消')}")
+                table_summary = []
+                for idx, row in res_df.iterrows():
+                    ev_val = float(row.get('ev', 0)) if pd.notna(row.get('ev')) else 0.0
+                    odds_val = float(row.get('単勝_num', 0)) if pd.notna(row.get('単勝_num')) else 0.0
+                    win_val = float(row.get('win_prob', 0)) * 100 if pd.notna(row.get('win_prob')) else 0.0
+                    table_summary.append(f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | 脚質:{row.get('脚質', '不明')} | オッズ:{odds_val}倍 | AI勝率:{win_val:.1f}% | 期待値:{ev_val:.2f} | Python印:{row.get('印', '消')}")
 
-            # ★ 重賞と平場で検索指示（プロンプト）を自動切替 ★
-            if is_graded:
-                # 🏆 重賞モード（全頭深掘り検索）
+                # 従来の最強重賞プロンプト
                 system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」の最終意思決定者（Gemini脳）です。
 
-【役割: 重賞レース全頭深掘りモード】
-1. Google検索を使い、各出走馬の①調教（追い切りタイム・気配）、②血統適性、③前走敗因を深掘り検索してください。
-2. データと定性情報を掛け合わせ、最終的な「Gemini印」と15文字以内の「短評」を出力してください。
+【あなたの役割と3大定性チェックワークフロー】
+1. まず、提供された「Pythonが算出したベース予測データ（AI勝率、期待値、Python印）」を確認してください。
+2. 次に、Google検索ツールを駆使して、各出走馬に関する以下の【3大定性情報】を深掘り検索してください。
+   ①【調教（追い切り状態）】: 前走時と比較した追い切りタイムの向上や坂路/CWでの状態、勝負気配
+   ②【血統（コース/馬場適性）】: 今日のコース・馬場状態（洋芝・ダート・重馬場など）に対する血統的適性
+   ③【前走敗因・不利】: 前走の大敗に明確な理由（直線での不利、不向きな距離/馬場など）があり、今回巻き返せるか
+3. Pythonの定量データと、検索で得た3大定性情報を掛け合わせ、総合的に判断したあなたの最終評価（Gemini印と短評）を下してください。
+
+【重要：カンニング絶対禁止ルール】
+現在、過去のレースを用いてモデルの精度検証を行っています。そのため【実際のレース結果（着順・配当など）を検索してカンニングすること】は絶対に禁止です。あくまで「レース発走前の事前情報」のみを検索して評価を構成してください。
 
 【出力フォーマット】
-JSON形式のみ（マークダウンの ```json などは絶対に入れないでください）。
+テキストによる解説は一切不要です。必ず以下のJSON形式のみで出力してください（マークダウンの ```json などは絶対に入れないでください）。
+
 {{
   "evaluations": [
     {{"馬番": 1, "Gemini印": "◎", "短評": "坂路自己ベスト。洋芝適性高く好勝負"}},
@@ -524,70 +530,53 @@ JSON形式のみ（マークダウンの ```json などは絶対に入れない�
   ]
 }}
 """
-            else:
-                # 🏇 平場モード（馬場傾向＆血統適性・エラー防止重視）
-                system_instruction = f"""
-あなたはプロの競馬分析AI「勝ちぱかくん」の最終意思決定者（Gemini脳）です。
+                prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R 【{r_name}】\n【想定馬場状態】: {cond}\n\n【Python算定データ】:\n{chr(10).join(table_summary)}"
 
-【役割: 平場・条件戦馬場傾向＆血統評価モード】
-1. 今日の「{r_info['place_name']}競馬場」の「{r_info.get('surface', '芝・ダート')}」の「馬場傾向（トラックバイアス: 前残り/内伸び/外差し）」と「上位種牡馬のコース適性」を中心にGoogle検索してください。
-2. 個別馬の重い検索はスキップし、馬場傾向と血統・脚質の一致度から最終評価（Gemini印と15文字以内の短評）を素早く下してください。
-
-【出力フォーマット】
-JSON形式のみ（マークダウンの ```json などは絶対に入れないでください）。
-{{
-  "evaluations": [
-    {{"馬番": 1, "Gemini印": "◎", "短評": "今日の馬場（前残り）と好相性"}},
-    {{"馬番": 2, "Gemini印": "☆", "短評": "父血統のコース適性高く一発"}}
-  ]
-}}
-"""
-
-            prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R 【{r_name}】\n【想定馬場状態】: {cond}\n\n【Python算定データ】:\n{chr(10).join(table_summary)}"
-
-            with st.spinner("🧠 Geminiが馬場傾向・血統・データを検索＆分析し、表をアップデート中..."):
-                client = genai.Client(api_key=GEMINI_API_KEY)
-                res_text = ""
-                for _ in range(3):
-                    try:
-                        response = client.models.generate_content(
-                            model='gemini-2.5-flash', 
-                            contents=prompt, 
-                            config=types.GenerateContentConfig(
-                                system_instruction=system_instruction, 
-                                temperature=0.3,
-                                tools=[{"googleSearch": {}}]
+                with st.spinner("🧠 Geminiが重賞全頭の調教・血統・敗因データを検索＆分析し、表をアップデート中..."):
+                    client = genai.Client(api_key=GEMINI_API_KEY)
+                    res_text = ""
+                    for _ in range(3):
+                        try:
+                            response = client.models.generate_content(
+                                model='gemini-2.5-flash', 
+                                contents=prompt, 
+                                config=types.GenerateContentConfig(
+                                    system_instruction=system_instruction, 
+                                    temperature=0.3,
+                                    tools=[{"googleSearch": {}}]
+                                )
                             )
-                        )
-                        res_text = response.text if response.text else (response.candidates[0].content.parts[0].text if response.candidates else "")
-                        if res_text: break
-                    except: time.sleep(2)
-                    
-                if res_text:
-                    clean_json_text = re.sub(r'^```json\n|```$', '', res_text, flags=re.MULTILINE).strip()
-                    try:
-                        gemini_data = json.loads(clean_json_text)
+                            res_text = response.text if response.text else (response.candidates[0].content.parts[0].text if response.candidates else "")
+                            if res_text: break
+                        except: time.sleep(2)
                         
-                        evals = gemini_data.get("evaluations", [])
-                        eval_df = pd.DataFrame(evals)
-                        if not eval_df.empty and '馬番' in eval_df.columns:
-                            eval_df['馬番_num'] = pd.to_numeric(eval_df['馬番'], errors='coerce')
-                            if 'Gemini印' not in eval_df.columns: eval_df['Gemini印'] = '消'
-                            if '短評' not in eval_df.columns: eval_df['短評'] = '-'
-                            eval_df_clean = eval_df[['馬番_num', 'Gemini印', '短評']]
+                    if res_text:
+                        clean_json_text = re.sub(r'^```json\n|```$', '', res_text, flags=re.MULTILINE).strip()
+                        try:
+                            gemini_data = json.loads(clean_json_text)
                             
-                            res_df['馬番_num'] = pd.to_numeric(res_df['馬番'], errors='coerce')
-                            
-                            merged_df = pd.merge(res_df, eval_df_clean, on='馬番_num', how='left')
-                            
-                            table_placeholder.empty()
-                            with table_placeholder.container():
-                                st.markdown("<div class='section-header'>🔥 Python × Gemini 融合データ</div>", unsafe_allow_html=True)
-                                st.markdown(generate_fusion_table(merged_df, is_newcomer), unsafe_allow_html=True)
-                            
-                            st.success("📝 表を最強アップデートしました！")
+                            evals = gemini_data.get("evaluations", [])
+                            eval_df = pd.DataFrame(evals)
+                            if not eval_df.empty and '馬番' in eval_df.columns:
+                                eval_df['馬番_num'] = pd.to_numeric(eval_df['馬番'], errors='coerce')
+                                if 'Gemini印' not in eval_df.columns: eval_df['Gemini印'] = '消'
+                                if '短評' not in eval_df.columns: eval_df['短評'] = '-'
+                                eval_df_clean = eval_df[['馬番_num', 'Gemini印', '短評']]
+                                
+                                res_df['馬番_num'] = pd.to_numeric(res_df['馬番'], errors='coerce')
+                                
+                                merged_df = pd.merge(res_df, eval_df_clean, on='馬番_num', how='left')
+                                
+                                table_placeholder.empty()
+                                with table_placeholder.container():
+                                    st.markdown("<div class='section-header'>🔥 Python × Gemini 融合データ</div>", unsafe_allow_html=True)
+                                    st.markdown(generate_fusion_table(merged_df, is_newcomer), unsafe_allow_html=True)
+                                
+                                st.success("📝 表を最強アップデートしました！")
 
-                    except json.JSONDecodeError:
-                        st.error("❌ Geminiからのデータ解析に失敗しました。もう一度お試しください。")
-                else:
-                    st.warning("⚠️ 回答を取得できませんでした。")
+                        except json.JSONDecodeError:
+                            st.error("❌ Geminiからのデータ解析に失敗しました。もう一度お試しく​​ださい。")
+                    else:
+                        st.warning("⚠️ 回答を取得できませんでした。")
+        else:
+            st.info("💡 平場・特別戦はPython AIの定量予想データで分析完了です。（Gemini合体は重賞レース限定）")
