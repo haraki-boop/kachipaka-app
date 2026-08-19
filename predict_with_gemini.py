@@ -11,18 +11,22 @@ from google import genai
 from google.genai import types
 
 # ==========================================
-# 🎨 アプリの基本設定
+# 🎨 アプリの基本設定（文字サイズ特大化）
 # ==========================================
 st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="🐴", layout="wide")
 
 st.markdown("""
 <style>
     .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
-    .section-header { font-size: 1.3rem; font-weight: bold; color: #2c3e50; margin: 1rem 0; border-bottom: 2px solid #ecf0f1; padding-bottom: 5px; }
-    .kachi-table { width: 100%; border-collapse: collapse; background-color: #ffffff; white-space: nowrap; font-size: 14px; }
-    .kachi-table th { padding: 8px; text-align: center; background: #fdfdfd; border-bottom: 2px solid #eaeaea; }
-    .kachi-table td { padding: 8px; text-align: center; border-bottom: 1px solid #f4f4f4; }
-    .badge-mark { color: #fff; padding: 4px 8px; border-radius: 4px; font-weight: bold; display: inline-block; min-width: 50px;}
+    .section-header { font-size: 1.5rem; font-weight: bold; color: #2c3e50; margin: 1.2rem 0; border-bottom: 2px solid #ecf0f1; padding-bottom: 6px; }
+    
+    /* 📊 テーブルの文字・余白を特大化 */
+    .kachi-table { width: 100%; border-collapse: collapse; background-color: #ffffff; white-space: nowrap; font-size: 17px; }
+    .kachi-table th { padding: 12px 10px; text-align: center; background: #f8f9fa; border-bottom: 2px solid #dee2e6; font-size: 17px; font-weight: bold; }
+    .kachi-table td { padding: 12px 10px; text-align: center; border-bottom: 1px solid #f1f3f5; font-size: 17px; }
+    
+    /* 🏷️ 印バッジのサイズ拡大 */
+    .badge-mark { color: #fff; padding: 6px 12px; border-radius: 6px; font-weight: bold; display: inline-block; min-width: 60px; font-size: 16px; }
     .badge-honmei { background: #e74c3c; } .badge-taikou { background: #3498db; }
     .badge-tana { background: #2ecc71; } .badge-renka { background: #f39c12; }
     .badge-ana { background: #9b59b6; } .badge-keshi { background: #e0e0e0; color: #7f8c8d; }
@@ -69,8 +73,13 @@ def parse_weight(val):
         return w, diff
     return np.nan, np.nan
 
+# 重賞判定フラグ
+def check_is_graded(race_name):
+    keywords = ["G1", "G2", "G3", "GⅠ", "GⅡ", "GⅢ", "GI", "GII", "GIII", "J.G1", "J.G2", "J.G3", "重賞"]
+    return any(k in str(race_name) for k in keywords)
+
 # ==========================================
-# 1. データとモデルの読み込み（エラー検知強化）
+# 1. データとモデルの読み込み
 # ==========================================
 @st.cache_resource
 def load_model():
@@ -80,7 +89,7 @@ def load_model():
             try: 
                 return joblib.load(m_name), None
             except Exception as e:
-                return None, f"モデルファイル '{m_name}' の読み込み中にエラーが発生しました: {e}"
+                return None, f"モデルファイル '{m_name}' の読み込みエラー: {e}"
     return None, f"モデルファイル ({', '.join(model_paths)}) が見つかりません。"
 
 @st.cache_data
@@ -143,11 +152,9 @@ def load_data():
 
     return df_past, df_future, past_error, future_error
 
-# モデルとデータのロード＆エラー判定
 model_data, model_err = load_model()
 df_past, df_future, past_err, future_err = load_data()
 
-# ❌ エラーチェックと表示
 if model_err:
     st.error(f"❌ 【モデルエラー】 {model_err}")
     st.stop()
@@ -157,7 +164,7 @@ if future_err:
     st.stop()
 
 if past_err:
-    st.warning(f"⚠️ 【過去データ警告】 {past_err} （精度が下がる可能性があります）")
+    st.warning(f"⚠️ 【過去データ警告】 {past_err}")
 
 # ==========================================
 # 2. 過去データ辞書化
@@ -217,14 +224,9 @@ past_dict, course_front_map, course_frame_map = build_past_horse_dict(df_past)
 # 3. AI推論ロジック
 # ==========================================
 def calculate_predictions(race_id_target, df_fut, cond):
-    if df_fut.empty or model_data is None: 
-        st.error("❌ 出馬表または学習済みモデルが存在しないため計算できません。")
-        return None
-        
+    if df_fut.empty or model_data is None: return None
     race_df = df_fut[df_fut['race_id'].astype(str) == str(race_id_target)].copy()
-    if race_df.empty: 
-        st.error(f"❌ 指定されたレースID '{race_id_target}' の出走馬データが見つかりませんでした。")
-        return None
+    if race_df.empty: return None
 
     model = model_data['model']
     features = model_data['features']
@@ -307,7 +309,7 @@ def calculate_predictions(race_id_target, df_fut, cond):
     try:
         raw_probs = model.predict(X_num)
     except Exception as e:
-        st.error(f"❌ モデルによる計算中にエラーが発生しました: {e}")
+        st.error(f"❌ モデル予測エラー: {e}")
         return None
 
     race_df['単勝_num'] = pd.to_numeric(race_df.get('単勝', race_df.get('オッズ', pd.Series())), errors='coerce').fillna(10.0)
@@ -368,7 +370,7 @@ def calculate_predictions(race_id_target, df_fut, cond):
     return race_df
 
 # ==========================================
-# 4. テーブル生成
+# 4. テーブル生成（文字サイズ拡大対応）
 # ==========================================
 def generate_base_table(disp_df, is_newcomer):
     html = "<div class='table-container'><table class='kachi-table'>"
@@ -421,7 +423,7 @@ def generate_fusion_table(merged_df, is_newcomer):
         html += f"<td>{ev_str}</td>"
         html += f"<td><span class='badge-mark {sys_cls}'>{sys_mark}</span></td>"
         html += f"<td><span class='badge-mark {gem_cls}'>{gem_mark}</span></td>"
-        html += f"<td style='text-align:left; font-size:13px; color:#555;'>{r.get('短評', '-')}</td>"
+        html += f"<td style='text-align:left; font-size:15px; color:#444;'>{r.get('短評', '-')}</td>"
         html += f"</tr>"
     html += "</table></div>"
     return html
@@ -459,8 +461,11 @@ if st.session_state['selected_race_id']:
     r_info = t_rows.iloc[0]
     r_name = r_info.get('race_name', '')
     is_newcomer = "新馬" in str(r_name)
+    is_graded = check_is_graded(r_name) # 重賞フラグ判定
+    
     st.markdown("---")
-    st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{r_name}】</h2>", unsafe_allow_html=True)
+    race_tag = "🏆【重賞】" if is_graded else "🏇【平場・特別】"
+    st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{r_name}】{race_tag}</h2>", unsafe_allow_html=True)
     
     cond = st.radio("想定馬場", ["良", "稍重", "重", "不良"], horizontal=True)
     
@@ -482,7 +487,10 @@ if st.session_state['selected_race_id']:
             st.markdown(generate_base_table(res_df, is_newcomer), unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("🧠 調教・血統・敗因データを検索し、表を最強アップデートする", type="primary", use_container_width=True):
+        
+        btn_label = "🏆 重賞深掘り検索（調教・陣営コメント）で表をアップデート" if is_graded else "🏇 馬場傾向・血統適性を検索して表を高速アップデート"
+        
+        if st.button(f"🧠 {btn_label}", type="primary", use_container_width=True):
             if not GEMINI_API_KEY:
                 st.error("【設定エラー】APIキーが見つかりません。")
                 st.stop()
@@ -497,38 +505,47 @@ if st.session_state['selected_race_id']:
                 win_val = float(row.get('win_prob', 0)) * 100 if pd.notna(row.get('win_prob')) else 0.0
                 table_summary.append(f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | 脚質:{row.get('脚質', '不明')} | オッズ:{odds_val}倍 | AI勝率:{win_val:.1f}% | 期待値:{ev_val:.2f} | Python印:{row.get('印', '消')}")
 
-            system_instruction = f"""
+            # ★ 重賞と平場で検索指示（プロンプト）を自動切替 ★
+            if is_graded:
+                # 🏆 重賞モード（全頭深掘り検索）
+                system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」の最終意思決定者（Gemini脳）です。
 
-【あなたの役割と3大定性チェックワークフロー】
-1. まず、提供された「Pythonが算出したベース予測データ（AI勝率、期待値、Python印）」を確認してください。
-2. 次に、Google検索ツールを駆使して、各出走馬に関する以下の【3大定性情報】を深掘り検索してください。
-   ①【調教（追い切り状態）】: 前走時と比較した追い切りタイムの向上や坂路/CWでの状態、勝負気配
-   ②【血統（コース/馬場適性）】: 今日のコース・馬場状態（洋芝・ダート・重馬場など）に対する血統的適性
-   ③【前走敗因・不利】: 前走の大敗に明確な理由（直線での不利、不向きな距離/馬場など）があり、今回巻き返せるか
-3. Pythonの定量データと、検索で得た3大定性情報を掛け合わせ、総合的に判断したあなたの最終評価（Gemini印と短評）を下してください。
-
-【重要：カンニング絶対禁止ルール】
-現在、過去のレースを用いてモデルの精度検証を行っています。そのため【実際のレース結果（着順・配当など）を検索してカンニングすること】は絶対に禁止です。あくまで「レース発走前の事前情報」のみを検索して評価を構成してください。
+【役割: 重賞レース全頭深掘りモード】
+1. Google検索を使い、各出走馬の①調教（追い切りタイム・気配）、②血統適性、③前走敗因を深掘り検索してください。
+2. データと定性情報を掛け合わせ、最終的な「Gemini印」と15文字以内の「短評」を出力してください。
 
 【出力フォーマット】
-テキストによる解説は一切不要です。必ず以下のJSON形式のみで出力してください（マークダウンの ```json などは絶対に入れないでください）。
-
+JSON形式のみ（マークダウンの ```json などは絶対に入れないでください）。
 {{
   "evaluations": [
-    {{"馬番": 1, "Gemini印": "◎", "短評": "調教自己ベスト。血統も洋芝向き"}},
-    {{"馬番": 2, "Gemini印": "☆", "短評": "前走は不完全燃焼。血統一変期待"}}
+    {{"馬番": 1, "Gemini印": "◎", "短評": "坂路自己ベスト。洋芝適性高く好勝負"}},
+    {{"馬番": 2, "Gemini印": "☆", "短評": "前走直線詰まる。巻き返し期待"}}
   ]
 }}
-
-【予想ルール】
-1. 「evaluations」配列には、提供された出走全頭分のデータを含めてください。
-2. 「Gemini印」は ◎, ◯, ▲, △, ☆, 消 のいずれかを必ず使用してください。
-3. 「短評」は15文字以内で、調教・血統・敗因分析に基づく明確な理由を書いてください。
 """
-            prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R\n【想定馬場状態】: {cond}\n\n【Python算定データ】:\n{chr(10).join(table_summary)}"
+            else:
+                # 🏇 平場モード（馬場傾向＆血統適性・エラー防止重視）
+                system_instruction = f"""
+あなたはプロの競馬分析AI「勝ちぱかくん」の最終意思決定者（Gemini脳）です。
 
-            with st.spinner("🧠 Geminiが調教・血統・敗因データを検索し、表をアップデート中..."):
+【役割: 平場・条件戦馬場傾向＆血統評価モード】
+1. 今日の「{r_info['place_name']}競馬場」の「{r_info.get('surface', '芝・ダート')}」の「馬場傾向（トラックバイアス: 前残り/内伸び/外差し）」と「上位種牡馬のコース適性」を中心にGoogle検索してください。
+2. 個別馬の重い検索はスキップし、馬場傾向と血統・脚質の一致度から最終評価（Gemini印と15文字以内の短評）を素早く下してください。
+
+【出力フォーマット】
+JSON形式のみ（マークダウンの ```json などは絶対に入れないでください）。
+{{
+  "evaluations": [
+    {{"馬番": 1, "Gemini印": "◎", "短評": "今日の馬場（前残り）と好相性"}},
+    {{"馬番": 2, "Gemini印": "☆", "短評": "父血統のコース適性高く一発"}}
+  ]
+}}
+"""
+
+            prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R 【{r_name}】\n【想定馬場状態】: {cond}\n\n【Python算定データ】:\n{chr(10).join(table_summary)}"
+
+            with st.spinner("🧠 Geminiが馬場傾向・血統・データを検索＆分析し、表をアップデート中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 res_text = ""
                 for _ in range(3):
@@ -544,7 +561,7 @@ if st.session_state['selected_race_id']:
                         )
                         res_text = response.text if response.text else (response.candidates[0].content.parts[0].text if response.candidates else "")
                         if res_text: break
-                    except: time.sleep(3)
+                    except: time.sleep(2)
                     
                 if res_text:
                     clean_json_text = re.sub(r'^```json\n|```$', '', res_text, flags=re.MULTILINE).strip()
