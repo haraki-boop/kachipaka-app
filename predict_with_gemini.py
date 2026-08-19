@@ -137,7 +137,7 @@ model_data = load_model()
 df_past, df_future = load_data()
 
 # ==========================================
-# 📦 過去データ辞書化（安定度・実績強化）
+# 📦 過去データ辞書化
 # ==========================================
 @st.cache_data
 def build_past_horse_dict(df_p):
@@ -147,10 +147,10 @@ def build_past_horse_dict(df_p):
         if not horse: continue
         last_row = group.iloc[-1]
         
-        t_vals = pd.to_numeric(group.get('my_time_idx', pd.Series()), errors='coerce').clip(30, 90).dropna()
-        l_vals = pd.to_numeric(group.get('my_last3f_idx', pd.Series()), errors='coerce').clip(30, 90).dropna()
-        p_vals = pd.to_numeric(group.get('my_pace_idx', pd.Series()), errors='coerce').clip(30, 90).dropna()
-        s_vals = pd.to_numeric(group.get('my_start_idx', pd.Series()), errors='coerce').clip(30, 90).dropna()
+        t_vals = pd.to_numeric(group.get('my_time_idx', pd.Series()), errors='coerce').clip(40, 80).dropna()
+        l_vals = pd.to_numeric(group.get('my_last3f_idx', pd.Series()), errors='coerce').clip(40, 80).dropna()
+        p_vals = pd.to_numeric(group.get('my_pace_idx', pd.Series()), errors='coerce').clip(40, 80).dropna()
+        s_vals = pd.to_numeric(group.get('my_start_idx', pd.Series()), errors='coerce').clip(40, 80).dropna()
         ranks = pd.to_numeric(group.get('rank_num', pd.Series()), errors='coerce').dropna()
 
         top3_rows = group[group['rank_num'] <= 3]
@@ -175,6 +175,7 @@ def build_past_horse_dict(df_p):
             'best_dist_avg': best_dist_avg,
             'cat_stats': cat_stats,
             'eff_rank_avg': ranks.tail(3).mean() if not ranks.empty else np.nan,
+            'eff_top5_rate': (ranks.tail(5) <= 5).mean() if not ranks.empty else np.nan,
             'eff_top3_rate': (ranks.tail(5) <= 3).mean() if not ranks.empty else np.nan,
             'eff_my_time_idx': t_vals.tail(3).median() if not t_vals.empty else np.nan,
             'eff_my_last3f_idx': l_vals.tail(3).median() if not l_vals.empty else np.nan,
@@ -202,7 +203,7 @@ def calculate_predictions(race_id_target, df_fut, cond):
 
     target_cols = [
         'last_date', 'prev_prize', 'prev_rank_num', 
-        'eff_rank_avg', 'eff_top3_rate',
+        'eff_rank_avg', 'eff_top5_rate', 'eff_top3_rate',
         'eff_my_time_idx', 'eff_my_last3f_idx',
         'eff_my_pace_idx', 'eff_my_start_idx'
     ]
@@ -281,7 +282,7 @@ def calculate_predictions(race_id_target, df_fut, cond):
         st.error(f"モデル予測エラー: {e}")
         return None
 
-    # レース内での確率の正規化（合計を100%にする）
+    # 勝率の正規化
     prob_sum = np.sum(raw_probs)
     if prob_sum > 0:
         race_df['win_prob'] = raw_probs / prob_sum
@@ -291,13 +292,16 @@ def calculate_predictions(race_id_target, df_fut, cond):
     race_df['単勝_num'] = pd.to_numeric(race_df.get('単勝', race_df.get('オッズ', pd.Series())), errors='coerce')
     race_df['人気'] = race_df['単勝_num'].rank(method='min')
 
-    # 素直な期待値算出（AI勝率 × 単勝オッズ）
+    # 期待値算出
     race_df['ev'] = race_df['win_prob'] * race_df['単勝_num']
 
-    mean_p = race_df['win_prob'].mean()
-    std_p = race_df['win_prob'].std()
-    if pd.isna(std_p) or std_p == 0: race_df['ai_score'] = 50
-    else: race_df['ai_score'] = (50 + (race_df['win_prob'] - mean_p) / std_p * 10).round().astype(int)
+    # ★改修：AIスコアを50〜150のダイナミックスケールで分かりやすく表示★
+    p_min = race_df['win_prob'].min()
+    p_max = race_df['win_prob'].max()
+    if pd.notna(p_min) and pd.notna(p_max) and p_max > p_min:
+        race_df['ai_score'] = (50 + (race_df['win_prob'] - p_min) / (p_max - p_min) * 100).round().astype(int)
+    else:
+        race_df['ai_score'] = 100
 
     total_horses = len(race_df)
     if total_horses > 0 and race_df['eff_my_start_idx'].notna().any():
@@ -313,8 +317,8 @@ def calculate_predictions(race_id_target, df_fut, cond):
     else:
         race_df['脚質'] = "-"
 
-    # スコアで降順ソート
-    race_df = race_df.sort_values(by=['ai_score', 'ev'], ascending=[False, False]).reset_index(drop=True)
+    # AIスコア（勝率）の順番だけでソート
+    race_df = race_df.sort_values(by=['ai_score', 'win_prob'], ascending=[False, False]).reset_index(drop=True)
     race_df['印'] = "消"
     
     if len(race_df) > 0: race_df.loc[0, '印'] = "◎"
@@ -323,7 +327,6 @@ def calculate_predictions(race_id_target, df_fut, cond):
     if len(race_df) > 3: race_df.loc[3, '印'] = "△"
     if len(race_df) > 4: race_df.loc[4, '印'] = "△"
     
-    # ☆（穴馬）選出：1.00〜1.20付近の「現実的で旨みのあるゾーン」からスマートピックアップ
     if len(race_df) > 5:
         ana_candidates = race_df.iloc[5:][(race_df['単勝_num'] >= 8.0) & (race_df['ev'] >= 0.90)]
         if not ana_candidates.empty:
@@ -350,7 +353,7 @@ def generate_base_table(disp_df, is_newcomer):
         mark = r.get('印', '消')
         b_cls = get_badge_class(mark)
         
-        score_str = f"<b>{int(r.get('ai_score', 50))}</b>" if not is_newcomer else "-"
+        score_str = f"<b>{int(r.get('ai_score', 100))}</b>" if not is_newcomer else "-"
         win_str = f"{win_prob_val*100:.1f}%" if win_prob_val > 0 else "-"
         ev_str = f"<b>{ev_val:.2f}</b>" if ev_val > 0 and not is_newcomer else "-"
         
@@ -377,7 +380,7 @@ def generate_fusion_table(merged_df, is_newcomer):
         sys_cls = get_badge_class(sys_mark)
         gem_cls = get_badge_class(gem_mark)
         
-        score_str = f"<b>{int(r.get('ai_score', 50))}</b>" if not is_newcomer else "-"
+        score_str = f"<b>{int(r.get('ai_score', 100))}</b>" if not is_newcomer else "-"
         win_prob_val = float(r.get('win_prob', 0)) if pd.notna(r.get('win_prob')) else 0.0
         win_str = f"{win_prob_val*100:.1f}%" if win_prob_val > 0 else "-"
         ev_str = f"<b>{float(r.get('ev', 0)):.2f}</b>" if float(r.get('ev', 0)) > 0 and not is_newcomer else "-"

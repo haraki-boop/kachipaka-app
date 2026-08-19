@@ -43,7 +43,7 @@ def preprocess_features(df):
     df_feat['is_top3_past'] = (df_feat['rank_num'] <= 3).astype(int)
     df_feat['is_win_past'] = (df_feat['rank_num'] == 1).astype(int)
 
-    # 1. 着順実績（地力・安定度）特徴量 ★最重要★
+    # 実績・安定度
     df_feat['eff_rank_avg'] = df_feat.groupby('馬名_clean')['rank_num'].apply(
         lambda x: x.shift(1).rolling(3, min_periods=1).mean()
     ).reset_index(level=0, drop=True)
@@ -52,18 +52,15 @@ def preprocess_features(df):
         lambda x: x.shift(1).rolling(5, min_periods=1).mean()
     ).reset_index(level=0, drop=True)
 
-    # 数値変換
     df_feat['kinryo_num'] = pd.to_numeric(df_feat.get('斤量'), errors='coerce')
     df_feat['wakuban_num'] = pd.to_numeric(df_feat.get('枠番'), errors='coerce')
     df_feat['umaban_num'] = pd.to_numeric(df_feat.get('馬番'), errors='coerce')
 
-    # 馬体重と増減のパース
     weights_parsed = df_feat.get('馬体重', pd.Series()).apply(parse_weight)
     df_feat['body_weight'] = [p[0] for p in weights_parsed]
     df_feat['body_weight_diff'] = [p[1] for p in weights_parsed]
     df_feat['kinryo_body_ratio'] = df_feat['kinryo_num'] / df_feat['body_weight']
 
-    # コースIDの作成
     if 'place_code' in df_feat.columns and 'surface' in df_feat.columns:
         df_feat['course_id'] = df_feat['place_code'].astype(str) + "_" + df_feat['surface'].astype(str) + "_" + df_feat['distance_num'].astype(str)
     else:
@@ -73,7 +70,6 @@ def preprocess_features(df):
     course_frame_win_rates = df_feat.groupby('course_frame_id')['is_win_past'].mean().to_dict()
     df_feat['course_frame_win_rate'] = df_feat['course_frame_id'].map(course_frame_win_rates).fillna(0.08)
 
-    # 時系列処理（馬ごとの過去比較）
     kinryo_diffs = []
     is_same_jockeys = []
     dist_diffs = []
@@ -128,11 +124,9 @@ def preprocess_features(df):
     df_feat['cat_runs'] = cat_runs_list
     df_feat['prev_prize'] = prev_prizes
 
-    # 長期休養判定（180日以上）
     df_feat['interval_days'] = df_feat.groupby('馬名_clean')['date_parsed'].diff().dt.days
     df_feat['is_long_rest'] = (df_feat['interval_days'] >= 180).astype(int)
 
-    # 2. 指数のノイズ除去（メディアンとクリッピング）
     target_cols = ['my_time_idx', 'my_last3f_idx', 'my_pace_idx', 'my_start_idx']
     for col in target_cols:
         if col in df_feat.columns:
@@ -143,14 +137,12 @@ def preprocess_features(df):
         else:
             df_feat[f'eff_{col}'] = np.nan
 
-    # コース×脚質適合度
     course_front_rates = df_feat.groupby('course_id')['is_top3_past'].mean().to_dict()
     df_feat['course_front_rate'] = df_feat['course_id'].map(course_front_rates).fillna(0.3)
     df_feat['style_course_fit'] = df_feat['eff_my_start_idx'].fillna(50) * df_feat['course_front_rate']
 
     df_feat['prev_rank_num'] = df_feat['rank_num'].groupby(df_feat['馬名_clean']).shift(1)
 
-    # 騎手・馬実績
     j_col = df_feat.get('jockey_win_power', df_feat.get('jockey_win_rate', pd.Series()))
     df_feat['eff_jockey_win'] = pd.to_numeric(j_col, errors='coerce').clip(0.0, 1.0)
     df_feat['eff_jockey_track_win'] = pd.to_numeric(df_feat.get('jockey_track_win_rate'), errors='coerce').clip(0.0, 1.0)
@@ -177,7 +169,7 @@ def main():
     df['is_win'] = (pd.to_numeric(df['着順'], errors='coerce') == 1).astype(int)
     df_clean = df.dropna(subset=['is_win']).copy()
     
-    print("Processing Features (Focus on Rank Stability & Noise Reduction)...")
+    print("Processing Features (Strict Rank & Ability Priority)...")
     df_prep = preprocess_features(df_clean)
 
     candidate_features = [
