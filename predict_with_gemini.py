@@ -11,7 +11,7 @@ from google import genai
 from google.genai import types
 
 # ==========================================
-# 🎨 アプリの基本設定（見やすい特大文字サイズ）
+# 🎨 アプリの基本設定
 # ==========================================
 st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="🐴", layout="wide")
 
@@ -19,13 +19,9 @@ st.markdown("""
 <style>
     .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
     .section-header { font-size: 1.5rem; font-weight: bold; color: #2c3e50; margin: 1.2rem 0; border-bottom: 2px solid #ecf0f1; padding-bottom: 6px; }
-    
-    /* 📊 テーブルの文字・余白を特大化 */
     .kachi-table { width: 100%; border-collapse: collapse; background-color: #ffffff; white-space: nowrap; font-size: 17px; }
     .kachi-table th { padding: 12px 10px; text-align: center; background: #f8f9fa; border-bottom: 2px solid #dee2e6; font-size: 17px; font-weight: bold; }
     .kachi-table td { padding: 12px 10px; text-align: center; border-bottom: 1px solid #f1f3f5; font-size: 17px; }
-    
-    /* 🏷️ 印バッジのサイズ拡大 */
     .badge-mark { color: #fff; padding: 6px 12px; border-radius: 6px; font-weight: bold; display: inline-block; min-width: 60px; font-size: 16px; }
     .badge-honmei { background: #e74c3c; } .badge-taikou { background: #3498db; }
     .badge-tana { background: #2ecc71; } .badge-renka { background: #f39c12; }
@@ -216,7 +212,7 @@ def build_past_horse_dict(df_p):
 past_dict, course_front_map, course_frame_map = build_past_horse_dict(df_past)
 
 # ==========================================
-# 3. AI推論ロジック
+# 3. AI推論ロジック（Zスコア動的生成対応）
 # ==========================================
 def calculate_predictions(race_id_target, df_fut, cond):
     if df_fut.empty or model_data is None: return None
@@ -284,6 +280,17 @@ def calculate_predictions(race_id_target, df_fut, cond):
     race_df['condition_code'] = cond
     race_df['condition'] = cond
 
+    # ★出走メンバー内での相対Zスコア生成★
+    rel_cols = ['eff_rank_avg', 'eff_top3_rate', 'prev_prize', 'eff_my_time_idx', 'eff_jockey_win']
+    for c in rel_cols:
+        if c in race_df.columns:
+            s_val = race_df[c].astype(float)
+            s_std = s_val.std()
+            if pd.isna(s_std) or s_std == 0:
+                race_df[f'{c}_z'] = 0.0
+            else:
+                race_df[f'{c}_z'] = (s_val - s_val.mean()) / s_std
+
     X = pd.DataFrame(index=race_df.index)
     for f in features:
         X[f] = race_df[f] if f in race_df.columns else np.nan
@@ -302,23 +309,17 @@ def calculate_predictions(race_id_target, df_fut, cond):
             X_num[col] = pd.to_numeric(X_num[col], errors='coerce')
 
     try:
-        raw_probs = model.predict(X_num)
+        raw_scores = model.predict(X_num) # Lambdarankスコア出力
     except Exception as e:
         st.error(f"❌ モデル予測エラー: {e}")
         return None
 
+    # ソフトマックス変換でスコアを確率に補正
+    exp_scores = np.exp(raw_scores - np.max(raw_scores))
+    race_df['win_prob'] = exp_scores / np.sum(exp_scores)
+
     race_df['単勝_num'] = pd.to_numeric(race_df.get('単勝', race_df.get('オッズ', pd.Series())), errors='coerce').fillna(10.0)
     race_df['人気'] = race_df['単勝_num'].rank(method='min')
-
-    if np.std(raw_probs) < 0.001:
-        implied_probs = (1.0 / race_df['単勝_num'])
-        raw_probs = implied_probs.values
-
-    prob_sum = np.sum(raw_probs)
-    if prob_sum > 0:
-        race_df['win_prob'] = raw_probs / prob_sum
-    else:
-        race_df['win_prob'] = 1.0 / len(race_df)
 
     race_df['ev'] = race_df['win_prob'] * race_df['単勝_num']
 
@@ -480,8 +481,6 @@ if st.session_state['selected_race_id']:
             st.markdown(generate_base_table(res_df, is_newcomer), unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
-        
-        # 全レースで自由に押せるGeminiボタン
         if st.button("🧠 調教・血統・敗因データを検索し、表を最強アップデートする", type="primary", use_container_width=True):
             if not GEMINI_API_KEY:
                 st.error("【設定エラー】APIキーが見つかりません。")
