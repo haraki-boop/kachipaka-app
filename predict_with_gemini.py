@@ -73,11 +73,6 @@ def parse_weight(val):
         return w, diff
     return np.nan, np.nan
 
-# 重賞判定
-def check_is_graded(race_name):
-    keywords = ["G1", "G2", "G3", "GⅠ", "GⅡ", "GⅢ", "GI", "GII", "GIII", "J.G1", "J.G2", "J.G3", "重賞"]
-    return any(k in str(race_name) for k in keywords)
-
 # ==========================================
 # 1. データとモデルの読み込み
 # ==========================================
@@ -461,11 +456,9 @@ if st.session_state['selected_race_id']:
     r_info = t_rows.iloc[0]
     r_name = r_info.get('race_name', '')
     is_newcomer = "新馬" in str(r_name)
-    is_graded = check_is_graded(r_name) # 重賞フラグ判定
     
     st.markdown("---")
-    race_tag = "🏆【重賞】" if is_graded else "🏇【平場・特別】"
-    st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{r_name}】{race_tag}</h2>", unsafe_allow_html=True)
+    st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{r_name}】</h2>", unsafe_allow_html=True)
     
     cond = st.radio("想定馬場", ["良", "稍重", "重", "不良"], horizontal=True)
     
@@ -488,25 +481,23 @@ if st.session_state['selected_race_id']:
 
         st.markdown("<br>", unsafe_allow_html=True)
         
-        # 重賞のときだけGemini検索＆表アップデートボタンを表示
-        if is_graded:
-            if st.button("🧠 重賞深掘り検索（調教・血統・敗因）で表をアップデートする", type="primary", use_container_width=True):
-                if not GEMINI_API_KEY:
-                    st.error("【設定エラー】APIキーが見つかりません。")
-                    st.stop()
-                if res_df is None or len(res_df) < 6:
-                    st.error("データが不足しているため予想をスキップします。")
-                    st.stop()
+        # 全レースで自由に押せるGeminiボタン
+        if st.button("🧠 調教・血統・敗因データを検索し、表を最強アップデートする", type="primary", use_container_width=True):
+            if not GEMINI_API_KEY:
+                st.error("【設定エラー】APIキーが見つかりません。")
+                st.stop()
+            if res_df is None or len(res_df) < 6:
+                st.error("データが不足しているため予想をスキップします。")
+                st.stop()
 
-                table_summary = []
-                for idx, row in res_df.iterrows():
-                    ev_val = float(row.get('ev', 0)) if pd.notna(row.get('ev')) else 0.0
-                    odds_val = float(row.get('単勝_num', 0)) if pd.notna(row.get('単勝_num')) else 0.0
-                    win_val = float(row.get('win_prob', 0)) * 100 if pd.notna(row.get('win_prob')) else 0.0
-                    table_summary.append(f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | 脚質:{row.get('脚質', '不明')} | オッズ:{odds_val}倍 | AI勝率:{win_val:.1f}% | 期待値:{ev_val:.2f} | Python印:{row.get('印', '消')}")
+            table_summary = []
+            for idx, row in res_df.iterrows():
+                ev_val = float(row.get('ev', 0)) if pd.notna(row.get('ev')) else 0.0
+                odds_val = float(row.get('単勝_num', 0)) if pd.notna(row.get('単勝_num')) else 0.0
+                win_val = float(row.get('win_prob', 0)) * 100 if pd.notna(row.get('win_prob')) else 0.0
+                table_summary.append(f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | 脚質:{row.get('脚質', '不明')} | オッズ:{odds_val}倍 | AI勝率:{win_val:.1f}% | 期待値:{ev_val:.2f} | Python印:{row.get('印', '消')}")
 
-                # 従来の最強重賞プロンプト
-                system_instruction = f"""
+            system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」の最終意思決定者（Gemini脳）です。
 
 【あなたの役割と3大定性チェックワークフロー】
@@ -530,53 +521,51 @@ if st.session_state['selected_race_id']:
   ]
 }}
 """
-                prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R 【{r_name}】\n【想定馬場状態】: {cond}\n\n【Python算定データ】:\n{chr(10).join(table_summary)}"
+            prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R 【{r_name}】\n【想定馬場状態】: {cond}\n\n【Python算定データ】:\n{chr(10).join(table_summary)}"
 
-                with st.spinner("🧠 Geminiが重賞全頭の調教・血統・敗因データを検索＆分析し、表をアップデート中..."):
-                    client = genai.Client(api_key=GEMINI_API_KEY)
-                    res_text = ""
-                    for _ in range(3):
-                        try:
-                            response = client.models.generate_content(
-                                model='gemini-2.5-flash', 
-                                contents=prompt, 
-                                config=types.GenerateContentConfig(
-                                    system_instruction=system_instruction, 
-                                    temperature=0.3,
-                                    tools=[{"googleSearch": {}}]
-                                )
+            with st.spinner("🧠 Geminiが調教・血統・敗因データを検索＆分析し、表をアップデート中..."):
+                client = genai.Client(api_key=GEMINI_API_KEY)
+                res_text = ""
+                for _ in range(3):
+                    try:
+                        response = client.models.generate_content(
+                            model='gemini-2.5-flash', 
+                            contents=prompt, 
+                            config=types.GenerateContentConfig(
+                                system_instruction=system_instruction, 
+                                temperature=0.3,
+                                tools=[{"googleSearch": {}}]
                             )
-                            res_text = response.text if response.text else (response.candidates[0].content.parts[0].text if response.candidates else "")
-                            if res_text: break
-                        except: time.sleep(2)
+                        )
+                        res_text = response.text if response.text else (response.candidates[0].content.parts[0].text if response.candidates else "")
+                        if res_text: break
+                    except: time.sleep(2)
+                    
+                if res_text:
+                    clean_json_text = re.sub(r'^```json\n|```$', '', res_text, flags=re.MULTILINE).strip()
+                    try:
+                        gemini_data = json.loads(clean_json_text)
                         
-                    if res_text:
-                        clean_json_text = re.sub(r'^```json\n|```$', '', res_text, flags=re.MULTILINE).strip()
-                        try:
-                            gemini_data = json.loads(clean_json_text)
+                        evals = gemini_data.get("evaluations", [])
+                        eval_df = pd.DataFrame(evals)
+                        if not eval_df.empty and '馬番' in eval_df.columns:
+                            eval_df['馬番_num'] = pd.to_numeric(eval_df['馬番'], errors='coerce')
+                            if 'Gemini印' not in eval_df.columns: eval_df['Gemini印'] = '消'
+                            if '短評' not in eval_df.columns: eval_df['短評'] = '-'
+                            eval_df_clean = eval_df[['馬番_num', 'Gemini印', '短評']]
                             
-                            evals = gemini_data.get("evaluations", [])
-                            eval_df = pd.DataFrame(evals)
-                            if not eval_df.empty and '馬番' in eval_df.columns:
-                                eval_df['馬番_num'] = pd.to_numeric(eval_df['馬番'], errors='coerce')
-                                if 'Gemini印' not in eval_df.columns: eval_df['Gemini印'] = '消'
-                                if '短評' not in eval_df.columns: eval_df['短評'] = '-'
-                                eval_df_clean = eval_df[['馬番_num', 'Gemini印', '短評']]
-                                
-                                res_df['馬番_num'] = pd.to_numeric(res_df['馬番'], errors='coerce')
-                                
-                                merged_df = pd.merge(res_df, eval_df_clean, on='馬番_num', how='left')
-                                
-                                table_placeholder.empty()
-                                with table_placeholder.container():
-                                    st.markdown("<div class='section-header'>🔥 Python × Gemini 融合データ</div>", unsafe_allow_html=True)
-                                    st.markdown(generate_fusion_table(merged_df, is_newcomer), unsafe_allow_html=True)
-                                
-                                st.success("📝 表を最強アップデートしました！")
+                            res_df['馬番_num'] = pd.to_numeric(res_df['馬番'], errors='coerce')
+                            
+                            merged_df = pd.merge(res_df, eval_df_clean, on='馬番_num', how='left')
+                            
+                            table_placeholder.empty()
+                            with table_placeholder.container():
+                                st.markdown("<div class='section-header'>🔥 Python × Gemini 融合データ</div>", unsafe_allow_html=True)
+                                st.markdown(generate_fusion_table(merged_df, is_newcomer), unsafe_allow_html=True)
+                            
+                            st.success("📝 表を最強アップデートしました！")
 
-                        except json.JSONDecodeError:
-                            st.error("❌ Geminiからのデータ解析に失敗しました。もう一度お試しく​​ださい。")
-                    else:
-                        st.warning("⚠️ 回答を取得できませんでした。")
-        else:
-            st.info("💡 平場・特別戦はPython AIの定量予想データで分析完了です。（Gemini合体は重賞レース限定）")
+                    except json.JSONDecodeError:
+                        st.error("❌ Geminiからのデータ解析に失敗しました。もう一度お試しください。")
+                else:
+                    st.warning("⚠️ 回答を取得できませんでした。")
