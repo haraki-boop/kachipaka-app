@@ -21,6 +21,15 @@ def get_dist_cat(d):
     elif d <= 2200: return 'mile_middle'
     else: return 'stayer'
 
+def parse_sex_age(val):
+    if pd.isna(val): return 0, 4.0
+    val = str(val).strip()
+    sex_char = val[0] if len(val) > 0 else '牡'
+    sex_code = 0 if sex_char == '牡' else (1 if sex_char == '牝' else 2)
+    try: age = float(val[1:])
+    except: age = 4.0
+    return sex_code, age
+
 def parse_weight(val):
     if pd.isna(val): return np.nan, np.nan
     s = str(val).strip()
@@ -38,13 +47,18 @@ def preprocess_features(df):
     df_feat['date_parsed'] = pd.to_datetime(df_feat['date'], errors='coerce')
     df_feat = df_feat.dropna(subset=['date_parsed']).sort_values(['馬名_clean', 'date_parsed'])
 
+    # 基本属性（性別・馬齢）
+    sex_age = df_feat['性齢'].apply(parse_sex_age)
+    df_feat['sex_code'] = [s[0] for s in sex_age]
+    df_feat['age'] = [s[1] for s in sex_age]
+
     df_feat['distance_num'] = pd.to_numeric(df_feat.get('distance'), errors='coerce')
     df_feat['dist_cat'] = df_feat['distance_num'].apply(get_dist_cat)
     df_feat['rank_num'] = pd.to_numeric(df_feat.get('着順'), errors='coerce')
     df_feat['is_top3_past'] = (df_feat['rank_num'] <= 3).astype(int)
     df_feat['is_win_past'] = (df_feat['rank_num'] == 1).astype(int)
 
-    # 実績・地力（rollingエラー回避の修正記述）
+    # 過去実績（移動平均）
     df_feat['eff_rank_avg'] = df_feat.groupby('馬名_clean')['rank_num'].apply(
         lambda x: x.shift(1).rolling(3, min_periods=1).mean()
     ).reset_index(level=0, drop=True)
@@ -65,6 +79,16 @@ def preprocess_features(df):
     df_feat['body_weight'] = [p[0] for p in weights_parsed]
     df_feat['body_weight_diff'] = [p[1] for p in weights_parsed]
     df_feat['kinryo_body_ratio'] = df_feat['kinryo_num'] / df_feat['body_weight'].fillna(470)
+
+    # 数値データの型揃え
+    num_cols = [
+        'horse_runs', 'horse_wins', 'horse_win_rate', 'prev_rank',
+        'horse_avg_time_idx', 'horse_avg_last3f_idx', 'horse_avg_pace_idx', 'horse_avg_start_idx',
+        'jockey_runs', 'jockey_wins', 'jockey_win_rate', 'jockey_track_win_rate'
+    ]
+    for c in num_cols:
+        if c in df_feat.columns:
+            df_feat[c] = pd.to_numeric(df_feat[c], errors='coerce')
 
     place_code = df_feat.get('place_code', pd.Series(['00']*len(df_feat)))
     surface = df_feat.get('surface', pd.Series(['芝']*len(df_feat)))
@@ -146,19 +170,24 @@ def preprocess_features(df):
 
     df_feat['prev_rank_num'] = df_feat['rank_num'].groupby(df_feat['馬名_clean']).shift(1)
 
-    j_col = df_feat.get('jockey_win_power', df_feat.get('jockey_win_rate', pd.Series()))
-    df_feat['eff_jockey_win'] = pd.to_numeric(j_col, errors='coerce').fillna(0.1).clip(0.0, 1.0)
-    df_feat['eff_jockey_track_win'] = pd.to_numeric(df_feat.get('jockey_track_win_rate'), errors='coerce').fillna(0.1).clip(0.0, 1.0)
-    df_feat['horse_win_rate_val'] = pd.to_numeric(df_feat.get('horse_win_rate'), errors='coerce').fillna(0.1).clip(0.0, 1.0)
-    df_feat['horse_runs_val'] = pd.to_numeric(df_feat.get('horse_runs'), errors='coerce').fillna(5)
-
-    # レース内相対Zスコア特徴量
-    rel_cols = ['eff_rank_avg', 'eff_top3_rate', 'prev_prize', 'eff_my_time_idx', 'eff_jockey_win']
-    for c in rel_cols:
+    # ★レース内相対特徴量（Zスコア）★
+    z_cols = [
+        'eff_rank_avg', 'eff_top3_rate', 'prev_prize', 'eff_my_time_idx', 
+        'eff_my_last3f_idx', 'jockey_win_rate', 'jockey_track_win_rate',
+        'horse_win_rate', 'horse_avg_time_idx', 'horse_avg_last3f_idx',
+        'age', 'kinryo_num', 'body_weight'
+    ]
+    for c in z_cols:
         if c in df_feat.columns:
             df_feat[f'{c}_z'] = df_feat.groupby('race_id')[c].transform(
                 lambda x: (x - x.mean()) / (x.std() + 1e-5) if len(x) > 1 else 0.0
             ).fillna(0.0)
+
+    # ★レース内メンバー順位特徴量★
+    rank_cols = ['eff_my_time_idx', 'horse_avg_time_idx', 'jockey_win_rate', 'horse_win_rate']
+    for c in rank_cols:
+        if c in df_feat.columns:
+            df_feat[f'{c}_rank_in_race'] = df_feat.groupby('race_id')[c].rank(ascending=False, method='min')
 
     return df_feat
 
@@ -167,7 +196,7 @@ def main():
         print(f"Error: {INPUT_CSV} not found.")
         return
 
-    print("Loading historical data...")
+    print("Loading historical data (58 columns full mode)...")
     try:
         df = pd.read_csv(INPUT_CSV, low_memory=False, encoding='utf-8-sig')
     except:
@@ -185,19 +214,24 @@ def main():
 
     df_clean['relevance'] = df_clean['rank_num_target'].apply(calc_relevance)
 
-    print("Processing Features (Relative Rank & Lambdarank Priority)...")
+    print("Engineering 50+ features with race-relative Z-scores...")
     df_prep = preprocess_features(df_clean)
-
     df_prep = df_prep.sort_values(by='race_id').reset_index(drop=True)
 
     candidate_features = [
-        'eff_rank_avg', 'eff_top5_rate', 'eff_top3_rate', 'prev_rank_num',
-        'eff_rank_avg_z', 'eff_top3_rate_z', 'prev_prize_z', 'eff_my_time_idx_z', 'eff_jockey_win_z',
-        'horse_win_rate_val', 'eff_jockey_win', 'eff_jockey_track_win',
-        'is_same_jockey', 'prev_prize', 'kinryo_num', 'kinryo_diff',
-        'distance_num', 'dist_diff', 'cat_win_rate',
-        'course_front_rate', 'style_course_fit', 'is_long_rest',
-        'eff_my_time_idx', 'eff_my_last3f_idx', 'eff_my_pace_idx', 'eff_my_start_idx'
+        '枠番', '馬番', 'sex_code', 'age', 'age_z',
+        'kinryo_num', 'kinryo_z', 'body_weight', 'body_weight_diff', 'body_weight_z', 'kinryo_body_ratio',
+        'distance_num', 'kinryo_diff', 'is_same_jockey', 'dist_diff', 'cat_win_rate', 'cat_runs',
+        'interval_days', 'is_long_rest', 'course_front_rate', 'course_frame_win_rate', 'style_course_fit',
+        'eff_rank_avg', 'eff_rank_avg_z', 'eff_top5_rate', 'eff_top3_rate', 'eff_top3_rate_z',
+        'prev_rank_num', 'prev_prize', 'prev_prize_z',
+        'eff_my_time_idx', 'eff_my_time_idx_z', 'eff_my_last3f_idx', 'eff_my_last3f_idx_z',
+        'eff_my_pace_idx', 'eff_my_start_idx',
+        'horse_runs', 'horse_wins', 'horse_win_rate', 'horse_win_rate_z',
+        'horse_avg_time_idx', 'horse_avg_time_idx_z', 'horse_avg_last3f_idx', 'horse_avg_last3f_idx_z',
+        'horse_avg_pace_idx', 'horse_avg_start_idx',
+        'jockey_runs', 'jockey_wins', 'jockey_win_rate', 'jockey_win_rate_z', 'jockey_track_win_rate', 'jockey_track_win_rate_z',
+        'eff_my_time_idx_rank_in_race', 'horse_avg_time_idx_rank_in_race', 'jockey_win_rate_rank_in_race', 'horse_win_rate_rank_in_race'
     ]
 
     use_features = [f for f in candidate_features if f in df_prep.columns]
@@ -207,7 +241,7 @@ def main():
 
     groups = df_prep.groupby('race_id', sort=False).size().values
 
-    print(f"Training LightGBM Lambdarank model on {len(groups)} races ({len(X)} records)...")
+    print(f"Training Advanced Lambdarank model on {len(groups)} races with {len(use_features)} features...")
 
     train_data = lgb.Dataset(X, label=y, group=groups)
     params = {
@@ -216,15 +250,15 @@ def main():
         'eval_at': [1, 3],
         'boosting_type': 'gbdt',
         'learning_rate': 0.03,
-        'num_leaves': 15,
-        'min_data_in_leaf': 50,
+        'num_leaves': 20,
+        'min_data_in_leaf': 40,
         'verbose': -1,
         'seed': 42
     }
 
-    model = lgb.train(params, train_data, num_boost_round=150)
+    model = lgb.train(params, train_data, num_boost_round=180)
     joblib.dump({'model': model, 'features': use_features}, MODEL_FILE)
-    print(f"Success! Lambdarank Model saved to {MODEL_FILE}")
+    print(f"🎉 Success! High-Precision Lambdarank Model saved to {MODEL_FILE}")
 
 if __name__ == "__main__":
     main()

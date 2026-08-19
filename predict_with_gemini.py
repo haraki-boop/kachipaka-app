@@ -11,7 +11,7 @@ from google import genai
 from google.genai import types
 
 # ==========================================
-# 🎨 アプリの基本設定
+# 🎨 アプリの基本設定（特大文字UI）
 # ==========================================
 st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="🐴", layout="wide")
 
@@ -58,6 +58,15 @@ def get_dist_cat(d):
     if d <= 1400: return 'sprint'
     elif d <= 2200: return 'mile_middle'
     else: return 'stayer'
+
+def parse_sex_age(val):
+    if pd.isna(val): return 0, 4.0
+    val = str(val).strip()
+    sex_char = val[0] if len(val) > 0 else '牡'
+    sex_code = 0 if sex_char == '牡' else (1 if sex_char == '牝' else 2)
+    try: age = float(val[1:])
+    except: age = 4.0
+    return sex_code, age
 
 def parse_weight(val):
     if pd.isna(val): return np.nan, np.nan
@@ -158,7 +167,7 @@ if past_err:
     st.warning(f"⚠️ 【過去データ警告】 {past_err}")
 
 # ==========================================
-# 2. 過去データ辞書化
+# 2. 過去データ辞書化（全属性対応）
 # ==========================================
 @st.cache_data
 def build_past_horse_dict(df_p):
@@ -201,7 +210,14 @@ def build_past_horse_dict(df_p):
             'eff_my_time_idx': t_vals.tail(3).median() if not t_vals.empty else 50.0,
             'eff_my_last3f_idx': l_vals.tail(3).median() if not l_vals.empty else 50.0,
             'eff_my_pace_idx': p_vals.tail(3).median() if not p_vals.empty else 50.0,
-            'eff_my_start_idx': s_vals.tail(3).median() if not s_vals.empty else 50.0
+            'eff_my_start_idx': s_vals.tail(3).median() if not s_vals.empty else 50.0,
+            'horse_runs': pd.to_numeric(last_row.get('horse_runs'), errors='coerce'),
+            'horse_wins': pd.to_numeric(last_row.get('horse_wins'), errors='coerce'),
+            'horse_win_rate': pd.to_numeric(last_row.get('horse_win_rate'), errors='coerce'),
+            'horse_avg_time_idx': pd.to_numeric(last_row.get('horse_avg_time_idx'), errors='coerce'),
+            'horse_avg_last3f_idx': pd.to_numeric(last_row.get('horse_avg_last3f_idx'), errors='coerce'),
+            'horse_avg_pace_idx': pd.to_numeric(last_row.get('horse_avg_pace_idx'), errors='coerce'),
+            'horse_avg_start_idx': pd.to_numeric(last_row.get('horse_avg_start_idx'), errors='coerce')
         }
 
     course_front_map = df_p.groupby('course_id')['rank_num'].apply(lambda x: (x <= 3).mean()).to_dict()
@@ -212,7 +228,7 @@ def build_past_horse_dict(df_p):
 past_dict, course_front_map, course_frame_map = build_past_horse_dict(df_past)
 
 # ==========================================
-# 3. AI推論ロジック（勝率平坦化バグ改修）
+# 3. AI推論ロジック（シャープな勝率＆期待値の再構築）
 # ==========================================
 def calculate_predictions(race_id_target, df_fut, cond):
     if df_fut.empty or model_data is None: return None
@@ -222,15 +238,24 @@ def calculate_predictions(race_id_target, df_fut, cond):
     model = model_data['model']
     features = model_data['features']
 
+    # 1. 過去データの連携・補完
     target_cols = [
         'last_date', 'prev_prize', 'prev_rank_num', 
         'eff_rank_avg', 'eff_top5_rate', 'eff_top3_rate',
         'eff_my_time_idx', 'eff_my_last3f_idx',
-        'eff_my_pace_idx', 'eff_my_start_idx'
+        'eff_my_pace_idx', 'eff_my_start_idx',
+        'horse_runs', 'horse_wins', 'horse_win_rate',
+        'horse_avg_time_idx', 'horse_avg_last3f_idx', 'horse_avg_pace_idx', 'horse_avg_start_idx'
     ]
     for col in target_cols:
         race_df[col] = race_df['馬名_clean'].apply(lambda x: past_dict.get(x, {}).get(col, np.nan))
 
+    # 性齢パース
+    sex_age = race_df.get('性齢', pd.Series()).apply(parse_sex_age)
+    race_df['sex_code'] = [s[0] for s in sex_age]
+    race_df['age'] = [s[1] for s in sex_age]
+
+    # 馬体重・斤量
     weights_parsed = race_df.get('馬体重', pd.Series()).apply(parse_weight)
     race_df['body_weight'] = [p[0] for p in weights_parsed]
     race_df['body_weight_diff'] = [p[1] for p in weights_parsed]
@@ -272,25 +297,38 @@ def calculate_predictions(race_id_target, df_fut, cond):
     race_df['is_long_rest'] = (race_df['interval_days'] >= 180).astype(int)
 
     j_col = race_df.get('jockey_win_power', race_df.get('jockey_win_rate', pd.Series()))
-    race_df['eff_jockey_win'] = pd.to_numeric(j_col, errors='coerce').fillna(0.1).clip(0.0, 1.0)
-    race_df['eff_jockey_track_win'] = pd.to_numeric(race_df.get('jockey_track_win_rate'), errors='coerce').fillna(0.1).clip(0.0, 1.0)
-    race_df['horse_win_rate_val'] = pd.to_numeric(race_df.get('horse_win_rate'), errors='coerce').fillna(0.1).clip(0.0, 1.0)
-    race_df['horse_runs_val'] = pd.to_numeric(race_df.get('horse_runs'), errors='coerce').fillna(5)
+    race_df['jockey_win_rate'] = pd.to_numeric(j_col, errors='coerce').fillna(0.1).clip(0.0, 1.0)
+    race_df['jockey_track_win_rate'] = pd.to_numeric(race_df.get('jockey_track_win_rate'), errors='coerce').fillna(0.1).clip(0.0, 1.0)
+    race_df['jockey_runs'] = pd.to_numeric(race_df.get('jockey_runs'), errors='coerce').fillna(100)
+    race_df['jockey_wins'] = pd.to_numeric(race_df.get('jockey_wins'), errors='coerce').fillna(10)
 
     race_df['condition_code'] = cond
     race_df['condition'] = cond
 
-    # レース内での相対Zスコア生成
-    rel_cols = ['eff_rank_avg', 'eff_top3_rate', 'prev_prize', 'eff_my_time_idx', 'eff_jockey_win']
-    for c in rel_cols:
+    # 2. レース内での相対Zスコア生成
+    z_cols = [
+        'eff_rank_avg', 'eff_top3_rate', 'prev_prize', 'eff_my_time_idx', 
+        'eff_my_last3f_idx', 'jockey_win_rate', 'jockey_track_win_rate',
+        'horse_win_rate', 'horse_avg_time_idx', 'horse_avg_last3f_idx',
+        'age', 'kinryo_num', 'body_weight'
+    ]
+    for c in z_cols:
         if c in race_df.columns:
-            s_val = race_df[c].astype(float)
+            s_val = pd.to_numeric(race_df[c], errors='coerce')
             s_std = s_val.std()
             if pd.isna(s_std) or s_std == 0:
                 race_df[f'{c}_z'] = 0.0
             else:
                 race_df[f'{c}_z'] = (s_val - s_val.mean()) / s_std
 
+    # 3. レース内順位特徴量
+    rank_cols = ['eff_my_time_idx', 'horse_avg_time_idx', 'jockey_win_rate', 'horse_win_rate']
+    for c in rank_cols:
+        if c in race_df.columns:
+            s_val = pd.to_numeric(race_df[c], errors='coerce')
+            race_df[f'{c}_rank_in_race'] = s_val.rank(ascending=False, method='min')
+
+    # 特徴量抽出
     X = pd.DataFrame(index=race_df.index)
     for f in features:
         X[f] = race_df[f] if f in race_df.columns else np.nan
@@ -314,10 +352,11 @@ def calculate_predictions(race_id_target, df_fut, cond):
         st.error(f"❌ モデル予測エラー: {e}")
         return None
 
-    # ★最重要改修：Lambdarank生スコアを強調標準化し、リアルな勝率（上位25〜30%、下位1〜2%）に変換★
-    if np.std(raw_scores) > 0:
-        norm_scores = (raw_scores - np.mean(raw_scores)) / np.std(raw_scores)
-        exp_scores = np.exp(norm_scores * 1.2) # スコア差を1.2倍強調
+    # ★最重要改修：勝率の平坦化を防止し、シャープなリアル勝率（本命25-35%、下位1-2%）へ適正変換★
+    s_std = np.std(raw_scores)
+    if pd.notna(s_std) and s_std > 0:
+        z_scores = (raw_scores - np.mean(raw_scores)) / s_std
+        exp_scores = np.exp(z_scores * 1.8) # 強調スケーリング（1.8倍）
         race_df['win_prob'] = exp_scores / np.sum(exp_scores)
     else:
         race_df['win_prob'] = 1.0 / len(race_df)
@@ -325,7 +364,7 @@ def calculate_predictions(race_id_target, df_fut, cond):
     race_df['単勝_num'] = pd.to_numeric(race_df.get('単勝', race_df.get('オッズ', pd.Series())), errors='coerce').fillna(10.0)
     race_df['人気'] = race_df['単勝_num'].rank(method='min')
 
-    # 正確な期待値算出（平坦化バグ解消により正常化）
+    # リアル勝率に連動した正確な期待値算出
     race_df['ev'] = race_df['win_prob'] * race_df['単勝_num']
 
     # AIスコア（50〜150）
@@ -336,6 +375,7 @@ def calculate_predictions(race_id_target, df_fut, cond):
     else:
         race_df['ai_score'] = 100
 
+    # 脚質判定
     total_horses = len(race_df)
     if total_horses > 0 and race_df['eff_my_start_idx'].notna().any():
         race_df['start_rank'] = race_df['eff_my_start_idx'].rank(ascending=False, method='min')
