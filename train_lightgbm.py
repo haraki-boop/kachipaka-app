@@ -40,6 +40,17 @@ def parse_weight(val):
         return w, diff
     return np.nan, np.nan
 
+def parse_passing(val):
+    if pd.isna(val): return np.nan, np.nan, np.nan
+    parts = str(val).split('-')
+    try:
+        f_pos = float(parts[0])
+        l_pos = float(parts[-1])
+        diff = f_pos - l_pos
+        return f_pos, l_pos, diff
+    except:
+        return np.nan, np.nan, np.nan
+
 def preprocess_features(df):
     df_feat = df.copy()
 
@@ -57,7 +68,11 @@ def preprocess_features(df):
     df_feat['is_top3_past'] = (df_feat['rank_num'] <= 3).astype(int)
     df_feat['is_win_past'] = (df_feat['rank_num'] == 1).astype(int)
 
-    # 過去実績指標
+    passing = df_feat['通過'].apply(parse_passing)
+    df_feat['first_corner_pos'] = [p[0] for p in passing]
+    df_feat['last_corner_pos'] = [p[1] for p in passing]
+    df_feat['pos_gain'] = [p[2] for p in passing]
+
     df_feat['eff_rank_avg'] = df_feat.groupby('馬名_clean')['rank_num'].apply(
         lambda x: x.shift(1).rolling(3, min_periods=1).mean()
     ).reset_index(level=0, drop=True)
@@ -82,11 +97,14 @@ def preprocess_features(df):
     num_cols = [
         'horse_runs', 'horse_wins', 'horse_win_rate', 'prev_rank',
         'horse_avg_time_idx', 'horse_avg_last3f_idx', 'horse_avg_pace_idx', 'horse_avg_start_idx',
-        'jockey_runs', 'jockey_wins', 'jockey_win_rate', 'jockey_track_win_rate'
+        'jockey_runs', 'jockey_wins', 'jockey_win_rate', 'jockey_track_win_rate',
+        'jp_runs', 'jp_wins', 'first_pos'
     ]
     for c in num_cols:
         if c in df_feat.columns:
             df_feat[c] = pd.to_numeric(df_feat[c], errors='coerce')
+
+    df_feat['jp_win_rate'] = df_feat['jp_wins'] / (df_feat['jp_runs'] + 1e-5)
 
     place_code = df_feat.get('place_code', pd.Series(['00']*len(df_feat)))
     surface = df_feat.get('surface', pd.Series(['芝']*len(df_feat)))
@@ -168,12 +186,18 @@ def preprocess_features(df):
 
     df_feat['prev_rank_num'] = df_feat['rank_num'].groupby(df_feat['馬名_clean']).shift(1)
 
-    # 🔥【強グループ】相対Zスコア
+    # 差分指標（直近と通算の比較）
+    df_feat['time_idx_diff'] = df_feat['eff_my_time_idx'] - df_feat['horse_avg_time_idx']
+    df_feat['last3f_idx_diff'] = df_feat['eff_my_last3f_idx'] - df_feat['horse_avg_last3f_idx']
+    df_feat['pace_idx_diff'] = df_feat['eff_my_pace_idx'] - df_feat['horse_avg_pace_idx']
+    df_feat['start_idx_diff'] = df_feat['eff_my_start_idx'] - df_feat['horse_avg_start_idx']
+
+    # Zスコア
     z_cols = [
         'eff_rank_avg', 'eff_top3_rate', 'prev_prize', 'eff_my_time_idx', 
-        'eff_my_last3f_idx', 'jockey_win_rate', 'jockey_track_win_rate',
-        'horse_win_rate', 'horse_avg_time_idx', 'horse_avg_last3f_idx',
-        'age', 'kinryo_num', 'body_weight'
+        'eff_my_last3f_idx', 'eff_my_pace_idx', 'jockey_win_rate', 'jockey_track_win_rate',
+        'horse_win_rate', 'horse_avg_time_idx', 'horse_avg_last3f_idx', 'horse_avg_pace_idx', 'horse_avg_start_idx',
+        'age', 'kinryo_num', 'body_weight', 'prev_rank', 'first_pos'
     ]
     for c in z_cols:
         if c in df_feat.columns:
@@ -181,7 +205,7 @@ def preprocess_features(df):
                 lambda x: (x - x.mean()) / (x.std() + 1e-5) if len(x) > 1 else 0.0
             ).fillna(0.0)
 
-    # 🔥【強グループ】メンバー内順位
+    # メンバー内順位
     rank_cols = ['eff_my_time_idx', 'horse_avg_time_idx', 'jockey_win_rate', 'horse_win_rate']
     for c in rank_cols:
         if c in df_feat.columns:
@@ -212,26 +236,30 @@ def main():
 
     df_clean['relevance'] = df_clean['rank_num_target'].apply(calc_relevance)
 
-    print("Processing Features (Grouped Priority Mode)...")
+    print("Engineering 68 full features...")
     df_prep = preprocess_features(df_clean)
     df_prep = df_prep.sort_values(by='race_id').reset_index(drop=True)
 
     candidate_features = [
-        # 🔥【強】グループ（最優先で分岐させる最重要指標）
+        # 🔥【強】グループ（20項目）
         'eff_my_time_idx_z', 'eff_rank_avg_z', 'eff_top3_rate_z', 'jockey_track_win_rate_z',
-        'eff_my_time_idx_rank_in_race', 'horse_avg_time_idx_rank_in_race', 'jockey_win_rate_rank_in_race',
-        'horse_win_rate_z', 'horse_avg_time_idx_z', 'horse_avg_last3f_idx_z', 'prev_prize_z',
+        'eff_my_time_idx_rank_in_race', 'horse_avg_time_idx_rank_in_race', 'jockey_win_rate_rank_in_race', 'horse_win_rate_rank_in_race',
+        'horse_win_rate_z', 'horse_avg_time_idx_z', 'horse_avg_last3f_idx_z', 'horse_avg_pace_idx_z', 'horse_avg_start_idx_z',
+        'prev_prize_z', 'prev_rank_z', 'first_pos_z',
         
-        # ⚖️【中】グループ（展開・補正用指標）
+        # ⚖️【中】グループ（22項目）
+        'time_idx_diff', 'last3f_idx_diff', 'pace_idx_diff', 'start_idx_diff',
         'kinryo_body_ratio', 'body_weight_z', 'kinryo_diff', 'is_same_jockey', 'dist_diff',
         'cat_win_rate', 'course_front_rate', 'course_frame_win_rate', 'style_course_fit',
-        'eff_my_last3f_idx_z', 'eff_top5_rate', 'prev_rank_num',
+        'eff_my_last3f_idx_z', 'eff_my_pace_idx_z', 'eff_top5_rate', 'prev_rank_num',
+        'first_corner_pos', 'last_corner_pos', 'pos_gain', 'jp_win_rate',
         
-        # 🔹【小】グループ（基礎・バックアップ指標）
+        # 🔹【小】グループ（26項目）
         '枠番', '馬番', 'sex_code', 'age', 'age_z', 'kinryo_num', 'body_weight', 'body_weight_diff',
-        'distance_num', 'cat_runs', 'interval_days', 'is_long_rest',
+        'distance_num', 'cat_runs', 'interval_days', 'is_long_rest', 'place_code',
         'eff_rank_avg', 'eff_my_time_idx', 'eff_my_last3f_idx', 'eff_my_pace_idx', 'eff_my_start_idx',
-        'horse_runs', 'horse_wins', 'horse_win_rate', 'jockey_runs', 'jockey_wins', 'jockey_win_rate', 'jockey_track_win_rate'
+        'horse_runs', 'horse_wins', 'horse_win_rate', 'horse_avg_time_idx', 'horse_avg_last3f_idx', 'horse_avg_pace_idx', 'horse_avg_start_idx',
+        'jockey_runs', 'jockey_wins', 'jockey_win_rate', 'jockey_track_win_rate', 'jp_runs', 'jp_wins'
     ]
 
     use_features = [f for f in candidate_features if f in df_prep.columns]
@@ -241,7 +269,8 @@ def main():
 
     groups = df_prep.groupby('race_id', sort=False).size().values
 
-    # ★【重要】強項目を優先学習できるようパラメータ（num_leaves, min_data_in_leaf）を極小木構造に調整
+    print(f"Training Full 68-Feature Lambdarank model on {len(groups)} races...")
+
     train_data = lgb.Dataset(X, label=y, group=groups)
     params = {
         'objective': 'lambdarank',
@@ -249,16 +278,16 @@ def main():
         'eval_at': [1, 3],
         'boosting_type': 'gbdt',
         'learning_rate': 0.03,
-        'num_leaves': 16,            # 重複分岐を抑えて強特徴量を凝縮
-        'min_data_in_leaf': 45,
-        'feature_fraction': 0.9,     # 強指標が毎回高確率で使われるように選択率を高保持
+        'num_leaves': 18,
+        'min_data_in_leaf': 40,
+        'feature_fraction': 0.85,
         'verbose': -1,
         'seed': 42
     }
 
-    model = lgb.train(params, train_data, num_boost_round=180)
+    model = lgb.train(params, train_data, num_boost_round=200)
     joblib.dump({'model': model, 'features': use_features}, MODEL_FILE)
-    print(f"🎉 Success! Heavy-weighted Lambdarank Model saved to {MODEL_FILE}")
+    print(f"🎉 Success! Model saved with {len(use_features)} features to {MODEL_FILE}")
 
 if __name__ == "__main__":
     main()
