@@ -43,7 +43,7 @@ def clean_horse_name(name):
     if pd.isna(name): return ""
     s = unicodedata.normalize('NFKC', str(name))
     s = re.sub(r'[\s・･.\-ー_]+', '', s).strip()
-    return s.upper() # 英字も大文字に統一
+    return s.upper()
 
 def get_badge_class(mark):
     if "◎" in mark: return "badge-honmei"
@@ -70,20 +70,26 @@ def parse_weight(val):
     return np.nan, np.nan
 
 # ==========================================
-# 1. データとモデルの読み込み
+# 1. データとモデルの読み込み（エラー検知強化）
 # ==========================================
 @st.cache_resource
 def load_model():
-    for m_name in ["勝ちパカくん.pkl", "keiba_ai_model.pkl"]:
+    model_paths = ["勝ちパカくん.pkl", "keiba_ai_model.pkl"]
+    for m_name in model_paths:
         if os.path.exists(m_name):
-            try: return joblib.load(m_name)
-            except: pass
-    return None
+            try: 
+                return joblib.load(m_name), None
+            except Exception as e:
+                return None, f"モデルファイル '{m_name}' の読み込み中にエラーが発生しました: {e}"
+    return None, f"モデルファイル ({', '.join(model_paths)}) が見つかりません。"
 
 @st.cache_data
 def load_data():
     df_past = pd.DataFrame()
-    if os.path.exists(ML_TARGET_CSV):
+    past_error = None
+    if not os.path.exists(ML_TARGET_CSV):
+        past_error = f"過去データファイル '{ML_TARGET_CSV}' が存在しません。"
+    else:
         for enc in ['utf-8-sig', 'utf-8', 'cp932']:
             try:
                 df_past = pd.read_csv(ML_TARGET_CSV, low_memory=False, dtype={'race_id': str}, encoding=enc)
@@ -100,11 +106,16 @@ def load_data():
                 df_past['course_id'] = place_code.astype(str) + "_" + surface.astype(str) + "_" + df_past['distance_num'].fillna(0).astype(int).astype(str)
                 df_past['course_frame_id'] = df_past['course_id'] + "_frame_" + df_past['wakuban_num'].fillna(0).astype(int).astype(str)
                 df_past = df_past.sort_values(by='date_parsed')
+                past_error = None
                 break
-            except: pass
+            except Exception as e:
+                past_error = f"'{ML_TARGET_CSV}' の読み込み失敗 ({enc}): {e}"
 
     df_future = pd.DataFrame()
-    if os.path.exists(FUTURE_CSV):
+    future_error = None
+    if not os.path.exists(FUTURE_CSV):
+        future_error = f"出馬表ファイル '{FUTURE_CSV}' が存在しません。"
+    else:
         for enc in ['utf-8-sig', 'utf-8', 'cp932']:
             try:
                 df_f = pd.read_csv(FUTURE_CSV, dtype={'race_id': str}, encoding=enc)
@@ -125,16 +136,31 @@ def load_data():
                     df_f['course_id'] = place_code_f.astype(str) + "_" + surface_f.astype(str) + "_" + df_f['distance_num'].fillna(0).astype(int).astype(str)
                     df_f['course_frame_id'] = df_f['course_id'] + "_frame_" + df_f['wakuban_num'].fillna(0).astype(int).astype(str)
                     df_future = df_f
+                    future_error = None
                     break
-            except: pass
+            except Exception as e:
+                future_error = f"'{FUTURE_CSV}' の読み込み失敗 ({enc}): {e}"
 
-    return df_past, df_future
+    return df_past, df_future, past_error, future_error
 
-model_data = load_model()
-df_past, df_future = load_data()
+# モデルとデータのロード＆エラー判定
+model_data, model_err = load_model()
+df_past, df_future, past_err, future_err = load_data()
+
+# ❌ エラーチェックと表示
+if model_err:
+    st.error(f"❌ 【モデルエラー】 {model_err}")
+    st.stop()
+
+if future_err:
+    st.error(f"❌ 【出馬表データエラー】 {future_err}")
+    st.stop()
+
+if past_err:
+    st.warning(f"⚠️ 【過去データ警告】 {past_err} （精度が下がる可能性があります）")
 
 # ==========================================
-# 📦 過去データ辞書化（マッチング強化）
+# 2. 過去データ辞書化
 # ==========================================
 @st.cache_data
 def build_past_horse_dict(df_p):
@@ -171,7 +197,7 @@ def build_past_horse_dict(df_p):
             'prev_rank_num': last_row['rank_num'],
             'best_dist_avg': best_dist_avg,
             'cat_stats': cat_stats,
-            'eff_rank_avg': ranks.tail(3).mean() if not ranks.empty else 8.0, # 未登録馬は平均値で補正
+            'eff_rank_avg': ranks.tail(3).mean() if not ranks.empty else 8.0,
             'eff_top5_rate': (ranks.tail(5) <= 5).mean() if not ranks.empty else 0.2,
             'eff_top3_rate': (ranks.tail(5) <= 3).mean() if not ranks.empty else 0.1,
             'eff_my_time_idx': t_vals.tail(3).median() if not t_vals.empty else 50.0,
@@ -188,17 +214,21 @@ def build_past_horse_dict(df_p):
 past_dict, course_front_map, course_frame_map = build_past_horse_dict(df_past)
 
 # ==========================================
-# 3. AI推論ロジック（全頭同一スコア防止改修）
+# 3. AI推論ロジック
 # ==========================================
 def calculate_predictions(race_id_target, df_fut, cond):
-    if df_fut.empty or model_data is None: return None
+    if df_fut.empty or model_data is None: 
+        st.error("❌ 出馬表または学習済みモデルが存在しないため計算できません。")
+        return None
+        
     race_df = df_fut[df_fut['race_id'].astype(str) == str(race_id_target)].copy()
-    if race_df.empty: return None
+    if race_df.empty: 
+        st.error(f"❌ 指定されたレースID '{race_id_target}' の出走馬データが見つかりませんでした。")
+        return None
 
     model = model_data['model']
     features = model_data['features']
 
-    # 過去データの補完
     target_cols = [
         'last_date', 'prev_prize', 'prev_rank_num', 
         'eff_rank_avg', 'eff_top5_rate', 'eff_top3_rate',
@@ -208,7 +238,6 @@ def calculate_predictions(race_id_target, df_fut, cond):
     for col in target_cols:
         race_df[col] = race_df['馬名_clean'].apply(lambda x: past_dict.get(x, {}).get(col, np.nan))
 
-    # リアルタイム（出馬表）の特徴量作成
     weights_parsed = race_df.get('馬体重', pd.Series()).apply(parse_weight)
     race_df['body_weight'] = [p[0] for p in weights_parsed]
     race_df['body_weight_diff'] = [p[1] for p in weights_parsed]
@@ -278,30 +307,24 @@ def calculate_predictions(race_id_target, df_fut, cond):
     try:
         raw_probs = model.predict(X_num)
     except Exception as e:
-        st.error(f"モデル予測エラー: {e}")
+        st.error(f"❌ モデルによる計算中にエラーが発生しました: {e}")
         return None
 
-    # オッズデータの取得
     race_df['単勝_num'] = pd.to_numeric(race_df.get('単勝', race_df.get('オッズ', pd.Series())), errors='coerce').fillna(10.0)
     race_df['人気'] = race_df['単勝_num'].rank(method='min')
 
-    # ★万が一全頭ほぼ同点になった場合の補正処理（過去成績・オッズ順位から確率の傾きを復元）
     if np.std(raw_probs) < 0.001:
-        # オッズ・過去着順から自然な確率勾配を作る
         implied_probs = (1.0 / race_df['単勝_num'])
         raw_probs = implied_probs.values
 
-    # 勝率の正規化
     prob_sum = np.sum(raw_probs)
     if prob_sum > 0:
         race_df['win_prob'] = raw_probs / prob_sum
     else:
         race_df['win_prob'] = 1.0 / len(race_df)
 
-    # 期待値算出
     race_df['ev'] = race_df['win_prob'] * race_df['単勝_num']
 
-    # ★AIスコア（50〜150）のダイナミックスケール★
     p_min = race_df['win_prob'].min()
     p_max = race_df['win_prob'].max()
     if pd.notna(p_min) and pd.notna(p_max) and p_max > p_min:
@@ -323,7 +346,6 @@ def calculate_predictions(race_id_target, df_fut, cond):
     else:
         race_df['脚質'] = "-"
 
-    # スコア（勝率）の順番だけでソート
     race_df = race_df.sort_values(by=['ai_score', 'win_prob'], ascending=[False, False]).reset_index(drop=True)
     race_df['印'] = "消"
     
@@ -333,7 +355,6 @@ def calculate_predictions(race_id_target, df_fut, cond):
     if len(race_df) > 3: race_df.loc[3, '印'] = "△"
     if len(race_df) > 4: race_df.loc[4, '印'] = "△"
     
-    # ☆（穴馬）選出：本命漏れ（6番手以降）から期待値が1.00〜1.20付近の馬を1頭厳選
     if len(race_df) > 5:
         ana_candidates = race_df.iloc[5:][(race_df['単勝_num'] >= 8.0) & (race_df['ev'] >= 0.90)]
         if not ana_candidates.empty:
@@ -409,10 +430,6 @@ def generate_fusion_table(merged_df, is_newcomer):
 # 5. メインUI
 # ==========================================
 st.sidebar.button("🔄 画面リロード", on_click=lambda: st.cache_data.clear(), use_container_width=True)
-
-if df_future.empty:
-    st.warning("出馬表が存在しません。")
-    st.stop()
 
 st.markdown("<div class='section-header'>🎯 レース選択</div>", unsafe_allow_html=True)
 dates = sorted(df_future['day_label'].unique())
@@ -554,6 +571,6 @@ if st.session_state['selected_race_id']:
                             st.success("📝 表を最強アップデートしました！")
 
                     except json.JSONDecodeError:
-                        st.error("Geminiからのデータ解析に失敗しました。もう一度お試しください。")
+                        st.error("❌ Geminiからのデータ解析に失敗しました。もう一度お試しください。")
                 else:
                     st.warning("⚠️ 回答を取得できませんでした。")
