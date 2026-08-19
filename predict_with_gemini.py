@@ -11,7 +11,7 @@ from google import genai
 from google.genai import types
 
 # ==========================================
-# 🎨 アプリの基本設定（特大文字UI）
+# 🎨 アプリの基本設定
 # ==========================================
 st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="🐴", layout="wide")
 
@@ -167,7 +167,7 @@ if past_err:
     st.warning(f"⚠️ 【過去データ警告】 {past_err}")
 
 # ==========================================
-# 2. 過去データ辞書化（全属性対応）
+# 2. 過去データ辞書化
 # ==========================================
 @st.cache_data
 def build_past_horse_dict(df_p):
@@ -228,7 +228,7 @@ def build_past_horse_dict(df_p):
 past_dict, course_front_map, course_frame_map = build_past_horse_dict(df_past)
 
 # ==========================================
-# 3. AI推論ロジック（シャープな勝率＆期待値の再構築）
+# 3. AI推論ロジック（単体勝率モデルへ変更）
 # ==========================================
 def calculate_predictions(race_id_target, df_fut, cond):
     if df_fut.empty or model_data is None: return None
@@ -238,7 +238,6 @@ def calculate_predictions(race_id_target, df_fut, cond):
     model = model_data['model']
     features = model_data['features']
 
-    # 1. 過去データの連携・補完
     target_cols = [
         'last_date', 'prev_prize', 'prev_rank_num', 
         'eff_rank_avg', 'eff_top5_rate', 'eff_top3_rate',
@@ -250,12 +249,10 @@ def calculate_predictions(race_id_target, df_fut, cond):
     for col in target_cols:
         race_df[col] = race_df['馬名_clean'].apply(lambda x: past_dict.get(x, {}).get(col, np.nan))
 
-    # 性齢パース
     sex_age = race_df.get('性齢', pd.Series()).apply(parse_sex_age)
     race_df['sex_code'] = [s[0] for s in sex_age]
     race_df['age'] = [s[1] for s in sex_age]
 
-    # 馬体重・斤量
     weights_parsed = race_df.get('馬体重', pd.Series()).apply(parse_weight)
     race_df['body_weight'] = [p[0] for p in weights_parsed]
     race_df['body_weight_diff'] = [p[1] for p in weights_parsed]
@@ -305,7 +302,6 @@ def calculate_predictions(race_id_target, df_fut, cond):
     race_df['condition_code'] = cond
     race_df['condition'] = cond
 
-    # 2. レース内での相対Zスコア生成
     z_cols = [
         'eff_rank_avg', 'eff_top3_rate', 'prev_prize', 'eff_my_time_idx', 
         'eff_my_last3f_idx', 'jockey_win_rate', 'jockey_track_win_rate',
@@ -321,14 +317,12 @@ def calculate_predictions(race_id_target, df_fut, cond):
             else:
                 race_df[f'{c}_z'] = (s_val - s_val.mean()) / s_std
 
-    # 3. レース内順位特徴量
     rank_cols = ['eff_my_time_idx', 'horse_avg_time_idx', 'jockey_win_rate', 'horse_win_rate']
     for c in rank_cols:
         if c in race_df.columns:
             s_val = pd.to_numeric(race_df[c], errors='coerce')
             race_df[f'{c}_rank_in_race'] = s_val.rank(ascending=False, method='min')
 
-    # 特徴量抽出
     X = pd.DataFrame(index=race_df.index)
     for f in features:
         X[f] = race_df[f] if f in race_df.columns else np.nan
@@ -347,24 +341,24 @@ def calculate_predictions(race_id_target, df_fut, cond):
             X_num[col] = pd.to_numeric(X_num[col], errors='coerce')
 
     try:
-        raw_scores = model.predict(X_num) # Lambdarankスコア出力
+        raw_scores = model.predict(X_num)
     except Exception as e:
         st.error(f"❌ モデル予測エラー: {e}")
         return None
 
-    # ★最重要改修：勝率の平坦化を防止し、シャープなリアル勝率（本命25-35%、下位1-2%）へ適正変換★
-    s_std = np.std(raw_scores)
-    if pd.notna(s_std) and s_std > 0:
-        z_scores = (raw_scores - np.mean(raw_scores)) / s_std
-        exp_scores = np.exp(z_scores * 1.8) # 強調スケーリング（1.8倍）
-        race_df['win_prob'] = exp_scores / np.sum(exp_scores)
+    # ★改修：合計100%縛りを廃止し、馬単体の絶対的な1着・激走確率（%）をダイレクト算出★
+    if np.std(raw_scores) > 0:
+        z_scores = (raw_scores - np.mean(raw_scores)) / np.std(raw_scores)
+        # シグモイド関数（1 / (1 + exp(-z))) をベースに、単体勝率領域（1%〜38%）に自然マッピング
+        base_probs = 1.0 / (1.0 + np.exp(-1.1 * z_scores))
+        race_df['win_prob'] = base_probs * 0.35 + 0.02 # 最小約2%〜最大約37%にマッピング
     else:
-        race_df['win_prob'] = 1.0 / len(race_df)
+        race_df['win_prob'] = 0.10
 
     race_df['単勝_num'] = pd.to_numeric(race_df.get('単勝', race_df.get('オッズ', pd.Series())), errors='coerce').fillna(10.0)
     race_df['人気'] = race_df['単勝_num'].rank(method='min')
 
-    # リアル勝率に連動した正確な期待値算出
+    # 期待値算出
     race_df['ev'] = race_df['win_prob'] * race_df['単勝_num']
 
     # AIスコア（50〜150）
@@ -375,7 +369,6 @@ def calculate_predictions(race_id_target, df_fut, cond):
     else:
         race_df['ai_score'] = 100
 
-    # 脚質判定
     total_horses = len(race_df)
     if total_horses > 0 and race_df['eff_my_start_idx'].notna().any():
         race_df['start_rank'] = race_df['eff_my_start_idx'].rank(ascending=False, method='min')
