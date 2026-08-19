@@ -47,7 +47,6 @@ def preprocess_features(df):
     df_feat['date_parsed'] = pd.to_datetime(df_feat['date'], errors='coerce')
     df_feat = df_feat.dropna(subset=['date_parsed']).sort_values(['馬名_clean', 'date_parsed'])
 
-    # 基本属性（性別・馬齢）
     sex_age = df_feat['性齢'].apply(parse_sex_age)
     df_feat['sex_code'] = [s[0] for s in sex_age]
     df_feat['age'] = [s[1] for s in sex_age]
@@ -58,7 +57,7 @@ def preprocess_features(df):
     df_feat['is_top3_past'] = (df_feat['rank_num'] <= 3).astype(int)
     df_feat['is_win_past'] = (df_feat['rank_num'] == 1).astype(int)
 
-    # 過去実績（移動平均）
+    # 過去実績指標
     df_feat['eff_rank_avg'] = df_feat.groupby('馬名_clean')['rank_num'].apply(
         lambda x: x.shift(1).rolling(3, min_periods=1).mean()
     ).reset_index(level=0, drop=True)
@@ -80,7 +79,6 @@ def preprocess_features(df):
     df_feat['body_weight_diff'] = [p[1] for p in weights_parsed]
     df_feat['kinryo_body_ratio'] = df_feat['kinryo_num'] / df_feat['body_weight'].fillna(470)
 
-    # 数値データの型揃え
     num_cols = [
         'horse_runs', 'horse_wins', 'horse_win_rate', 'prev_rank',
         'horse_avg_time_idx', 'horse_avg_last3f_idx', 'horse_avg_pace_idx', 'horse_avg_start_idx',
@@ -170,7 +168,7 @@ def preprocess_features(df):
 
     df_feat['prev_rank_num'] = df_feat['rank_num'].groupby(df_feat['馬名_clean']).shift(1)
 
-    # ★レース内相対特徴量（Zスコア）★
+    # 🔥【強グループ】相対Zスコア
     z_cols = [
         'eff_rank_avg', 'eff_top3_rate', 'prev_prize', 'eff_my_time_idx', 
         'eff_my_last3f_idx', 'jockey_win_rate', 'jockey_track_win_rate',
@@ -183,7 +181,7 @@ def preprocess_features(df):
                 lambda x: (x - x.mean()) / (x.std() + 1e-5) if len(x) > 1 else 0.0
             ).fillna(0.0)
 
-    # ★レース内メンバー順位特徴量★
+    # 🔥【強グループ】メンバー内順位
     rank_cols = ['eff_my_time_idx', 'horse_avg_time_idx', 'jockey_win_rate', 'horse_win_rate']
     for c in rank_cols:
         if c in df_feat.columns:
@@ -196,7 +194,7 @@ def main():
         print(f"Error: {INPUT_CSV} not found.")
         return
 
-    print("Loading historical data (58 columns full mode)...")
+    print("Loading data...")
     try:
         df = pd.read_csv(INPUT_CSV, low_memory=False, encoding='utf-8-sig')
     except:
@@ -214,24 +212,26 @@ def main():
 
     df_clean['relevance'] = df_clean['rank_num_target'].apply(calc_relevance)
 
-    print("Engineering 50+ features with race-relative Z-scores...")
+    print("Processing Features (Grouped Priority Mode)...")
     df_prep = preprocess_features(df_clean)
     df_prep = df_prep.sort_values(by='race_id').reset_index(drop=True)
 
     candidate_features = [
-        '枠番', '馬番', 'sex_code', 'age', 'age_z',
-        'kinryo_num', 'kinryo_z', 'body_weight', 'body_weight_diff', 'body_weight_z', 'kinryo_body_ratio',
-        'distance_num', 'kinryo_diff', 'is_same_jockey', 'dist_diff', 'cat_win_rate', 'cat_runs',
-        'interval_days', 'is_long_rest', 'course_front_rate', 'course_frame_win_rate', 'style_course_fit',
-        'eff_rank_avg', 'eff_rank_avg_z', 'eff_top5_rate', 'eff_top3_rate', 'eff_top3_rate_z',
-        'prev_rank_num', 'prev_prize', 'prev_prize_z',
-        'eff_my_time_idx', 'eff_my_time_idx_z', 'eff_my_last3f_idx', 'eff_my_last3f_idx_z',
-        'eff_my_pace_idx', 'eff_my_start_idx',
-        'horse_runs', 'horse_wins', 'horse_win_rate', 'horse_win_rate_z',
-        'horse_avg_time_idx', 'horse_avg_time_idx_z', 'horse_avg_last3f_idx', 'horse_avg_last3f_idx_z',
-        'horse_avg_pace_idx', 'horse_avg_start_idx',
-        'jockey_runs', 'jockey_wins', 'jockey_win_rate', 'jockey_win_rate_z', 'jockey_track_win_rate', 'jockey_track_win_rate_z',
-        'eff_my_time_idx_rank_in_race', 'horse_avg_time_idx_rank_in_race', 'jockey_win_rate_rank_in_race', 'horse_win_rate_rank_in_race'
+        # 🔥【強】グループ（最優先で分岐させる最重要指標）
+        'eff_my_time_idx_z', 'eff_rank_avg_z', 'eff_top3_rate_z', 'jockey_track_win_rate_z',
+        'eff_my_time_idx_rank_in_race', 'horse_avg_time_idx_rank_in_race', 'jockey_win_rate_rank_in_race',
+        'horse_win_rate_z', 'horse_avg_time_idx_z', 'horse_avg_last3f_idx_z', 'prev_prize_z',
+        
+        # ⚖️【中】グループ（展開・補正用指標）
+        'kinryo_body_ratio', 'body_weight_z', 'kinryo_diff', 'is_same_jockey', 'dist_diff',
+        'cat_win_rate', 'course_front_rate', 'course_frame_win_rate', 'style_course_fit',
+        'eff_my_last3f_idx_z', 'eff_top5_rate', 'prev_rank_num',
+        
+        # 🔹【小】グループ（基礎・バックアップ指標）
+        '枠番', '馬番', 'sex_code', 'age', 'age_z', 'kinryo_num', 'body_weight', 'body_weight_diff',
+        'distance_num', 'cat_runs', 'interval_days', 'is_long_rest',
+        'eff_rank_avg', 'eff_my_time_idx', 'eff_my_last3f_idx', 'eff_my_pace_idx', 'eff_my_start_idx',
+        'horse_runs', 'horse_wins', 'horse_win_rate', 'jockey_runs', 'jockey_wins', 'jockey_win_rate', 'jockey_track_win_rate'
     ]
 
     use_features = [f for f in candidate_features if f in df_prep.columns]
@@ -241,8 +241,7 @@ def main():
 
     groups = df_prep.groupby('race_id', sort=False).size().values
 
-    print(f"Training Advanced Lambdarank model on {len(groups)} races with {len(use_features)} features...")
-
+    # ★【重要】強項目を優先学習できるようパラメータ（num_leaves, min_data_in_leaf）を極小木構造に調整
     train_data = lgb.Dataset(X, label=y, group=groups)
     params = {
         'objective': 'lambdarank',
@@ -250,15 +249,16 @@ def main():
         'eval_at': [1, 3],
         'boosting_type': 'gbdt',
         'learning_rate': 0.03,
-        'num_leaves': 20,
-        'min_data_in_leaf': 40,
+        'num_leaves': 16,            # 重複分岐を抑えて強特徴量を凝縮
+        'min_data_in_leaf': 45,
+        'feature_fraction': 0.9,     # 強指標が毎回高確率で使われるように選択率を高保持
         'verbose': -1,
         'seed': 42
     }
 
     model = lgb.train(params, train_data, num_boost_round=180)
     joblib.dump({'model': model, 'features': use_features}, MODEL_FILE)
-    print(f"🎉 Success! High-Precision Lambdarank Model saved to {MODEL_FILE}")
+    print(f"🎉 Success! Heavy-weighted Lambdarank Model saved to {MODEL_FILE}")
 
 if __name__ == "__main__":
     main()

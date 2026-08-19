@@ -123,7 +123,7 @@ def load_data():
     df_future = pd.DataFrame()
     future_error = None
     if not os.path.exists(FUTURE_CSV):
-        future_error = f"出馬表ファイル '{FUTURE_CSV}' が存在しません。"
+        future_error = f"出馬表データファイル '{FUTURE_CSV}' が存在しません。"
     else:
         for enc in ['utf-8-sig', 'utf-8', 'cp932']:
             try:
@@ -228,7 +228,7 @@ def build_past_horse_dict(df_p):
 past_dict, course_front_map, course_frame_map = build_past_horse_dict(df_past)
 
 # ==========================================
-# 3. AI推論ロジック（単体勝率モデルへ変更）
+# 3. AI推論ロジック（強グループ重視＋シャープ勝率変換）
 # ==========================================
 def calculate_predictions(race_id_target, df_fut, cond):
     if df_fut.empty or model_data is None: return None
@@ -302,6 +302,7 @@ def calculate_predictions(race_id_target, df_fut, cond):
     race_df['condition_code'] = cond
     race_df['condition'] = cond
 
+    # 🔥【強グループ】Zスコア算出
     z_cols = [
         'eff_rank_avg', 'eff_top3_rate', 'prev_prize', 'eff_my_time_idx', 
         'eff_my_last3f_idx', 'jockey_win_rate', 'jockey_track_win_rate',
@@ -317,6 +318,7 @@ def calculate_predictions(race_id_target, df_fut, cond):
             else:
                 race_df[f'{c}_z'] = (s_val - s_val.mean()) / s_std
 
+    # 🔥【強グループ】メンバー内順位算出
     rank_cols = ['eff_my_time_idx', 'horse_avg_time_idx', 'jockey_win_rate', 'horse_win_rate']
     for c in rank_cols:
         if c in race_df.columns:
@@ -346,22 +348,20 @@ def calculate_predictions(race_id_target, df_fut, cond):
         st.error(f"❌ モデル予測エラー: {e}")
         return None
 
-    # ★改修：合計100%縛りを廃止し、馬単体の絶対的な1着・激走確率（%）をダイレクト算出★
-    if np.std(raw_scores) > 0:
-        z_scores = (raw_scores - np.mean(raw_scores)) / np.std(raw_scores)
-        # シグモイド関数（1 / (1 + exp(-z))) をベースに、単体勝率領域（1%〜38%）に自然マッピング
-        base_probs = 1.0 / (1.0 + np.exp(-1.1 * z_scores))
-        race_df['win_prob'] = base_probs * 0.35 + 0.02 # 最小約2%〜最大約37%にマッピング
+    # ★【実質勝率の算出】上位馬25〜35%、中位10〜15%、下位1〜3%へ適正マッピング
+    s_std = np.std(raw_scores)
+    if pd.notna(s_std) and s_std > 0:
+        z_scores = (raw_scores - np.mean(raw_scores)) / s_std
+        base_probs = 1.0 / (1.0 + np.exp(-1.2 * z_scores))
+        race_df['win_prob'] = base_probs * 0.35 + 0.01 # 最小約1%〜最大約36%にマッピング
     else:
         race_df['win_prob'] = 0.10
 
     race_df['単勝_num'] = pd.to_numeric(race_df.get('単勝', race_df.get('オッズ', pd.Series())), errors='coerce').fillna(10.0)
     race_df['人気'] = race_df['単勝_num'].rank(method='min')
 
-    # 期待値算出
     race_df['ev'] = race_df['win_prob'] * race_df['単勝_num']
 
-    # AIスコア（50〜150）
     p_min = race_df['win_prob'].min()
     p_max = race_df['win_prob'].max()
     if pd.notna(p_min) and pd.notna(p_max) and p_max > p_min:
