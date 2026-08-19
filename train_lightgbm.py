@@ -40,18 +40,27 @@ def preprocess_features(df):
     df_feat['distance_num'] = pd.to_numeric(df_feat.get('distance'), errors='coerce')
     df_feat['dist_cat'] = df_feat['distance_num'].apply(get_dist_cat)
     df_feat['rank_num'] = pd.to_numeric(df_feat.get('着順'), errors='coerce')
+    
+    # 3着以内・1着フラグ
     df_feat['is_top3_past'] = (df_feat['rank_num'] <= 3).astype(int)
     df_feat['is_win_past'] = (df_feat['rank_num'] == 1).astype(int)
 
-    # 実績・安定度
+    # ★的中率に直結する「現実の着順成績」を最重視★
+    # 直近3走の平均着順（小さいほど優秀）
     df_feat['eff_rank_avg'] = df_feat.groupby('馬名_clean')['rank_num'].apply(
         lambda x: x.shift(1).rolling(3, min_periods=1).mean()
     ).reset_index(level=0, drop=True)
     
+    # 直近5走の掲示板率（5着以内率）と複勝率（3着以内率）
+    df_feat['eff_top5_rate'] = df_feat.groupby('馬名_clean')['rank_num'].apply(
+        lambda x: (x.shift(1).rolling(5, min_periods=1) <= 5).mean()
+    ).reset_index(level=0, drop=True)
+
     df_feat['eff_top3_rate'] = df_feat.groupby('馬名_clean')['is_top3_past'].apply(
         lambda x: x.shift(1).rolling(5, min_periods=1).mean()
     ).reset_index(level=0, drop=True)
 
+    # 数値変換
     df_feat['kinryo_num'] = pd.to_numeric(df_feat.get('斤量'), errors='coerce')
     df_feat['wakuban_num'] = pd.to_numeric(df_feat.get('枠番'), errors='coerce')
     df_feat['umaban_num'] = pd.to_numeric(df_feat.get('馬番'), errors='coerce')
@@ -127,10 +136,11 @@ def preprocess_features(df):
     df_feat['interval_days'] = df_feat.groupby('馬名_clean')['date_parsed'].diff().dt.days
     df_feat['is_long_rest'] = (df_feat['interval_days'] >= 180).astype(int)
 
+    # タイム指数は補助程度に抑制（ノイズ対策）
     target_cols = ['my_time_idx', 'my_last3f_idx', 'my_pace_idx', 'my_start_idx']
     for col in target_cols:
         if col in df_feat.columns:
-            num_col = pd.to_numeric(df_feat[col], errors='coerce').clip(30, 90)
+            num_col = pd.to_numeric(df_feat[col], errors='coerce').clip(40, 80)
             df_feat[f'eff_{col}'] = num_col.groupby(df_feat['馬名_clean']).apply(
                 lambda x: x.shift(1).rolling(3, min_periods=1).median()
             ).reset_index(level=0, drop=True)
@@ -166,24 +176,20 @@ def main():
         print("Error: '着順' column missing.")
         return
 
-    df['is_win'] = (pd.to_numeric(df['着順'], errors='coerce') == 1).astype(int)
-    df_clean = df.dropna(subset=['is_win']).copy()
+    # 3着以内に入る確率を重視して学習（当たる予想の作成）
+    df['is_top3'] = (pd.to_numeric(df['着順'], errors='coerce') <= 3).astype(int)
+    df_clean = df.dropna(subset=['is_top3']).copy()
     
-    print("Processing Features (Strict Rank & Ability Priority)...")
+    print("Training High-Accuracy Real-Performance Model...")
     df_prep = preprocess_features(df_clean)
 
     candidate_features = [
-        'eff_rank_avg', 'eff_top3_rate',
-        'umaban_num', 'wakuban_num', 'kinryo_num', 'distance_num',
-        'kinryo_diff', 'kinryo_body_ratio', 'body_weight_diff',
-        'is_same_jockey', 'course_frame_win_rate',
-        'dist_diff', 'cat_win_rate', 'cat_runs',
-        'course_front_rate', 'style_course_fit',
-        'interval_days', 'is_long_rest',
-        'prev_prize', 'prev_rank_num',
-        'horse_win_rate_val', 'horse_runs_val',
-        'eff_my_time_idx', 'eff_my_last3f_idx', 'eff_my_pace_idx', 'eff_my_start_idx',
-        'eff_jockey_win', 'eff_jockey_track_win'
+        'eff_rank_avg', 'eff_top5_rate', 'eff_top3_rate', 'prev_rank_num', # 着順・実績系（最重視）
+        'horse_win_rate_val', 'eff_jockey_win', 'eff_jockey_track_win', # 安定馬・騎手実績
+        'is_same_jockey', 'prev_prize', 'kinryo_num', 'kinryo_diff',
+        'distance_num', 'dist_diff', 'cat_win_rate',
+        'course_front_rate', 'style_course_fit', 'is_long_rest',
+        'eff_my_time_idx', 'eff_my_last3f_idx', 'eff_my_pace_idx', 'eff_my_start_idx'
     ]
 
     use_features = [f for f in candidate_features if f in df_prep.columns]
@@ -195,9 +201,9 @@ def main():
             use_features.append(cat)
 
     X = df_prep[use_features].copy()
-    y = df_prep['is_win']
+    y = df_prep['is_top3'] # 3着以内率ベースで安定度を学習
 
-    print(f"Training LightGBM model for STABLE WIN probability with {len(X)} records...")
+    print(f"Training LightGBM model with {len(X)} records and {len(use_features)} features...")
     
     train_data = lgb.Dataset(X, label=y)
     params = {
@@ -205,8 +211,8 @@ def main():
         'metric': 'binary_logloss',
         'boosting_type': 'gbdt',
         'learning_rate': 0.03,
-        'num_leaves': 20,
-        'min_data_in_leaf': 50,
+        'num_leaves': 15, # 穴馬への暴走を防ぐためパラメータ調整
+        'min_data_in_leaf': 100, # ノイズ徹底カット
         'verbose': -1,
         'seed': 42
     }
