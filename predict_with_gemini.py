@@ -228,7 +228,7 @@ def build_past_horse_dict(df_p):
 past_dict, course_front_map, course_frame_map = build_past_horse_dict(df_past)
 
 # ==========================================
-# 3. AI推論ロジック（強グループ重視＋シャープ勝率変換）
+# 3. AI推論ロジック（◎◯▲△＋☆2頭体系）
 # ==========================================
 def calculate_predictions(race_id_target, df_fut, cond):
     if df_fut.empty or model_data is None: return None
@@ -298,16 +298,27 @@ def calculate_predictions(race_id_target, df_fut, cond):
     race_df['jockey_track_win_rate'] = pd.to_numeric(race_df.get('jockey_track_win_rate'), errors='coerce').fillna(0.1).clip(0.0, 1.0)
     race_df['jockey_runs'] = pd.to_numeric(race_df.get('jockey_runs'), errors='coerce').fillna(100)
     race_df['jockey_wins'] = pd.to_numeric(race_df.get('jockey_wins'), errors='coerce').fillna(10)
+    race_df['jp_runs'] = pd.to_numeric(race_df.get('jp_runs'), errors='coerce').fillna(20)
+    race_df['jp_wins'] = pd.to_numeric(race_df.get('jp_wins'), errors='coerce').fillna(2)
+    race_df['jp_win_rate'] = race_df['jp_wins'] / (race_df['jp_runs'] + 1e-5)
 
     race_df['condition_code'] = cond
     race_df['condition'] = cond
 
-    # 🔥【強グループ】Zスコア算出
+    race_df['time_idx_diff'] = race_df['eff_my_time_idx'] - race_df['horse_avg_time_idx']
+    race_df['last3f_idx_diff'] = race_df['eff_my_last3f_idx'] - race_df['horse_avg_last3f_idx']
+    race_df['pace_idx_diff'] = race_df['eff_my_pace_idx'] - race_df['horse_avg_pace_idx']
+    race_df['start_idx_diff'] = race_df['eff_my_start_idx'] - race_df['horse_avg_start_idx']
+
+    race_df['first_corner_pos'] = pd.to_numeric(race_df.get('first_pos'), errors='coerce').fillna(8.0)
+    race_df['last_corner_pos'] = race_df['first_corner_pos']
+    race_df['pos_gain'] = 0.0
+
     z_cols = [
         'eff_rank_avg', 'eff_top3_rate', 'prev_prize', 'eff_my_time_idx', 
-        'eff_my_last3f_idx', 'jockey_win_rate', 'jockey_track_win_rate',
-        'horse_win_rate', 'horse_avg_time_idx', 'horse_avg_last3f_idx',
-        'age', 'kinryo_num', 'body_weight'
+        'eff_my_last3f_idx', 'eff_my_pace_idx', 'jockey_win_rate', 'jockey_track_win_rate',
+        'horse_win_rate', 'horse_avg_time_idx', 'horse_avg_last3f_idx', 'horse_avg_pace_idx', 'horse_avg_start_idx',
+        'age', 'kinryo_num', 'body_weight', 'prev_rank', 'first_pos'
     ]
     for c in z_cols:
         if c in race_df.columns:
@@ -318,7 +329,6 @@ def calculate_predictions(race_id_target, df_fut, cond):
             else:
                 race_df[f'{c}_z'] = (s_val - s_val.mean()) / s_std
 
-    # 🔥【強グループ】メンバー内順位算出
     rank_cols = ['eff_my_time_idx', 'horse_avg_time_idx', 'jockey_win_rate', 'horse_win_rate']
     for c in rank_cols:
         if c in race_df.columns:
@@ -348,18 +358,16 @@ def calculate_predictions(race_id_target, df_fut, cond):
         st.error(f"❌ モデル予測エラー: {e}")
         return None
 
-    # ★【実質勝率の算出】上位馬25〜35%、中位10〜15%、下位1〜3%へ適正マッピング
     s_std = np.std(raw_scores)
     if pd.notna(s_std) and s_std > 0:
         z_scores = (raw_scores - np.mean(raw_scores)) / s_std
         base_probs = 1.0 / (1.0 + np.exp(-1.2 * z_scores))
-        race_df['win_prob'] = base_probs * 0.35 + 0.01 # 最小約1%〜最大約36%にマッピング
+        race_df['win_prob'] = base_probs * 0.35 + 0.01
     else:
         race_df['win_prob'] = 0.10
 
     race_df['単勝_num'] = pd.to_numeric(race_df.get('単勝', race_df.get('オッズ', pd.Series())), errors='coerce').fillna(10.0)
     race_df['人気'] = race_df['単勝_num'].rank(method='min')
-
     race_df['ev'] = race_df['win_prob'] * race_df['単勝_num']
 
     p_min = race_df['win_prob'].min()
@@ -383,6 +391,7 @@ def calculate_predictions(race_id_target, df_fut, cond):
     else:
         race_df['脚質'] = "-"
 
+    # 🔥【新印ロジック】上位4頭を「◎・◯・▲・△」、5〜6位を「☆・☆」にする
     race_df = race_df.sort_values(by=['ai_score', 'win_prob'], ascending=[False, False]).reset_index(drop=True)
     race_df['印'] = "消"
     
@@ -390,13 +399,8 @@ def calculate_predictions(race_id_target, df_fut, cond):
     if len(race_df) > 1: race_df.loc[1, '印'] = "◯"
     if len(race_df) > 2: race_df.loc[2, '印'] = "▲"
     if len(race_df) > 3: race_df.loc[3, '印'] = "△"
-    if len(race_df) > 4: race_df.loc[4, '印'] = "△"
-    
-    if len(race_df) > 5:
-        ana_candidates = race_df.iloc[5:][(race_df['単勝_num'] >= 8.0) & (race_df['ev'] >= 0.90)]
-        if not ana_candidates.empty:
-            ana_idx = (ana_candidates['ev'] - 1.10).abs().idxmin()
-            race_df.loc[ana_idx, '印'] = "☆"
+    if len(race_df) > 4: race_df.loc[4, '印'] = "☆"
+    if len(race_df) > 5: race_df.loc[5, '印'] = "☆"
 
     mark_order = {"◎":1, "◯":2, "▲":3, "△":4, "☆":5, "消":6}
     race_df['mark_rank'] = race_df['印'].map(mark_order).fillna(99)
