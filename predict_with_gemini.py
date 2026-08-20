@@ -26,6 +26,18 @@ st.markdown("""
     .badge-honmei { background: #e74c3c; } .badge-taikou { background: #3498db; }
     .badge-tana { background: #2ecc71; } .badge-renka { background: #f39c12; }
     .badge-ana { background: #9b59b6; } .badge-keshi { background: #e0e0e0; color: #7f8c8d; }
+    
+    /* 勝負気配カードのスタイル */
+    .sense-card {
+        background-color: #ffffff;
+        border-left: 6px solid #8e44ad;
+        padding: 16px 20px;
+        border-radius: 8px;
+        margin-bottom: 20px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    }
+    .sense-title { font-size: 1.2rem; font-weight: bold; color: #8e44ad; }
+    .ticket-badge { font-size: 1.1rem; font-weight: bold; color: #d35400; background: #fef5e7; padding: 4px 10px; border-radius: 4px; display: inline-block; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -228,12 +240,12 @@ def build_past_horse_dict(df_p):
 past_dict, course_front_map, course_frame_map = build_past_horse_dict(df_past)
 
 # ==========================================
-# 3. AI推論ロジック（◎◯▲△＋☆2頭体系）
+# 3. AI推論＆勝負気配算出ロジック
 # ==========================================
 def calculate_predictions(race_id_target, df_fut, cond):
-    if df_fut.empty or model_data is None: return None
+    if df_fut.empty or model_data is None: return None, None, None, None
     race_df = df_fut[df_fut['race_id'].astype(str) == str(race_id_target)].copy()
-    if race_df.empty: return None
+    if race_df.empty: return None, None, None, None
 
     model = model_data['model']
     features = model_data['features']
@@ -356,7 +368,7 @@ def calculate_predictions(race_id_target, df_fut, cond):
         raw_scores = model.predict(X_num)
     except Exception as e:
         st.error(f"❌ モデル予測エラー: {e}")
-        return None
+        return None, None, None, None
 
     s_std = np.std(raw_scores)
     if pd.notna(s_std) and s_std > 0:
@@ -391,7 +403,7 @@ def calculate_predictions(race_id_target, df_fut, cond):
     else:
         race_df['脚質'] = "-"
 
-    # 🔥【新印ロジック】上位4頭を「◎・◯・▲・△」、5〜6位を「☆・☆」にする
+    # 上位4頭を「◎・◯・▲・△」、5〜6位を「☆・☆」にする
     race_df = race_df.sort_values(by=['ai_score', 'win_prob'], ascending=[False, False]).reset_index(drop=True)
     race_df['印'] = "消"
     
@@ -406,7 +418,32 @@ def calculate_predictions(race_id_target, df_fut, cond):
     race_df['mark_rank'] = race_df['印'].map(mark_order).fillna(99)
     race_df = race_df.sort_values(by='mark_rank').reset_index(drop=True)
 
-    return race_df
+    # 🔥 勝負気配判定の算出
+    probs = race_df['win_prob'].values
+    p1, p2, p3, p4 = probs[0], probs[1], probs[2], probs[3] if len(probs)>3 else 0.05
+    gap_1_2 = p1 - p2
+    gap_1_3 = p1 - p3
+
+    if gap_1_2 >= 0.07:
+        pat = "① 1強気配 (軸圧倒)"
+        rec_ticket = "3連単 1着固定 (6点 / 600円)"
+        buy_detail = f"1着: {race_df.loc[0, '馬番']}(◎) -> 2・3着: {race_df.loc[1, '馬番']}(◯), {race_df.loc[2, '馬番']}(▲), {race_df.loc[3, '馬番']}(△)"
+    elif gap_1_2 < 0.035 and gap_1_3 >= 0.06:
+        pat = "② 2強気配 (頭分け対抗)"
+        rec_ticket = "3連単 ダブル軸 (12点 / 1,200円)"
+        buy_detail = f"1着: {race_df.loc[0, '馬番']}(◎), {race_df.loc[1, '馬番']}(◯) -> 2着: ◎, ◯, {race_df.loc[2, '馬番']}(▲) -> 3着: ◎, ◯, ▲, {race_df.loc[3, '馬番']}(△), {race_df.loc[4, '馬番'] if len(race_df)>4 else ''}(☆)"
+    elif (p1 - p4) < 0.08:
+        pat = "④ 波乱気配 (大混戦)"
+        rec_ticket = "3連複 5頭BOX (10点 / 1,000円)"
+        u_list = [f"{race_df.loc[k, '馬番']}({race_df.loc[k, '印']})" for k in range(min(5, len(race_df)))]
+        buy_detail = f"BOX: {', '.join(u_list)}"
+    else:
+        pat = "③ 混戦気配 (標準展開)"
+        rec_ticket = "3連複 ◎1頭軸流し (10点 / 1,000円)"
+        u_others = [f"{race_df.loc[k, '馬番']}({race_df.loc[k, '印']})" for k in range(1, min(6, len(race_df)))]
+        buy_detail = f"軸: {race_df.loc[0, '馬番']}(◎) -> 相手: {', '.join(u_others)}"
+
+    return race_df, pat, rec_ticket, buy_detail
 
 # ==========================================
 # 4. テーブル生成
@@ -506,9 +543,22 @@ if st.session_state['selected_race_id']:
     
     cond = st.radio("想定馬場", ["良", "稍重", "重", "不良"], horizontal=True)
     
-    res_df = calculate_predictions(t_id, df_future, cond)
+    res_df, pat, rec_ticket, buy_detail = calculate_predictions(t_id, df_future, cond)
     
     if res_df is not None:
+        # 🔥 勝負気配＆推奨買い目カードのUI表示
+        st.markdown(f"""
+        <div class='sense-card'>
+            <div class='sense-title'>🧠 AI勝負気配判定: {pat}</div>
+            <div style='margin-top: 8px;'>
+                <b>🎟️ 推奨買い目:</b> <span class='ticket-badge'>{rec_ticket}</span>
+            </div>
+            <div style='margin-top: 6px; font-size: 15px; color: #555;'>
+                <b>📝 買い目詳細:</b> {buy_detail}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
         sort_option = st.selectbox("🔄 テーブルの表示順", ["システム推奨（印順）", "馬番順（昇順）", "AIスコア順（高い順）", "勝率順（高い順）", "予想オッズ順（低い順）", "期待値順（高い順）"], index=0)
 
         if sort_option == "馬番順（昇順）": res_df = res_df.sort_values(by='馬番')
@@ -543,7 +593,7 @@ if st.session_state['selected_race_id']:
 あなたはプロの競馬分析AI「勝ちぱかくん」の最終意思決定者（Gemini脳）です。
 
 【あなたの役割と3大定性チェックワークフロー】
-1. まず、提供された「Pythonが算出したベース予測データ（AI勝率、期待値、Python印）」を確認してください。
+1. まず、提供された「Pythonが算出したベース予測データ（AI勝率、期待値、Python印、AI勝負気配: {pat}）」を確認してください。
 2. 次に、Google検索ツールを駆使して、各出走馬に関する以下の【3大定性情報】を深掘り検索してください。
    ①【調教（追い切り状態）】: 前走時と比較した追い切りタイムの向上や坂路/CWでの状態、勝負気配
    ②【血統（コース/馬場適性）】: 今日のコース・馬場状態（洋芝・ダート・重馬場など）に対する血統的適性
@@ -563,7 +613,7 @@ if st.session_state['selected_race_id']:
   ]
 }}
 """
-            prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R 【{r_name}】\n【想定馬場状態】: {cond}\n\n【Python算定データ】:\n{chr(10).join(table_summary)}"
+            prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R 【{r_name}】\n【想定馬場状態】: {cond}\n【AI勝負気配】: {pat} ({rec_ticket})\n\n【Python算定データ】:\n{chr(10).join(table_summary)}"
 
             with st.spinner("🧠 Geminiが調教・血統・敗因データを検索＆分析し、表をアップデート中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)

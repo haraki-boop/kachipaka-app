@@ -6,12 +6,16 @@ import numpy as np
 import pandas as pd
 
 # ==========================================
-# 🐴 上位4頭（◎・◯・▲・△1）限定 検証スクリプト
+# 🎯 「勝負気配」自動察知＆適応購入 検証スクリプト（修正版）
 # ==========================================
 
-MODEL_FILE = "keiba_ai_model.pkl"
+MODEL_PATHS = ["keiba_ai_model.pkl", "勝ちパカくん.pkl"]
 DATA_FILE = "ml_target_data.csv"
-TEST_RACE_COUNT = 2220  # 直近2,220レースで検証
+
+TARGET_YEAR = 2026
+TARGET_MONTH = 8
+TARGET_DAY = 15
+EXCLUDE_NEWCOMER = True  # 新馬戦を除外
 
 def clean_horse_name(name):
     if pd.isna(name): return ""
@@ -49,13 +53,29 @@ def parse_passing(val):
     try: return float(parts[0]), float(parts[-1]), float(parts[0]) - float(parts[-1])
     except: return np.nan, np.nan, np.nan
 
+def extract_valid_odds(val):
+    if pd.isna(val): return np.nan
+    s = str(val).strip()
+    if '-' in s: return np.nan
+    m = re.search(r'(\d+\.\d+|\d+)', s)
+    if m:
+        try: return float(m.group(1))
+        except: return np.nan
+    return np.nan
+
 def main():
-    if not os.path.exists(MODEL_FILE) or not os.path.exists(DATA_FILE):
-        print("❌ 必要なファイルが見つかりません。")
+    model_path = None
+    for p in MODEL_PATHS:
+        if os.path.exists(p):
+            model_path = p
+            break
+
+    if not model_path or not os.path.exists(DATA_FILE):
+        print("❌ 必要なモデルファイルまたはデータファイルが見つかりません。")
         return
 
     print("🔄 モデルとデータを読み込んでいます...")
-    model_data = joblib.load(MODEL_FILE)
+    model_data = joblib.load(model_path)
     model = model_data['model']
     features = model_data['features']
 
@@ -63,12 +83,27 @@ def main():
     df['rank_num_target'] = pd.to_numeric(df['着順'], errors='coerce')
     df = df.dropna(subset=['rank_num_target', 'race_id']).copy()
 
+    df['date_parsed'] = pd.to_datetime(df['date'], format='mixed', errors='coerce')
+    date_filtered = df[
+        (df['date_parsed'].dt.year == TARGET_YEAR) & 
+        (df['date_parsed'].dt.month == TARGET_MONTH) & 
+        (df['date_parsed'].dt.day == TARGET_DAY)
+    ].copy()
+
+    if date_filtered.empty:
+        print(f"⚠️ {TARGET_YEAR}年{TARGET_MONTH}月{TARGET_DAY}日 のデータが見つかりませんでした。")
+        return
+
+    if EXCLUDE_NEWCOMER:
+        if 'race_name' in date_filtered.columns:
+            date_filtered = date_filtered[~date_filtered['race_name'].astype(str).str.contains("新馬", na=False)]
+
+    target_races = date_filtered['race_id'].unique()
+
     df['馬名_clean'] = df['馬名'].astype(str).apply(clean_horse_name)
-    df['date_parsed'] = pd.to_datetime(df['date'], errors='coerce')
     df['distance_num'] = pd.to_numeric(df.get('distance'), errors='coerce')
     df['dist_cat'] = df['distance_num'].apply(get_dist_cat)
     df['is_top3_past'] = (df['rank_num_target'] <= 3).astype(int)
-    df['is_win_past'] = (df['rank_num_target'] == 1).astype(int)
 
     sex_age = df['性齢'].apply(parse_sex_age)
     df['sex_code'] = [s[0] for s in sex_age]
@@ -83,12 +118,13 @@ def main():
     df['body_weight_diff'] = [p[1] for p in weights_parsed]
     df['kinryo_body_ratio'] = df['kinryo_num'] / df['body_weight'].fillna(470)
 
-    passing = df['通過'].apply(parse_passing)
+    passing_src = df['通過'] if '通過' in df.columns else df.get('Through', pd.Series())
+    passing = passing_src.apply(parse_passing)
     df['first_corner_pos'] = [p[0] for p in passing]
     df['last_corner_pos'] = [p[1] for p in passing]
     df['pos_gain'] = [p[2] for p in passing]
 
-    df['単勝_num'] = pd.to_numeric(df.get('単勝'), errors='coerce').fillna(10.0)
+    df['単勝_num'] = df['単勝'].apply(extract_valid_odds)
 
     df['eff_rank_avg'] = df.groupby('馬名_clean')['rank_num_target'].apply(
         lambda x: x.shift(1).rolling(3, min_periods=1).mean()
@@ -134,9 +170,7 @@ def main():
             s_val = pd.to_numeric(df[c], errors='coerce')
             df[f'{c}_rank_in_race'] = s_val.rank(ascending=False, method='min')
 
-    races = df['race_id'].unique()
-    test_races = races[-TEST_RACE_COUNT:]
-    df_test = df[df['race_id'].isin(test_races)].copy()
+    df_test = df[df['race_id'].isin(target_races)].copy()
 
     X_test = pd.DataFrame(index=df_test.index)
     for f in features:
@@ -144,15 +178,16 @@ def main():
 
     df_test['raw_score'] = model.predict(X_test)
 
-    # 上位4頭（◎, ◯, ▲, △）用の各種カウンタ
-    sanrenpuku_4box_hits = 0  # 4頭BOX (4点)
-    sanrenpuku_jiku_hits = 0  # ◎ 軸 -> ◯▲△ (3点)
-    sanrentan_4box_hits = 0   # 4頭BOX (24点)
-    sanrentan_1착固定_hits = 0# ◎ 1着固定 -> ◯▲△ (6点)
-    umaren_4box_hits = 0      # 4頭BOX (6点)
-    umaren_jiku_hits = 0      # ◎ 軸 -> ◯▲△ (3点)
-
-    total_valid_races = 0
+    total_invest = 0
+    total_return = 0.0
+    total_hits = 0
+    
+    pattern_stats = {
+        "① 1強 (3連単 6点)": {"races": 0, "hits": 0, "invest": 0, "return": 0.0},
+        "② 2強 (3連単ダブル軸12点)": {"races": 0, "hits": 0, "invest": 0, "return": 0.0},
+        "③ 混戦 (3連複 ◎軸1頭10点)": {"races": 0, "hits": 0, "invest": 0, "return": 0.0},
+        "④ 波乱 (3連複 5頭BOX10点)": {"races": 0, "hits": 0, "invest": 0, "return": 0.0},
+    }
 
     for race_id, group in df_test.groupby('race_id'):
         group = group.copy()
@@ -166,58 +201,90 @@ def main():
             group['win_prob'] = 0.10
 
         group = group.sort_values(by=['win_prob'], ascending=[False]).reset_index(drop=True)
-        group['印'] = "消"
+        probs = group['win_prob'].values
+        p1, p2, p3, p4 = probs[0], probs[1], probs[2], probs[3] if len(probs)>3 else 0.05
+        
+        gap_1_2 = p1 - p2
+        gap_1_3 = p1 - p3
 
-        # 上位4頭だけに個別の印を付与
-        if len(group) > 0: group.loc[0, '印'] = "◎"
-        if len(group) > 1: group.loc[1, '印'] = "◯"
-        if len(group) > 2: group.loc[2, '印'] = "▲"
-        if len(group) > 3: group.loc[3, '印'] = "△"
+        # 🔥 修正箇所: 先に印を付与してから着順（r1, r2, r3）を取得する
+        marks = ["◎", "◯", "▲", "△", "☆1", "☆2"]
+        group['印'] = "消"
+        for i in range(min(len(group), len(marks))):
+            group.loc[i, '印'] = marks[i]
 
         r1 = group[group['rank_num_target'] == 1]
         r2 = group[group['rank_num_target'] == 2]
         r3 = group[group['rank_num_target'] == 3]
 
-        if not r1.empty and not r2.empty and not r3.empty:
-            total_valid_races += 1
-            m1 = r1['印'].iloc[0]
-            m2 = r2['印'].iloc[0]
-            m3 = r3['印'].iloc[0]
+        if r1.empty or r2.empty or r3.empty: continue
 
-            top4_marks = {"◎", "◯", "▲", "△"}
-            race_top3_marks = [m1, m2, m3]
+        v1 = r1['単勝_num'].iloc[0]
+        v2 = r2['単勝_num'].iloc[0]
+        v3 = r3['単勝_num'].iloc[0]
 
-            # 1. 3連複 4頭BOX (1,2,3着が上位4頭で独占)
-            if all(m in top4_marks for m in race_top3_marks):
-                sanrenpuku_4box_hits += 1
-                sanrentan_4box_hits += 1
+        o1 = v1 if pd.notna(v1) and v1 > 0 else 3.5
+        o2 = v2 if pd.notna(v2) and v2 > 0 else 5.0
+        o3 = v3 if pd.notna(v3) and v3 > 0 else 8.0
 
-                # 2. 3連複 ◎軸 (◎が入っていて残り2頭も上位4頭)
-                if "◎" in race_top3_marks:
-                    sanrenpuku_jiku_hits += 1
+        est_sanrenpuku = min(max(o1 * o2 * o3 * 25, 400), 80000)
+        est_sanrentan = min(max(o1 * o2 * o3 * 120, 1000), 250000)
 
-            # 3. 3連単 ◎1着固定 (1着が◎、2・3着が◯▲△)
-            if m1 == "◎" and m2 in top4_marks and m3 in top4_marks:
-                sanrentan_1착固定_hits += 1
+        m1, m2, m3 = r1['印'].iloc[0], r2['印'].iloc[0], r3['印'].iloc[0]
+        top5 = {"◎", "◯", "▲", "△", "☆1"}
+        top6 = {"◎", "◯", "▲", "△", "☆1", "☆2"}
 
-            # 4. 馬連 4頭BOX (1,2着が上位4頭)
-            if m1 in top4_marks and m2 in top4_marks:
-                umaren_4box_hits += 1
+        # スコア差による買い目の自動分岐
+        if gap_1_2 >= 0.07:
+            pat = "① 1強 (3連単 6点)"
+            invest = 600
+            hit = (m1 == "◎" and m2 in {"◯", "▲", "△"} and m3 in {"◯", "▲", "△"})
+            pay = est_sanrentan if hit else 0.0
 
-                # 5. 馬連 ◎軸 (1着または2着に◎があり、相方も上位4頭)
-                if "◎" in [m1, m2]:
-                    umaren_jiku_hits += 1
+        elif gap_1_2 < 0.035 and gap_1_3 >= 0.06:
+            pat = "② 2強 (3連単ダブル軸12点)"
+            invest = 1200
+            hit = (m1 in {"◎", "◯"} and m2 in {"◎", "◯", "▲"} and m3 in top5)
+            pay = est_sanrentan if hit else 0.0
 
-    print("\n" + "="*70)
-    print(f"🎯 【Python上位4頭（◎・◯・▲・△）限定】 馬券別 的中率 ({total_valid_races:,} R)")
-    print("="*70)
-    print(f"① 3連複 【4頭BOX】       ( 4点)  : 的中率 {(sanrenpuku_4box_hits/total_valid_races)*100:5.2f}% ({sanrenpuku_4box_hits}R)")
-    print(f"② 3連複 【◎軸 -> ◯▲△】  ( 3点)  : 的中率 {(sanrenpuku_jiku_hits/total_valid_races)*100:5.2f}% ({sanrenpuku_jiku_hits}R)")
-    print(f"③ 3連単 【4頭BOX】       (24点)  : 的中率 {(sanrentan_4box_hits/total_valid_races)*100:5.2f}% ({sanrentan_4box_hits}R)")
-    print(f"④ 3連単 【◎1着固定】     ( 6点)  : 的中率 {(sanrentan_1착固定_hits/total_valid_races)*100:5.2f}% ({sanrentan_1착固定_hits}R)")
-    print(f"⑤ 馬連   【4頭BOX】       ( 6点)  : 的中率 {(umaren_4box_hits/total_valid_races)*100:5.2f}% ({umaren_4box_hits}R)")
-    print(f"⑥ 馬連   【◎軸 -> ◯▲△】  ( 3点)  : 的中率 {(umaren_jiku_hits/total_valid_races)*100:5.2f}% ({umaren_jiku_hits}R)")
-    print("="*70)
+        elif (p1 - p4) < 0.08:
+            pat = "④ 波乱 (3連複 5頭BOX10点)"
+            invest = 1000
+            hit = all(m in top5 for m in [m1, m2, m3])
+            pay = est_sanrenpuku if hit else 0.0
+
+        else:
+            pat = "③ 混戦 (3連複 ◎軸1頭10点)"
+            invest = 1000
+            hit = ("◎" in [m1, m2, m3] and all(o in top6 for o in [m for m in [m1, m2, m3] if m != "◎"]))
+            pay = est_sanrenpuku if hit else 0.0
+
+        pattern_stats[pat]["races"] += 1
+        pattern_stats[pat]["invest"] += invest
+        pattern_stats[pat]["return"] += pay
+        if hit: pattern_stats[pat]["hits"] += 1
+
+        total_invest += invest
+        total_return += pay
+        if hit: total_hits += 1
+
+    print("\n" + "="*85)
+    print(f"🧠 【{TARGET_YEAR}年{TARGET_MONTH}月{TARGET_DAY}日 AI気配察知・適応購入 検証結果】")
+    print("="*85)
+    for pat, st in pattern_stats.items():
+        r = st["races"]
+        h = st["hits"]
+        inv = st["invest"]
+        ret = st["return"]
+        rec = (ret / inv * 100) if inv > 0 else 0.0
+        print(f"・ {pat:<28} : 該当{r:2d}R | 的中{h:2d}R ({(h/r*100 if r>0 else 0):5.1f}%) | 投資{inv:6,d}円 | 払戻{int(ret):6,d}円 | 回収率: {rec:6.1f}%")
+    
+    print("-" * 85)
+    total_races = sum([st["races"] for st in pattern_stats.values()])
+    total_rec = (total_return / total_invest * 100) if total_invest > 0 else 0.0
+    print(f"🏆 【総合トータル成績】  : 全{total_races}R | 的中{total_hits}R ({(total_hits/total_races*100):.1f}%) | 投資{total_invest:,}円 | 払戻{int(total_return):,}円")
+    print(f"🔥 【最終合計収支】      : {int(total_return - total_invest):+,}円 (総合回収率: {total_rec:.1f}%)")
+    print("="*85)
 
 if __name__ == "__main__":
     main()
