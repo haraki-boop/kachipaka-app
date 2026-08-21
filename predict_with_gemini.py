@@ -351,18 +351,21 @@ def calculate_predictions(race_id_target, df_fut, cond):
     for f in features:
         X[f] = race_df[f] if f in race_df.columns else np.nan
 
+    # 🔥【修正箇所】カテゴリ変数を完全な数値（int/float）へ安全にマッピングし、category型へのキャストを排除
     cat_cols = ['surface_code', 'condition_code', 'sex_code']
     for cat in cat_cols:
         if cat in X.columns:
-            X[cat] = X[cat].astype('category')
-            if cat == 'sex_code': X[cat] = X[cat].replace({'牡':0,'牝':1,'セ':2})
-            if cat == 'surface_code': X[cat] = X[cat].replace({'芝':0,'ダート':1,'障害':2})
-            if cat == 'condition_code': X[cat] = X[cat].replace({'良':0,'稍重':1,'稍':1,'重':2,'不良':3})
+            if cat == 'sex_code': 
+                X[cat] = X[cat].replace({'牡':0,'牝':1,'セ':2}).fillna(0)
+            elif cat == 'surface_code': 
+                X[cat] = X[cat].replace({'芝':0,'ダート':1,'障害':2}).fillna(0)
+            elif cat == 'condition_code': 
+                X[cat] = X[cat].replace({'良':0,'稍重':1,'稍':1,'重':2,'不良':3}).fillna(0)
 
+    # 全カラムを数値（numeric）として一括キャスト
     X_num = X.copy()
     for col in X_num.columns:
-        if col not in cat_cols:
-            X_num[col] = pd.to_numeric(X_num[col], errors='coerce')
+        X_num[col] = pd.to_numeric(X_num[col], errors='coerce').fillna(0)
 
     try:
         raw_scores = model.predict(X_num)
