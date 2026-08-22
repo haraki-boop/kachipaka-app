@@ -351,7 +351,6 @@ def calculate_predictions(race_id_target, df_fut, cond):
     for f in features:
         X[f] = race_df[f] if f in race_df.columns else np.nan
 
-    # 🔥【修正箇所】カテゴリ変数を完全な数値（int/float）へ安全にマッピングし、category型へのキャストを排除
     cat_cols = ['surface_code', 'condition_code', 'sex_code']
     for cat in cat_cols:
         if cat in X.columns:
@@ -362,7 +361,6 @@ def calculate_predictions(race_id_target, df_fut, cond):
             elif cat == 'condition_code': 
                 X[cat] = X[cat].replace({'良':0,'稍重':1,'稍':1,'重':2,'不良':3}).fillna(0)
 
-    # 全カラムを数値（numeric）として一括キャスト
     X_num = X.copy()
     for col in X_num.columns:
         X_num[col] = pd.to_numeric(X_num[col], errors='coerce').fillna(0)
@@ -523,14 +521,18 @@ for i, place in enumerate(places):
     with place_tabs[i]:
         place_df = day_df[day_df['place_name'] == place]
         races = sorted(place_df['r_num'].unique())
-        cols = st.columns(6)
-        for j, r in enumerate(races):
-            r_df = place_df[place_df['r_num'] == r]
-            r_id = r_df['race_id'].iloc[0]
-            r_name = str(r_df.get('race_name', pd.Series([''])).iloc[0]).strip()
-            label = f"{r}R {r_name}" if r_name and r_name != 'nan' else f"{r}R"
-            if cols[j % 6].button(label, key=f"btn_{r_id}", use_container_width=True):
-                st.session_state['selected_race_id'] = r_id
+        # スマホ表示時に1R・7Rと縦に並ばないように行ごとに列を作る処理に変更
+        for j in range(0, len(races), 6):
+            cols = st.columns(6)
+            for k in range(6):
+                if j + k < len(races):
+                    r = races[j + k]
+                    r_df = place_df[place_df['r_num'] == r]
+                    r_id = r_df['race_id'].iloc[0]
+                    r_name = str(r_df.get('race_name', pd.Series([''])).iloc[0]).strip()
+                    label = f"{r}R {r_name}" if r_name and r_name != 'nan' else f"{r}R"
+                    if cols[k].button(label, key=f"btn_{r_id}", use_container_width=True):
+                        st.session_state['selected_race_id'] = r_id
 
 if st.session_state['selected_race_id']:
     t_id = str(st.session_state['selected_race_id'])
@@ -637,7 +639,7 @@ if st.session_state['selected_race_id']:
                     except: time.sleep(2)
                     
                 if res_text:
-                    clean_json_text = re.sub(r'^```json\n|```$', '', res_text, flags=re.MULTILINE).strip()
+                    clean_json_text = re.sub(r'^```json\n| সংকট', '', res_text, flags=re.MULTILINE).strip()
                     try:
                         gemini_data = json.loads(clean_json_text)
                         
