@@ -7,7 +7,7 @@ INPUT_CSV = "ml_target_data.csv"
 OUTPUT_CSV = "ml_target_data.csv"
 
 def calc_custom_index(val, m, s):
-    if pd.isna(val) or s == 0: return 50.0
+    if pd.isna(val) or pd.isna(s) or s == 0: return 50.0
     return 50.0 + ((m - val) / s) * 10.0
 
 def main():
@@ -22,12 +22,10 @@ def main():
         df = pd.read_csv(INPUT_CSV, low_memory=False, encoding='cp932')
 
     print("Cleaning data...")
-    # カラムが存在しない場合のエラーを回避
     df['着順'] = pd.to_numeric(df.get('着順'), errors='coerce')
-    df = df.dropna(subset=['着順'])
+    df = df.dropna(subset=['着順']).copy()
     df['is_win'] = (df['着順'] == 1).astype(int)
 
-    # タイムと上がりの列名を柔軟に取得
     time_col = df.get('タイム', df.get('time', pd.Series(np.nan, index=df.index)))
     last3f_col = df.get('上がり3F', df.get('上がり', df.get('last3f', pd.Series(np.nan, index=df.index))))
 
@@ -43,12 +41,17 @@ def main():
             race_std_last3f=('上がり3F', 'std')
         ).reset_index()
         df = pd.merge(df, race_stats, on='race_id', how='left')
-    else:
-        df['race_avg_time'], df['race_std_time'], df['race_avg_last3f'], df['race_std_last3f'] = np.nan, np.nan, np.nan, np.nan
+    
+    # 【追加の安全対策】列が結合されなかった場合のために強制的に空の列を作成
+    safe_cols = ['race_avg_time', 'race_std_time', 'race_avg_last3f', 'race_std_last3f']
+    for c in safe_cols:
+        if c not in df.columns:
+            df[c] = np.nan
 
     print("Calculating Custom Indices...")
-    df['my_time_idx'] = df.apply(lambda r: calc_custom_index(r['タイム'], r['race_avg_time'], r['race_std_time']), axis=1)
-    df['my_last3f_idx'] = df.apply(lambda r: calc_custom_index(r['上がり3F'], r['race_avg_last3f'], r['race_std_last3f']), axis=1)
+    # .get() を使って安全に値を取得
+    df['my_time_idx'] = df.apply(lambda r: calc_custom_index(r.get('タイム'), r.get('race_avg_time'), r.get('race_std_time')), axis=1)
+    df['my_last3f_idx'] = df.apply(lambda r: calc_custom_index(r.get('上がり3F'), r.get('race_avg_last3f'), r.get('race_std_last3f')), axis=1)
     df['my_pace_idx'] = df['my_time_idx'] * 0.4 + df['my_last3f_idx'] * 0.6
     df['my_start_idx'] = df['my_time_idx'] * 0.7 + df['my_last3f_idx'] * 0.3
 
