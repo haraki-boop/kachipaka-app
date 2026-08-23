@@ -6,16 +6,18 @@ import numpy as np
 import pandas as pd
 
 # ==========================================
-# 🎯 「勝負気配」自動察知＆適応購入 検証スクリプト（修正版）
+# 🎯 「勝負気配」自動察知＆適応購入 検証スクリプト (Optuna最強版対応)
 # ==========================================
 
 MODEL_PATHS = ["keiba_ai_model.pkl", "勝ちパカくん.pkl"]
 DATA_FILE = "ml_target_data.csv"
 
+EVAL_MODE = "RECENT"
 TARGET_YEAR = 2026
 TARGET_MONTH = 8
-TARGET_DAY = 15
-EXCLUDE_NEWCOMER = True  # 新馬戦を除外
+TARGET_DAY = 2
+TARGET_RACE_COUNT = 3000
+EXCLUDE_NEWCOMER = True
 
 def clean_horse_name(name):
     if pd.isna(name): return ""
@@ -63,6 +65,171 @@ def extract_valid_odds(val):
         except: return np.nan
     return np.nan
 
+def preprocess_features(df):
+    df_feat = df.copy()
+
+    df_feat['馬名_clean'] = df_feat['馬名'].astype(str).apply(clean_horse_name)
+    df_feat['date_parsed'] = pd.to_datetime(df_feat['date'], errors='coerce')
+    df_feat = df_feat.dropna(subset=['date_parsed']).sort_values(['馬名_clean', 'date_parsed'])
+
+    sex_age = df_feat['性齢'].apply(parse_sex_age)
+    df_feat['sex_code'] = [s[0] for s in sex_age]
+    df_feat['age'] = [s[1] for s in sex_age]
+
+    df_feat['distance_num'] = pd.to_numeric(df_feat.get('distance'), errors='coerce')
+    df_feat['dist_cat'] = df_feat['distance_num'].apply(get_dist_cat)
+    df_feat['rank_num'] = pd.to_numeric(df_feat.get('着順'), errors='coerce')
+    df_feat['is_top3_past'] = (df_feat['rank_num'] <= 3).astype(int)
+    df_feat['is_win_past'] = (df_feat['rank_num'] == 1).astype(int)
+
+    passing = df_feat['通過'].apply(parse_passing)
+    df_feat['first_corner_pos'] = [p[0] for p in passing]
+    df_feat['last_corner_pos'] = [p[1] for p in passing]
+    df_feat['pos_gain'] = [p[2] for p in passing]
+
+    df_feat['eff_rank_avg'] = df_feat.groupby('馬名_clean')['rank_num'].apply(
+        lambda x: x.shift(1).rolling(3, min_periods=1).mean()
+    ).reset_index(level=0, drop=True)
+    
+    df_feat['eff_top5_rate'] = df_feat.groupby('馬名_clean')['rank_num'].apply(
+        lambda x: (x.shift(1) <= 5).astype(float).rolling(5, min_periods=1).mean()
+    ).reset_index(level=0, drop=True)
+
+    df_feat['eff_top3_rate'] = df_feat.groupby('馬名_clean')['is_top3_past'].apply(
+        lambda x: x.shift(1).rolling(5, min_periods=1).mean()
+    ).reset_index(level=0, drop=True)
+
+    df_feat['kinryo_num'] = pd.to_numeric(df_feat.get('斤量'), errors='coerce')
+    df_feat['wakuban_num'] = pd.to_numeric(df_feat.get('枠番'), errors='coerce')
+    df_feat['umaban_num'] = pd.to_numeric(df_feat.get('馬番'), errors='coerce')
+
+    # 🌟 NEW 2: トラックバイアス精密化をテストデータ側でも計算
+    df_feat['meet_day_num'] = pd.to_numeric(df_feat.get('meet_day_num'), errors='coerce').fillna(1.0)
+    df_feat['race_num'] = df_feat['race_id'].astype(str).str[-2:]
+    df_feat['race_num'] = pd.to_numeric(df_feat['race_num'], errors='coerce').fillna(1.0)
+    df_feat['track_degradation'] = df_feat['meet_day_num'] * df_feat['race_num']
+
+    weights_parsed = df_feat.get('馬体重', pd.Series()).apply(parse_weight)
+    df_feat['body_weight'] = [p[0] for p in weights_parsed]
+    df_feat['body_weight_diff'] = [p[1] for p in weights_parsed]
+    df_feat['kinryo_body_ratio'] = df_feat['kinryo_num'] / df_feat['body_weight'].fillna(470)
+
+    num_cols = [
+        'horse_runs', 'horse_wins', 'horse_win_rate', 'prev_rank',
+        'horse_avg_time_idx', 'horse_avg_last3f_idx', 'horse_avg_pace_idx', 'horse_avg_start_idx',
+        'jockey_runs', 'jockey_wins', 'jockey_win_rate', 'jockey_track_win_rate',
+        'jp_runs', 'jp_wins', 'first_pos'
+    ]
+    for c in num_cols:
+        if c in df_feat.columns:
+            df_feat[c] = pd.to_numeric(df_feat[c], errors='coerce')
+
+    df_feat['jp_win_rate'] = df_feat['jp_wins'] / (df_feat['jp_runs'] + 1e-5)
+
+    place_code = df_feat.get('place_code', pd.Series(['00']*len(df_feat)))
+    surface = df_feat.get('surface', pd.Series(['芝']*len(df_feat)))
+    df_feat['course_id'] = place_code.astype(str) + "_" + surface.astype(str) + "_" + df_feat['distance_num'].fillna(0).astype(int).astype(str)
+    df_feat['course_frame_id'] = df_feat['course_id'] + "_frame_" + df_feat['wakuban_num'].fillna(0).astype(int).astype(str)
+
+    course_frame_win_rates = df_feat.groupby('course_frame_id')['is_win_past'].mean().to_dict()
+    df_feat['course_frame_win_rate'] = df_feat['course_frame_id'].map(course_frame_win_rates).fillna(0.08)
+
+    kinryo_diffs, is_same_jockeys, dist_diffs = [], [], []
+    cat_win_rates, cat_runs_list, prev_prizes = [], [], []
+
+    for horse, group in df_feat.groupby('馬名_clean', sort=False):
+        for i in range(len(group)):
+            curr_row = group.iloc[i]
+            past_rows = group.iloc[:i]
+
+            curr_dist = curr_row['distance_num']
+            curr_cat = curr_row['dist_cat']
+            curr_jockey = str(curr_row.get('騎手', '')).strip()
+            curr_kinryo = curr_row['kinryo_num']
+
+            if past_rows.empty:
+                kinryo_diffs.append(0.0)
+                is_same_jockeys.append(0)
+                dist_diffs.append(np.nan)
+                cat_win_rates.append(np.nan)
+                cat_runs_list.append(0)
+                prev_prizes.append(np.nan)
+            else:
+                prev_row = past_rows.iloc[-1]
+                prev_kinryo = prev_row['kinryo_num']
+                kinryo_diffs.append(curr_kinryo - prev_kinryo if pd.notna(curr_kinryo) and pd.notna(prev_kinryo) else 0.0)
+
+                prev_jockey = str(prev_row.get('騎手', '')).strip()
+                is_same_jockeys.append(1 if (curr_jockey and curr_jockey == prev_jockey) else 0)
+
+                top3_past = past_rows[past_rows['is_top3_past'] == 1]
+                if not top3_past.empty and pd.notna(curr_dist):
+                    best_dist_avg = top3_past['distance_num'].mean()
+                    dist_diffs.append(abs(curr_dist - best_dist_avg))
+                else:
+                    dist_diffs.append(np.nan)
+
+                cat_past = past_rows[past_rows['dist_cat'] == curr_cat]
+                c_runs = len(cat_past)
+                cat_runs_list.append(c_runs)
+                cat_win_rates.append(cat_past['is_win_past'].sum() / c_runs if c_runs > 0 else np.nan)
+                prev_prizes.append(pd.to_numeric(prev_row.get('賞金(万円)'), errors='coerce'))
+
+    df_feat['kinryo_diff'] = kinryo_diffs
+    df_feat['is_same_jockey'] = is_same_jockeys
+    df_feat['dist_diff'] = dist_diffs
+    df_feat['cat_win_rate'] = cat_win_rates
+    df_feat['cat_runs'] = cat_runs_list
+    df_feat['prev_prize'] = prev_prizes
+
+    df_feat['interval_days'] = df_feat.groupby('馬名_clean')['date_parsed'].diff().dt.days.fillna(30)
+    df_feat['is_long_rest'] = (df_feat['interval_days'] >= 180).astype(int)
+
+    target_cols = ['my_time_idx', 'my_last3f_idx', 'my_pace_idx', 'my_start_idx', 'hybrid_power_idx']
+    for col in target_cols:
+        if col in df_feat.columns:
+            num_col = pd.to_numeric(df_feat[col], errors='coerce').clip(40, 80)
+            df_feat[f'eff_{col}'] = num_col.groupby(df_feat['馬名_clean']).apply(
+                lambda x: x.shift(1).rolling(3, min_periods=1).median()
+            ).reset_index(level=0, drop=True)
+        else:
+            df_feat[f'eff_{col}'] = np.nan
+
+    # 🌟 NEW 1: ペース展開の相対評価をテストデータ側でも計算
+    df_feat['race_avg_start_idx'] = df_feat.groupby('race_id')['eff_my_start_idx'].transform('mean').fillna(50.0)
+    df_feat['pace_scenario_idx'] = df_feat['eff_my_last3f_idx'].fillna(50.0) * (df_feat['race_avg_start_idx'] / 50.0)
+
+    course_front_rates = df_feat.groupby('course_id')['is_top3_past'].mean().to_dict()
+    df_feat['course_front_rate'] = df_feat['course_id'].map(course_front_rates).fillna(0.3)
+    df_feat['style_course_fit'] = df_feat['eff_my_start_idx'].fillna(50) * df_feat['course_front_rate']
+
+    df_feat['prev_rank_num'] = df_feat['rank_num'].groupby(df_feat['馬名_clean']).shift(1)
+
+    df_feat['time_idx_diff'] = df_feat['eff_my_time_idx'] - df_feat['horse_avg_time_idx']
+    df_feat['last3f_idx_diff'] = df_feat['eff_my_last3f_idx'] - df_feat['horse_avg_last3f_idx']
+    df_feat['pace_idx_diff'] = df_feat['eff_my_pace_idx'] - df_feat['horse_avg_pace_idx']
+    df_feat['start_idx_diff'] = df_feat['eff_my_start_idx'] - df_feat['horse_avg_start_idx']
+
+    z_cols = [
+        'eff_rank_avg', 'eff_top3_rate', 'prev_prize', 'eff_my_time_idx', 
+        'eff_my_last3f_idx', 'eff_my_pace_idx', 'jockey_win_rate', 'jockey_track_win_rate',
+        'horse_win_rate', 'horse_avg_time_idx', 'horse_avg_last3f_idx', 'horse_avg_pace_idx', 'horse_avg_start_idx',
+        'age', 'kinryo_num', 'body_weight', 'prev_rank', 'first_pos', 'eff_hybrid_power_idx',
+        'pace_scenario_idx' # 🌟 NEW 1
+    ]
+    for c in z_cols:
+        if c in df_feat.columns:
+            df_feat[f'{c}_z'] = df_feat.groupby('race_id')[c].transform(
+                lambda x: (x - x.mean()) / (x.std() + 1e-5) if len(x) > 1 else 0.0
+            ).fillna(0.0)
+
+    rank_cols = ['eff_my_time_idx', 'horse_avg_time_idx', 'jockey_win_rate', 'horse_win_rate', 'eff_hybrid_power_idx']
+    for c in rank_cols:
+        if c in df_feat.columns:
+            df_feat[f'{c}_rank_in_race'] = df_feat.groupby('race_id')[c].rank(ascending=False, method='min')
+
+    return df_feat
+
 def main():
     model_path = None
     for p in MODEL_PATHS:
@@ -82,100 +249,38 @@ def main():
     df = pd.read_csv(DATA_FILE, low_memory=False)
     df['rank_num_target'] = pd.to_numeric(df['着順'], errors='coerce')
     df = df.dropna(subset=['rank_num_target', 'race_id']).copy()
-
-    df['date_parsed'] = pd.to_datetime(df['date'], format='mixed', errors='coerce')
-    date_filtered = df[
-        (df['date_parsed'].dt.year == TARGET_YEAR) & 
-        (df['date_parsed'].dt.month == TARGET_MONTH) & 
-        (df['date_parsed'].dt.day == TARGET_DAY)
-    ].copy()
-
-    if date_filtered.empty:
-        print(f"⚠️ {TARGET_YEAR}年{TARGET_MONTH}月{TARGET_DAY}日 のデータが見つかりませんでした。")
-        return
-
-    if EXCLUDE_NEWCOMER:
-        if 'race_name' in date_filtered.columns:
-            date_filtered = date_filtered[~date_filtered['race_name'].astype(str).str.contains("新馬", na=False)]
-
-    target_races = date_filtered['race_id'].unique()
-
-    df['馬名_clean'] = df['馬名'].astype(str).apply(clean_horse_name)
-    df['distance_num'] = pd.to_numeric(df.get('distance'), errors='coerce')
-    df['dist_cat'] = df['distance_num'].apply(get_dist_cat)
-    df['is_top3_past'] = (df['rank_num_target'] <= 3).astype(int)
-
-    sex_age = df['性齢'].apply(parse_sex_age)
-    df['sex_code'] = [s[0] for s in sex_age]
-    df['age'] = [s[1] for s in sex_age]
-
-    df['kinryo_num'] = pd.to_numeric(df.get('斤量'), errors='coerce')
-    df['wakuban_num'] = pd.to_numeric(df.get('枠番'), errors='coerce')
-    df['umaban_num'] = pd.to_numeric(df.get('馬番'), errors='coerce')
-
-    weights_parsed = df.get('馬体重', pd.Series()).apply(parse_weight)
-    df['body_weight'] = [p[0] for p in weights_parsed]
-    df['body_weight_diff'] = [p[1] for p in weights_parsed]
-    df['kinryo_body_ratio'] = df['kinryo_num'] / df['body_weight'].fillna(470)
-
-    passing_src = df['通過'] if '通過' in df.columns else df.get('Through', pd.Series())
-    passing = passing_src.apply(parse_passing)
-    df['first_corner_pos'] = [p[0] for p in passing]
-    df['last_corner_pos'] = [p[1] for p in passing]
-    df['pos_gain'] = [p[2] for p in passing]
-
     df['単勝_num'] = df['単勝'].apply(extract_valid_odds)
 
-    df['eff_rank_avg'] = df.groupby('馬名_clean')['rank_num_target'].apply(
-        lambda x: x.shift(1).rolling(3, min_periods=1).mean()
-    ).reset_index(level=0, drop=True)
+    print(f"⚙️ 特徴量 ({len(features)}個) を生成中... (過去データから偏差値や新・展開指数を計算)")
+    df_prep = preprocess_features(df)
+    
+    df_prep['date_parsed'] = pd.to_datetime(df_prep['date'], format='mixed', errors='coerce')
+    
+    if EXCLUDE_NEWCOMER and 'race_name' in df_prep.columns:
+        df_prep = df_prep[~df_prep['race_name'].astype(str).str.contains("新馬", na=False)]
 
-    df['eff_top5_rate'] = df.groupby('馬名_clean')['rank_num_target'].apply(
-        lambda x: (x.shift(1) <= 5).astype(float).rolling(5, min_periods=1).mean()
-    ).reset_index(level=0, drop=True)
+    if EVAL_MODE == "DAILY":
+        df_test = df_prep[
+            (df_prep['date_parsed'].dt.year == TARGET_YEAR) & 
+            (df_prep['date_parsed'].dt.month == TARGET_MONTH) & 
+            (df_prep['date_parsed'].dt.day == TARGET_DAY)
+        ].copy()
+        print(f"🎯 モード: {TARGET_YEAR}年{TARGET_MONTH}月{TARGET_DAY}日の特定日検証")
+    else:
+        recent_races = df_prep[['race_id', 'date_parsed']].drop_duplicates().sort_values('date_parsed', ascending=False)
+        target_races = recent_races.head(TARGET_RACE_COUNT)['race_id'].tolist()
+        df_test = df_prep[df_prep['race_id'].isin(target_races)].copy()
+        print(f"🎯 モード: 直近 {TARGET_RACE_COUNT} レースの一括検証")
 
-    df['eff_top3_rate'] = df.groupby('馬名_clean')['is_top3_past'].apply(
-        lambda x: x.shift(1).rolling(5, min_periods=1).mean()
-    ).reset_index(level=0, drop=True)
-
-    target_cols = ['my_time_idx', 'my_last3f_idx', 'my_pace_idx', 'my_start_idx']
-    for col in target_cols:
-        if col in df.columns:
-            num_col = pd.to_numeric(df[col], errors='coerce').clip(40, 80)
-            df[f'eff_{col}'] = num_col.groupby(df['馬名_clean']).apply(
-                lambda x: x.shift(1).rolling(3, min_periods=1).median()
-            ).reset_index(level=0, drop=True)
-
-    df['time_idx_diff'] = df['eff_my_time_idx'] - df.get('horse_avg_time_idx', 0)
-    df['last3f_idx_diff'] = df['eff_my_last3f_idx'] - df.get('horse_avg_last3f_idx', 0)
-    df['pace_idx_diff'] = df['eff_my_pace_idx'] - df.get('horse_avg_pace_idx', 0)
-    df['start_idx_diff'] = df['eff_my_start_idx'] - df.get('horse_avg_start_idx', 0)
-
-    z_cols = [
-        'eff_rank_avg', 'eff_top3_rate', 'prev_prize', 'eff_my_time_idx', 
-        'eff_my_last3f_idx', 'eff_my_pace_idx', 'jockey_win_rate', 'jockey_track_win_rate',
-        'horse_win_rate', 'horse_avg_time_idx', 'horse_avg_last3f_idx', 'horse_avg_pace_idx', 'horse_avg_start_idx',
-        'age', 'kinryo_num', 'body_weight', 'prev_rank', 'first_pos'
-    ]
-    for c in z_cols:
-        if c in df.columns:
-            s_val = pd.to_numeric(df[c], errors='coerce')
-            df[f'{c}_z'] = df.groupby('race_id')[c].transform(
-                lambda x: (x - x.mean()) / (x.std() + 1e-5) if len(x) > 1 else 0.0
-            ).fillna(0.0)
-
-    rank_cols = ['eff_my_time_idx', 'horse_avg_time_idx', 'jockey_win_rate', 'horse_win_rate']
-    for c in rank_cols:
-        if c in df.columns:
-            s_val = pd.to_numeric(df[c], errors='coerce')
-            df[f'{c}_rank_in_race'] = s_val.rank(ascending=False, method='min')
-
-    df_test = df[df['race_id'].isin(target_races)].copy()
+    if df_test.empty:
+        print("⚠️ 該当するテストデータが見つかりませんでした。")
+        return
 
     X_test = pd.DataFrame(index=df_test.index)
     for f in features:
         X_test[f] = pd.to_numeric(df_test[f], errors='coerce') if f in df_test.columns else np.nan
 
+    print("🤖 AI推論を実行中...")
     df_test['raw_score'] = model.predict(X_test)
 
     total_invest = 0
@@ -189,7 +294,14 @@ def main():
         "④ 波乱 (3連複 5頭BOX10点)": {"races": 0, "hits": 0, "invest": 0, "return": 0.0},
     }
 
+    processed_races = 0
+    total_target_races = df_test['race_id'].nunique()
+
     for race_id, group in df_test.groupby('race_id'):
+        processed_races += 1
+        if processed_races % 500 == 0:
+            print(f"  ... {processed_races} / {total_target_races} レース処理完了")
+
         group = group.copy()
         raw_scores = group['raw_score'].values
         s_std = np.std(raw_scores)
@@ -207,7 +319,6 @@ def main():
         gap_1_2 = p1 - p2
         gap_1_3 = p1 - p3
 
-        # 🔥 修正箇所: 先に印を付与してから着順（r1, r2, r3）を取得する
         marks = ["◎", "◯", "▲", "△", "☆1", "☆2"]
         group['印'] = "消"
         for i in range(min(len(group), len(marks))):
@@ -234,7 +345,6 @@ def main():
         top5 = {"◎", "◯", "▲", "△", "☆1"}
         top6 = {"◎", "◯", "▲", "△", "☆1", "☆2"}
 
-        # スコア差による買い目の自動分岐
         if gap_1_2 >= 0.07:
             pat = "① 1強 (3連単 6点)"
             invest = 600
@@ -269,7 +379,7 @@ def main():
         if hit: total_hits += 1
 
     print("\n" + "="*85)
-    print(f"🧠 【{TARGET_YEAR}年{TARGET_MONTH}月{TARGET_DAY}日 AI気配察知・適応購入 検証結果】")
+    print(f"🧠 【AI気配察知・適応購入 3000レース一括検証結果】")
     print("="*85)
     for pat, st in pattern_stats.items():
         r = st["races"]
@@ -277,7 +387,7 @@ def main():
         inv = st["invest"]
         ret = st["return"]
         rec = (ret / inv * 100) if inv > 0 else 0.0
-        print(f"・ {pat:<28} : 該当{r:2d}R | 的中{h:2d}R ({(h/r*100 if r>0 else 0):5.1f}%) | 投資{inv:6,d}円 | 払戻{int(ret):6,d}円 | 回収率: {rec:6.1f}%")
+        print(f"・ {pat:<28} : 該当{r:4d}R | 的中{h:4d}R ({(h/r*100 if r>0 else 0):5.1f}%) | 投資{inv:8,d}円 | 払戻{int(ret):9,d}円 | 回収率: {rec:6.1f}%")
     
     print("-" * 85)
     total_races = sum([st["races"] for st in pattern_stats.values()])

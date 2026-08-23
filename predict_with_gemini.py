@@ -58,6 +58,7 @@ def clean_horse_name(name):
     return s.upper()
 
 def get_badge_class(mark):
+    if pd.isna(mark): return "badge-keshi"
     if "◎" in mark: return "badge-honmei"
     elif "◯" in mark: return "badge-taikou"
     elif "▲" in mark: return "badge-tana"
@@ -143,7 +144,7 @@ def load_data():
                 if not df_f.empty:
                     df_f['race_id'] = df_f['race_id'].astype(str).str.zfill(12)
                     df_f['place_name'] = df_f['race_id'].str[4:6].map({"01":"札幌","02":"函館","03":"福島","04":"新潟","05":"東京","06":"中山","07":"中京","08":"京都","09":"阪神","10":"小倉"}).fillna("開催場")
-                    df_f['r_num'] = pd.to_numeric(df_f['race_id'].str[10:12], errors='coerce').fillna(1).astype(int)
+                    df_f['r_num'] = pd.to_numeric(df_f['race_id'].str, errors='coerce').fillna(1).astype(int)
                     df_f['馬名_clean'] = df_f['馬名'].astype(str).apply(clean_horse_name)
                     df_f['day_label'] = df_f['date'].astype(str).str.strip() if 'date' in df_f.columns else "当日"
                     df_f['distance_num'] = pd.to_numeric(df_f.get('distance'), errors='coerce')
@@ -250,6 +251,12 @@ def calculate_predictions(race_id_target, df_fut, cond):
     model = model_data['model']
     features = model_data['features']
 
+    # 新特徴量の安全補完
+    race_df['race_num'] = race_df['race_id'].astype(str).str[-2:]
+    race_df['race_num'] = pd.to_numeric(race_df['race_num'], errors='coerce').fillna(1.0)
+    race_df['meet_day_num'] = pd.to_numeric(race_df.get('meet_day_num', 1.0), errors='coerce').fillna(1.0)
+    race_df['track_degradation'] = race_df['meet_day_num'] * race_df['race_num']
+
     target_cols = [
         'last_date', 'prev_prize', 'prev_rank_num', 
         'eff_rank_avg', 'eff_top5_rate', 'eff_top3_rate',
@@ -260,6 +267,10 @@ def calculate_predictions(race_id_target, df_fut, cond):
     ]
     for col in target_cols:
         race_df[col] = race_df['馬名_clean'].apply(lambda x: past_dict.get(x, {}).get(col, np.nan))
+
+    if 'eff_my_start_idx' in race_df.columns and 'eff_my_last3f_idx' in race_df.columns:
+        race_df['race_avg_start_idx'] = race_df['eff_my_start_idx'].mean()
+        race_df['pace_scenario_idx'] = race_df['eff_my_last3f_idx'].fillna(50.0) * (race_df['race_avg_start_idx'] / 50.0)
 
     sex_age = race_df.get('性齢', pd.Series()).apply(parse_sex_age)
     race_df['sex_code'] = [s[0] for s in sex_age]
@@ -325,12 +336,17 @@ def calculate_predictions(race_id_target, df_fut, cond):
     race_df['first_corner_pos'] = pd.to_numeric(race_df.get('first_pos'), errors='coerce').fillna(8.0)
     race_df['last_corner_pos'] = race_df['first_corner_pos']
     race_df['pos_gain'] = 0.0
+    
+    # 新ロジック対応: ハイブリッド指数
+    if 'eff_my_time_idx' in race_df.columns and 'eff_my_start_idx' in race_df.columns:
+        race_df['eff_hybrid_power_idx'] = race_df['eff_my_time_idx'] * 0.5 + race_df['eff_my_start_idx'] * 0.5
 
     z_cols = [
         'eff_rank_avg', 'eff_top3_rate', 'prev_prize', 'eff_my_time_idx', 
         'eff_my_last3f_idx', 'eff_my_pace_idx', 'jockey_win_rate', 'jockey_track_win_rate',
         'horse_win_rate', 'horse_avg_time_idx', 'horse_avg_last3f_idx', 'horse_avg_pace_idx', 'horse_avg_start_idx',
-        'age', 'kinryo_num', 'body_weight', 'prev_rank', 'first_pos'
+        'age', 'kinryo_num', 'body_weight', 'prev_rank', 'first_pos',
+        'eff_hybrid_power_idx', 'pace_scenario_idx'
     ]
     for c in z_cols:
         if c in race_df.columns:
@@ -341,7 +357,7 @@ def calculate_predictions(race_id_target, df_fut, cond):
             else:
                 race_df[f'{c}_z'] = (s_val - s_val.mean()) / s_std
 
-    rank_cols = ['eff_my_time_idx', 'horse_avg_time_idx', 'jockey_win_rate', 'horse_win_rate']
+    rank_cols = ['eff_my_time_idx', 'horse_avg_time_idx', 'jockey_win_rate', 'horse_win_rate', 'eff_hybrid_power_idx']
     for c in rank_cols:
         if c in race_df.columns:
             s_val = pd.to_numeric(race_df[c], errors='coerce')
@@ -392,7 +408,6 @@ def calculate_predictions(race_id_target, df_fut, cond):
 
     total_horses = len(race_df)
     
-    # 🔥【修正】脚質の判定ロジック。全馬が同点（標準偏差0）の場合はバグを防ぐため「-」にする。
     if total_horses > 0 and race_df['eff_my_start_idx'].notna().any():
         if race_df['eff_my_start_idx'].std() == 0:
             race_df['脚質'] = "-"
@@ -409,7 +424,6 @@ def calculate_predictions(race_id_target, df_fut, cond):
     else:
         race_df['脚質'] = "-"
 
-    # 上位4頭を「◎・◯・▲・△」、5〜6位を「☆・☆」にする
     race_df = race_df.sort_values(by=['ai_score', 'win_prob'], ascending=[False, False]).reset_index(drop=True)
     race_df['印'] = "消"
     
@@ -424,7 +438,6 @@ def calculate_predictions(race_id_target, df_fut, cond):
     race_df['mark_rank'] = race_df['印'].map(mark_order).fillna(99)
     race_df = race_df.sort_values(by='mark_rank').reset_index(drop=True)
 
-    # 🔥 勝負気配判定の算出
     probs = race_df['win_prob'].values
     p1, p2, p3, p4 = probs[0], probs[1], probs[2], probs[3] if len(probs)>3 else 0.05
     gap_1_2 = p1 - p2
@@ -526,7 +539,6 @@ for i, place in enumerate(places):
     with place_tabs[i]:
         place_df = day_df[day_df['place_name'] == place]
         races = sorted(place_df['r_num'].unique())
-        # スマホ表示時に1R・7Rと縦に並ばないように行ごとに列を作る処理に変更
         for j in range(0, len(races), 6):
             cols = st.columns(6)
             for k in range(6):
@@ -556,7 +568,6 @@ if st.session_state['selected_race_id']:
     res_df, pat, rec_ticket, buy_detail = calculate_predictions(t_id, df_future, cond)
     
     if res_df is not None:
-        # 🔥 勝負気配＆推奨買い目カードのUI表示
         st.markdown(f"""
         <div class='sense-card'>
             <div class='sense-title'>🧠 AI勝負気配判定: {pat}</div>
@@ -599,19 +610,22 @@ if st.session_state['selected_race_id']:
                 win_val = float(row.get('win_prob', 0)) * 100 if pd.notna(row.get('win_prob')) else 0.0
                 table_summary.append(f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | 脚質:{row.get('脚質', '不明')} | オッズ:{odds_val}倍 | AI勝率:{win_val:.1f}% | 期待値:{ev_val:.2f} | Python印:{row.get('印', '消')}")
 
+            # 🌟 NEW: プロンプトの最適化（役割の明確化とタイムアウト対策）
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」の最終意思決定者（Gemini脳）です。
+Pythonが算出した定量データ（ベース予測）に、あなたが検索で得る「最新の定性データ」を掛け合わせ、最終的な評価を下す（骨格を太くする）のがあなたの役割です。
 
-【あなたの役割と3大定性チェックワークフロー】
-1. まず、提供された「Pythonが算出したベース予測データ（AI勝率、期待値、Python印、AI勝負気配: {pat}）」を確認してください。
+【あなたの3大定性チェック・ワークフロー】
+1. まず、提供された「Python算出データ」を確認してください。
 2. 次に、Google検索ツールを駆使して、各出走馬に関する以下の【3大定性情報】を深掘り検索してください。
-   ①【調教（追い切り状態）】: 前走時と比較した追い切りタイムの向上や坂路/CWでの状態、勝負気配
-   ②【血統（コース/馬場適性）】: 今日のコース・馬場状態（洋芝・ダート・重馬場など）に対する血統的適性
-   ③【前走敗因・不利】: 前走の大敗に明確な理由（直線での不利、不向きな距離/馬場など）があり、今回巻き返せるか
-3. Pythonの定量データと、検索で得た3大定性情報を掛け合わせ、総合的に判断したあなたの最終評価（Gemini印と短評）を下してください。
+   ①【調教（追い切り状態）】: 前走時と比較した状態の変化、勝負気配
+   ②【血統（コース/馬場適性）】: 今日のコース・馬場状態に対する血統的裏付け
+   ③【前走敗因・不利】: 前走の大敗に明確な不利や理由があり、今回巻き返せるか
+   ※注意: 検索のタイムアウトを防ぐため、Python印が上位の馬や、期待値が高い穴馬を中心に重点的に検索・評価を行ってください。
+3. Pythonの定量データと、あなたが検索で得た定性情報を掛け合わせ、あなた自身の最終評価（Gemini印と短評）を下してください。
 
 【重要：カンニング絶対禁止ルール】
-現在、過去のレースを用いてモデルの精度検証を行っています。そのため【実際のレース結果（着順・配当など）を検索してカンニングすること】は絶対に禁止です。あくまで「レース発走前の事前情報」のみを検索して評価を構成してください。
+実際のレース結果（着順・配当など）を検索してカンニングすることは絶対に禁止です。発走前の事前情報のみで評価を構成してください。
 
 【出力フォーマット】
 テキストによる解説は一切不要です。必ず以下のJSON形式のみで出力してください（マークダウンの ```json などは絶対に入れないでください）。
@@ -627,27 +641,38 @@ if st.session_state['selected_race_id']:
 
             with st.spinner("🧠 Geminiが調教・血統・敗因データを検索＆分析し、表をアップデート中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
-                res_text = ""
-                for _ in range(3):
+                gemini_data = None
+                
+                for attempt in range(3):
                     try:
+                        # 🌟 NEW: response_mime_type="application/json" で出力を100%JSONに固定
                         response = client.models.generate_content(
                             model='gemini-2.5-flash', 
                             contents=prompt, 
                             config=types.GenerateContentConfig(
                                 system_instruction=system_instruction, 
-                                temperature=0.3,
-                                tools=[{"googleSearch": {}}]
+                                temperature=0.2,
+                                tools=[{"googleSearch": {}}],
+                                response_mime_type="application/json"
                             )
                         )
                         res_text = response.text if response.text else (response.candidates[0].content.parts[0].text if response.candidates else "")
-                        if res_text: break
-                    except: time.sleep(2)
-                    
-                if res_text:
-                    clean_json_text = re.sub(r'^```json\n| সংকট', '', res_text, flags=re.MULTILINE).strip()
-                    try:
-                        gemini_data = json.loads(clean_json_text)
                         
+                        if res_text:
+                            # 🌟 NEW: 防弾仕様のパース処理（不要なテキストが混ざっても中身のJSONだけを抜き出す）
+                            match = re.search(r'\{.*\}', res_text, re.DOTALL)
+                            clean_json_text = match.group(0) if match else res_text
+                            gemini_data = json.loads(clean_json_text)
+                            break # パース成功したらループを抜ける
+                            
+                    except Exception as e:
+                        if attempt < 2:
+                            time.sleep(3) # エラー時は3秒待機して再トライ
+                        else:
+                            st.error(f"❌ API通信または解析エラー: {e}")
+                    
+                if gemini_data:
+                    try:
                         evals = gemini_data.get("evaluations", [])
                         eval_df = pd.DataFrame(evals)
                         if not eval_df.empty and '馬番' in eval_df.columns:
@@ -659,15 +684,18 @@ if st.session_state['selected_race_id']:
                             res_df['馬番_num'] = pd.to_numeric(res_df['馬番'], errors='coerce')
                             
                             merged_df = pd.merge(res_df, eval_df_clean, on='馬番_num', how='left')
+                            # Gemini印が空の場合は元のPython印または'消'で埋める
+                            merged_df['Gemini印'] = merged_df['Gemini印'].fillna('消')
+                            merged_df['短評'] = merged_df['短評'].fillna('-')
                             
                             table_placeholder.empty()
                             with table_placeholder.container():
                                 st.markdown("<div class='section-header'>🔥 Python × Gemini 融合データ</div>", unsafe_allow_html=True)
                                 st.markdown(generate_fusion_table(merged_df, is_newcomer), unsafe_allow_html=True)
                             
-                            st.success("📝 表を最強アップデートしました！")
-
-                    except json.JSONDecodeError:
-                        st.error("❌ Geminiからのデータ解析に失敗しました。もう一度お試しください。")
+                            st.success("📝 調教・適性を加味した最強の印（骨格）をアップデートしました！")
+                    except Exception as e:
+                        st.error(f"❌ データの結合に失敗しました: {e}")
                 else:
-                    st.warning("⚠️ 回答を取得できませんでした。")
+                    if not gemini_data:
+                        st.warning("⚠️ 規定回数リトライしましたが、回答を正常に取得できませんでした。")

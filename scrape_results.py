@@ -12,7 +12,8 @@ ML_TARGET_CSV = "ml_target_data.csv"
 def get_past_weekend_dates():
     today = datetime.now()
     dates = []
-    for i in range(1, 8):
+    # 0(今日)〜14(2週間前)までの土日をすべて取得対象にする
+    for i in range(0, 15):
         d = today - timedelta(days=i)
         if d.weekday() in [5, 6]:
             dates.append(d.strftime("%Y%m%d"))

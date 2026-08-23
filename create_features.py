@@ -21,7 +21,6 @@ def parse_time_str(val):
     except:
         return np.nan
 
-# 通過順（例: 6-5-5-3）の先頭数値（1コーナー順位）を抽出
 def extract_first_pos(val):
     if pd.isna(val): return np.nan
     s = str(val).split('-')[0].strip()
@@ -34,7 +33,6 @@ def calc_custom_index(val, m, s):
     if pd.isna(val) or pd.isna(s) or s == 0: return 50.0
     return 50.0 + ((m - val) / s) * 10.0
 
-# 1コーナー順位をポジション指数に変換（1番手＝高指数、後方＝低指数）
 def calc_pos_index(pos, m, s):
     if pd.isna(pos) or pd.isna(s) or s == 0: return 50.0
     return 50.0 + ((m - pos) / s) * 10.0
@@ -55,7 +53,6 @@ def main():
     df = df.dropna(subset=['着順']).copy()
     df['is_win'] = (df['着順'] == 1).astype(int)
 
-    # タイムと上がり3Fの秒数取得（既存の数値列を優先使用）
     if 'time_seconds' in df.columns and df['time_seconds'].notna().sum() > 0:
         df['time_sec_clean'] = pd.to_numeric(df['time_seconds'], errors='coerce')
     else:
@@ -68,11 +65,55 @@ def main():
         last3f_col = df.get('上がり3F', df.get('上がり', df.get('last3f', pd.Series(np.nan, index=df.index))))
         df['last3f_sec_clean'] = last3f_col.apply(parse_time_str)
 
-    # 1コーナー通過順の抽出（first_posが空の場合は「通過」列から補完）
     df['first_pos_clean'] = pd.to_numeric(df.get('first_pos'), errors='coerce').fillna(
         df.get('通過', pd.Series(np.nan, index=df.index)).apply(extract_first_pos)
     )
     df['first_pos'] = df['first_pos_clean']
+
+    print("Calculating Meet Day Number (Track Bias)...")
+    if 'date' in df.columns and 'place_code' in df.columns:
+        df['date_parsed'] = pd.to_datetime(df['date'], errors='coerce')
+        df = df.sort_values(['place_code', 'date_parsed'])
+        
+        meet_days = []
+        for place, group in df.groupby('place_code'):
+            dates = group['date_parsed'].dropna().unique()
+            dates = np.sort(dates)
+            
+            day_map = {}
+            current_meet = 1
+            current_day_in_meet = 1
+            
+            if len(dates) > 0:
+                day_map[dates[0]] = current_day_in_meet
+                for i in range(1, len(dates)):
+                    if np.timedelta64(dates[i] - dates[i-1], 'D').astype(int) > 14:
+                        current_meet += 1
+                        current_day_in_meet = 1
+                    else:
+                        current_day_in_meet += 1
+                    day_map[dates[i]] = current_day_in_meet
+            
+            group_meet_days = group['date_parsed'].map(day_map)
+            meet_days.append(group_meet_days)
+            
+        if meet_days:
+            df['meet_day_num'] = pd.concat(meet_days)
+        else:
+            df['meet_day_num'] = 1
+            
+        df['meet_day_num'] = df['meet_day_num'].fillna(1).astype(int)
+    else:
+        df['meet_day_num'] = 1
+
+    # 🌟 NEW: レース番号と馬場劣化（Track Degradation）の事前計算
+    if 'race_id' in df.columns:
+        df['race_num'] = df['race_id'].astype(str).str[-2:]
+        df['race_num'] = pd.to_numeric(df['race_num'], errors='coerce').fillna(1.0)
+        df['track_degradation'] = df['meet_day_num'] * df['race_num']
+    else:
+        df['race_num'] = 1.0
+        df['track_degradation'] = df['meet_day_num']
 
     drop_cols = ['race_avg_time', 'race_std_time', 'race_avg_last3f', 'race_std_last3f', 'jockey_win_power', 'race_avg_pos', 'race_std_pos']
     df = df.drop(columns=[c for c in drop_cols if c in df.columns])
@@ -94,9 +135,14 @@ def main():
     df['my_time_idx'] = df.apply(lambda r: calc_custom_index(r.get('time_sec_clean'), r.get('race_avg_time'), r.get('race_std_time')), axis=1)
     df['my_last3f_idx'] = df.apply(lambda r: calc_custom_index(r.get('last3f_sec_clean'), r.get('race_avg_last3f'), r.get('race_std_last3f')), axis=1)
     df['my_pace_idx'] = df['my_time_idx'] * 0.4 + df['my_last3f_idx'] * 0.6
-
-    # 実際の通過順からポジション指数（my_start_idx）を正確に算出
     df['my_start_idx'] = df.apply(lambda r: calc_pos_index(r.get('first_pos_clean'), r.get('race_avg_pos'), r.get('race_std_pos')), axis=1)
+
+    # 🌟 NEW: ハイブリッド指数とペース展開シナリオのベース計算
+    df['hybrid_power_idx'] = df['my_time_idx'] * 0.5 + df['my_start_idx'] * 0.5
+    
+    if 'race_id' in df.columns:
+        df['race_avg_start_idx'] = df.groupby('race_id')['my_start_idx'].transform('mean').fillna(50.0)
+        df['pace_scenario_idx'] = df['my_last3f_idx'].fillna(50.0) * (df['race_avg_start_idx'] / 50.0)
 
     print("Calculating Jockey Stats...")
     if '騎手' in df.columns:
