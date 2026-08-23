@@ -391,16 +391,21 @@ def calculate_predictions(race_id_target, df_fut, cond):
         race_df['ai_score'] = 100
 
     total_horses = len(race_df)
+    
+    # 🔥【修正】脚質の判定ロジック。全馬が同点（標準偏差0）の場合はバグを防ぐため「-」にする。
     if total_horses > 0 and race_df['eff_my_start_idx'].notna().any():
-        race_df['start_rank'] = race_df['eff_my_start_idx'].rank(ascending=False, method='min')
-        def det_style(row):
-            if pd.isna(row.get('start_rank')): return "-" 
-            pct = row['start_rank'] / total_horses
-            if pct <= 0.15: return "逃げ"
-            elif pct <= 0.40: return "先行"
-            elif pct <= 0.75: return "差し"
-            else: return "追込"
-        race_df['脚質'] = race_df.apply(det_style, axis=1)
+        if race_df['eff_my_start_idx'].std() == 0:
+            race_df['脚質'] = "-"
+        else:
+            race_df['start_rank'] = race_df['eff_my_start_idx'].rank(ascending=False, method='min')
+            def det_style(row):
+                if pd.isna(row.get('start_rank')): return "-" 
+                pct = row['start_rank'] / total_horses
+                if pct <= 0.15: return "逃げ"
+                elif pct <= 0.40: return "先行"
+                elif pct <= 0.75: return "差し"
+                else: return "追込"
+            race_df['脚質'] = race_df.apply(det_style, axis=1)
     else:
         race_df['脚質'] = "-"
 
