@@ -49,7 +49,8 @@ if 'selected_race_id' not in st.session_state:
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 
 FUTURE_CSV = "future_races.csv"
-ML_TARGET_CSV = "ml_target_data.csv"
+# 🌟 変更: v2データを指定
+ML_TARGET_CSV = "ml_target_data_v2.csv"
 
 def clean_horse_name(name):
     if pd.isna(name): return ""
@@ -96,7 +97,7 @@ def parse_weight(val):
 # ==========================================
 @st.cache_resource
 def load_model():
-    model_paths = ["勝ちパカくん.pkl", "keiba_ai_model.pkl"]
+    model_paths = ["keiba_ai_model.pkl", "勝ちパカくん.pkl"]
     for m_name in model_paths:
         if os.path.exists(m_name):
             try: 
@@ -120,6 +121,7 @@ def load_data():
                 df_past['distance_num'] = pd.to_numeric(df_past.get('distance'), errors='coerce')
                 df_past['dist_cat'] = df_past['distance_num'].apply(get_dist_cat)
                 df_past['rank_num'] = pd.to_numeric(df_past.get('着順'), errors='coerce')
+                df_past['is_win_past'] = (df_past['rank_num'] == 1).astype(int)
                 df_past['kinryo_num'] = pd.to_numeric(df_past.get('斤量'), errors='coerce')
                 df_past['wakuban_num'] = pd.to_numeric(df_past.get('枠番'), errors='coerce')
                 
@@ -180,11 +182,11 @@ if past_err:
     st.warning(f"⚠️ 【過去データ警告】 {past_err}")
 
 # ==========================================
-# 2. 過去データ辞書化
+# 2. 過去データ辞書化 (🌟 v2特徴量のマッピング追加)
 # ==========================================
 @st.cache_data
 def build_past_horse_dict(df_p):
-    if df_p.empty: return {}, {}, {}
+    if df_p.empty: return {}, {}, {}, {}, {}, {}, {}
     horse_dict = {}
     for horse, group in df_p.groupby('馬名_clean'):
         if not horse: continue
@@ -235,10 +237,17 @@ def build_past_horse_dict(df_p):
 
     course_front_map = df_p.groupby('course_id')['rank_num'].apply(lambda x: (x <= 3).mean()).to_dict()
     course_frame_map = df_p.groupby('course_frame_id')['rank_num'].apply(lambda x: (x == 1).mean()).to_dict()
+    
+    # 🌟 NEW: v2拡張特徴量の抽出
+    trainer_map = df_p.groupby('調教師')['trainer_win_rate'].last().to_dict() if 'trainer_win_rate' in df_p.columns else df_p.groupby('調教師')['is_win_past'].mean().to_dict()
+    df_p['騎手_clean'] = df_p['騎手'].astype(str).str.strip()
+    combo_map = df_p.groupby(['調教師', '騎手_clean'])['trainer_jockey_combo'].last().to_dict() if 'trainer_jockey_combo' in df_p.columns else df_p.groupby(['調教師', '騎手_clean'])['is_win_past'].mean().to_dict()
+    horse_track_map = df_p.groupby(['馬名_clean', 'place_code'])['horse_track_win_rate'].last().to_dict() if 'horse_track_win_rate' in df_p.columns else df_p.groupby(['馬名_clean', 'place_code'])['is_win_past'].mean().to_dict()
+    frame_map = df_p.groupby(['place_code', 'distance_num', 'wakuban_num'])['frame_win_rate'].last().to_dict() if 'frame_win_rate' in df_p.columns else df_p.groupby(['place_code', 'distance_num', 'wakuban_num'])['is_win_past'].mean().to_dict()
 
-    return horse_dict, course_front_map, course_frame_map
+    return horse_dict, course_front_map, course_frame_map, trainer_map, combo_map, horse_track_map, frame_map
 
-past_dict, course_front_map, course_frame_map = build_past_horse_dict(df_past)
+past_dict, course_front_map, course_frame_map, trainer_map, combo_map, horse_track_map, frame_map = build_past_horse_dict(df_past)
 
 # ==========================================
 # 3. AI推論＆勝負気配算出ロジック
@@ -280,6 +289,14 @@ def calculate_predictions(race_id_target, df_fut, cond):
     race_df['body_weight'] = [p[0] for p in weights_parsed]
     race_df['body_weight_diff'] = [p[1] for p in weights_parsed]
     race_df['kinryo_body_ratio'] = race_df['kinryo_num'] / race_df['body_weight'].fillna(470)
+
+    # 🌟 NEW: v2拡張特徴量を予測データにマッピング
+    race_df['place_code_str'] = race_df.get('place_code', race_df['race_id'].astype(str).str[4:6]).astype(str)
+    race_df['trainer_win_rate'] = race_df.get('調教師', pd.Series([''])).map(trainer_map).fillna(0.08)
+    race_df['騎手_clean'] = race_df.get('騎手', pd.Series([''])).astype(str).str.strip()
+    race_df['trainer_jockey_combo'] = race_df.apply(lambda r: combo_map.get((r.get('調教師'), r.get('騎手_clean')), 0.08), axis=1)
+    race_df['horse_track_win_rate'] = race_df.apply(lambda r: horse_track_map.get((r.get('馬名_clean'), r.get('place_code_str')), 0.0), axis=1)
+    race_df['frame_win_rate'] = race_df.apply(lambda r: frame_map.get((r.get('place_code_str'), r.get('distance_num'), r.get('wakuban_num')), 0.08), axis=1)
 
     def calc_kinryo_diff(row):
         p_kinryo = past_dict.get(row['馬名_clean'], {}).get('last_kinryo', np.nan)
@@ -337,7 +354,6 @@ def calculate_predictions(race_id_target, df_fut, cond):
     race_df['last_corner_pos'] = race_df['first_corner_pos']
     race_df['pos_gain'] = 0.0
     
-    # 新ロジック対応: ハイブリッド指数
     if 'eff_my_time_idx' in race_df.columns and 'eff_my_start_idx' in race_df.columns:
         race_df['eff_hybrid_power_idx'] = race_df['eff_my_time_idx'] * 0.5 + race_df['eff_my_start_idx'] * 0.5
 
@@ -431,10 +447,10 @@ def calculate_predictions(race_id_target, df_fut, cond):
     if len(race_df) > 1: race_df.loc[1, '印'] = "◯"
     if len(race_df) > 2: race_df.loc[2, '印'] = "▲"
     if len(race_df) > 3: race_df.loc[3, '印'] = "△"
-    if len(race_df) > 4: race_df.loc[4, '印'] = "☆"
-    if len(race_df) > 5: race_df.loc[5, '印'] = "☆"
+    if len(race_df) > 4: race_df.loc[4, '印'] = "☆1"
+    if len(race_df) > 5: race_df.loc[5, '印'] = "☆2"
 
-    mark_order = {"◎":1, "◯":2, "▲":3, "△":4, "☆":5, "消":6}
+    mark_order = {"◎":1, "◯":2, "▲":3, "△":4, "☆1":5, "☆2":6, "消":7}
     race_df['mark_rank'] = race_df['印'].map(mark_order).fillna(99)
     race_df = race_df.sort_values(by='mark_rank').reset_index(drop=True)
 
@@ -443,14 +459,14 @@ def calculate_predictions(race_id_target, df_fut, cond):
     gap_1_2 = p1 - p2
     gap_1_3 = p1 - p3
 
-    if gap_1_2 >= 0.07:
-        pat = "① 1強気配 (軸圧倒)"
-        rec_ticket = "3連単 1着固定 (6点 / 600円)"
-        buy_detail = f"1着: {race_df.loc[0, '馬番']}(◎) -> 2・3着: {race_df.loc[1, '馬番']}(◯), {race_df.loc[2, '馬番']}(▲), {race_df.loc[3, '馬番']}(△)"
-    elif gap_1_2 < 0.035 and gap_1_3 >= 0.06:
-        pat = "② 2強気配 (頭分け対抗)"
-        rec_ticket = "3連単 ダブル軸 (12点 / 1,200円)"
-        buy_detail = f"1着: {race_df.loc[0, '馬番']}(◎), {race_df.loc[1, '馬番']}(◯) -> 2着: ◎, ◯, {race_df.loc[2, '馬番']}(▲) -> 3着: ◎, ◯, ▲, {race_df.loc[3, '馬番']}(△), {race_df.loc[4, '馬番'] if len(race_df)>4 else ''}(☆)"
+    # 🌟 NEW: シミュレーション結果に基づく最強買い目ロジック（パターンA固定）
+    is_3ren_tan_race = (gap_1_2 >= 0.07) or (gap_1_2 < 0.035 and gap_1_3 >= 0.06)
+
+    if is_3ren_tan_race:
+        pat = "① 1強気配 (軸圧倒)" if gap_1_2 >= 0.07 else "② 2強気配 (頭分け対抗)"
+        rec_ticket = "3連単 軸1頭相手4頭マルチ (24点 / 2,400円)"
+        u_aite = [f"{race_df.loc[k, '馬番']}({race_df.loc[k, '印']})" for k in range(1, min(5, len(race_df)))]
+        buy_detail = f"1頭軸: {race_df.loc[0, '馬番']}(◎) ⇔ 相手: {', '.join(u_aite)}"
     elif (p1 - p4) < 0.08:
         pat = "④ 波乱気配 (大混戦)"
         rec_ticket = "3連複 5頭BOX (10点 / 1,000円)"
@@ -458,7 +474,7 @@ def calculate_predictions(race_id_target, df_fut, cond):
         buy_detail = f"BOX: {', '.join(u_list)}"
     else:
         pat = "③ 混戦気配 (標準展開)"
-        rec_ticket = "3連複 ◎1頭軸流し (10点 / 1,000円)"
+        rec_ticket = "3連複 ◎1頭軸相手5頭流し (10点 / 1,000円)"
         u_others = [f"{race_df.loc[k, '馬番']}({race_df.loc[k, '印']})" for k in range(1, min(6, len(race_df)))]
         buy_detail = f"軸: {race_df.loc[0, '馬番']}(◎) -> 相手: {', '.join(u_others)}"
 
@@ -610,7 +626,6 @@ if st.session_state['selected_race_id']:
                 win_val = float(row.get('win_prob', 0)) * 100 if pd.notna(row.get('win_prob')) else 0.0
                 table_summary.append(f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | 脚質:{row.get('脚質', '不明')} | オッズ:{odds_val}倍 | AI勝率:{win_val:.1f}% | 期待値:{ev_val:.2f} | Python印:{row.get('印', '消')}")
 
-            # 🌟 NEW: プロンプトの最適化（役割の明確化とタイムアウト対策）
             system_instruction = f"""
 あなたはプロの競馬分析AI「勝ちぱかくん」の最終意思決定者（Gemini脳）です。
 Pythonが算出した定量データ（ベース予測）に、あなたが検索で得る「最新の定性データ」を掛け合わせ、最終的な評価を下す（骨格を太くする）のがあなたの役割です。
@@ -645,7 +660,6 @@ Pythonが算出した定量データ（ベース予測）に、あなたが検�
                 
                 for attempt in range(3):
                     try:
-                        # 🌟 NEW: response_mime_type="application/json" で出力を100%JSONに固定
                         response = client.models.generate_content(
                             model='gemini-2.5-flash', 
                             contents=prompt, 
@@ -659,15 +673,14 @@ Pythonが算出した定量データ（ベース予測）に、あなたが検�
                         res_text = response.text if response.text else (response.candidates[0].content.parts[0].text if response.candidates else "")
                         
                         if res_text:
-                            # 🌟 NEW: 防弾仕様のパース処理（不要なテキストが混ざっても中身のJSONだけを抜き出す）
                             match = re.search(r'\{.*\}', res_text, re.DOTALL)
                             clean_json_text = match.group(0) if match else res_text
                             gemini_data = json.loads(clean_json_text)
-                            break # パース成功したらループを抜ける
+                            break
                             
                     except Exception as e:
                         if attempt < 2:
-                            time.sleep(3) # エラー時は3秒待機して再トライ
+                            time.sleep(3)
                         else:
                             st.error(f"❌ API通信または解析エラー: {e}")
                     
@@ -684,7 +697,6 @@ Pythonが算出した定量データ（ベース予測）に、あなたが検�
                             res_df['馬番_num'] = pd.to_numeric(res_df['馬番'], errors='coerce')
                             
                             merged_df = pd.merge(res_df, eval_df_clean, on='馬番_num', how='left')
-                            # Gemini印が空の場合は元のPython印または'消'で埋める
                             merged_df['Gemini印'] = merged_df['Gemini印'].fillna('消')
                             merged_df['短評'] = merged_df['短評'].fillna('-')
                             

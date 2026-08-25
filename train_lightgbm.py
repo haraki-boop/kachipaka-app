@@ -7,7 +7,8 @@ import pandas as pd
 import lightgbm as lgb
 import optuna  # 🌟 NEW: ハイパーパラメータ自動最適化AI
 
-INPUT_CSV = "ml_target_data.csv"
+# ① 読み込みデータ（大元）をv2に変更
+INPUT_CSV = "ml_target_data_v2.csv"
 MODEL_FILE = "keiba_ai_model.pkl"
 
 def clean_horse_name(name):
@@ -90,7 +91,6 @@ def preprocess_features(df):
     df_feat['wakuban_num'] = pd.to_numeric(df_feat.get('枠番'), errors='coerce')
     df_feat['umaban_num'] = pd.to_numeric(df_feat.get('馬番'), errors='coerce')
 
-    # 🌟 NEW 2: トラックバイアス精密化 (開催日数 × レース番号)
     df_feat['meet_day_num'] = pd.to_numeric(df_feat.get('meet_day_num'), errors='coerce').fillna(1.0)
     df_feat['race_num'] = df_feat['race_id'].astype(str).str[-2:]
     df_feat['race_num'] = pd.to_numeric(df_feat['race_num'], errors='coerce').fillna(1.0)
@@ -187,7 +187,6 @@ def preprocess_features(df):
         else:
             df_feat[f'eff_{col}'] = np.nan
 
-    # 🌟 NEW 1: ペース展開の相対評価 (ハイペースなら差し馬ブースト)
     df_feat['race_avg_start_idx'] = df_feat.groupby('race_id')['eff_my_start_idx'].transform('mean').fillna(50.0)
     df_feat['pace_scenario_idx'] = df_feat['eff_my_last3f_idx'].fillna(50.0) * (df_feat['race_avg_start_idx'] / 50.0)
 
@@ -207,7 +206,7 @@ def preprocess_features(df):
         'eff_my_last3f_idx', 'eff_my_pace_idx', 'jockey_win_rate', 'jockey_track_win_rate',
         'horse_win_rate', 'horse_avg_time_idx', 'horse_avg_last3f_idx', 'horse_avg_pace_idx', 'horse_avg_start_idx',
         'age', 'kinryo_num', 'body_weight', 'prev_rank', 'first_pos',
-        'eff_hybrid_power_idx', 'pace_scenario_idx' # 🌟 NEW
+        'eff_hybrid_power_idx', 'pace_scenario_idx'
     ]
     for c in z_cols:
         if c in df_feat.columns:
@@ -236,57 +235,52 @@ def main():
     df['rank_num_target'] = pd.to_numeric(df['着順'], errors='coerce')
     df_clean = df.dropna(subset=['rank_num_target', 'race_id']).copy()
 
+    # 🌟 NEW: 3着以内を当てるための配点（Relevance）に変更
     def calc_relevance(r):
-        if r == 1: return 4
-        elif r == 2: return 3
-        elif r == 3: return 2
-        elif r <= 5: return 1
+        if r == 1: return 3
+        elif r == 2: return 2
+        elif r == 3: return 1
         return 0
 
     df_clean['relevance'] = df_clean['rank_num_target'].apply(calc_relevance)
 
-    print("Engineering 70+ full features (Includes Pace & Track Bias)...")
+    print("Engineering features...")
     df_prep = preprocess_features(df_clean)
-    df_prep = df_prep.sort_values(by='race_id').reset_index(drop=True)
+    
+    # 日付を正規化（YYYYMMDD）
+    df_prep['date_norm'] = df_prep['date'].astype(str).str.replace(r'\D', '', regex=True).str[:8]
 
     candidate_features = [
-        # 🔥【強】グループ
         'eff_my_time_idx_z', 'eff_rank_avg_z', 'eff_top3_rate_z', 'jockey_track_win_rate_z',
         'eff_my_time_idx_rank_in_race', 'horse_avg_time_idx_rank_in_race', 'jockey_win_rate_rank_in_race', 'horse_win_rate_rank_in_race',
         'horse_win_rate_z', 'horse_avg_time_idx_z', 'horse_avg_last3f_idx_z', 'horse_avg_pace_idx_z', 'horse_avg_start_idx_z',
         'prev_prize_z', 'prev_rank_z', 'first_pos_z',
         'eff_hybrid_power_idx_z', 'eff_hybrid_power_idx_rank_in_race',
-        'pace_scenario_idx_z', # 🌟 NEW: ペース展開予測偏差値
-        
-        # ⚖️【中】グループ
+        'pace_scenario_idx_z', 
         'time_idx_diff', 'last3f_idx_diff', 'pace_idx_diff', 'start_idx_diff',
         'kinryo_body_ratio', 'body_weight_z', 'kinryo_diff', 'is_same_jockey', 'dist_diff',
         'cat_win_rate', 'course_front_rate', 'course_frame_win_rate', 'style_course_fit',
         'eff_my_last3f_idx_z', 'eff_my_pace_idx_z', 'eff_top5_rate', 'prev_rank_num',
         'first_corner_pos', 'last_corner_pos', 'pos_gain', 'jp_win_rate',
-        'track_degradation', 'meet_day_num', # 🌟 NEW: 馬場劣化精密指標
-        
-        # 🔹【小】グループ
+        'track_degradation', 'meet_day_num', 
         '枠番', '馬番', 'sex_code', 'age', 'age_z', 'kinryo_num', 'body_weight', 'body_weight_diff',
         'distance_num', 'cat_runs', 'interval_days', 'is_long_rest', 'place_code',
         'eff_rank_avg', 'eff_my_time_idx', 'eff_my_last3f_idx', 'eff_my_pace_idx', 'eff_my_start_idx',
         'horse_runs', 'horse_wins', 'horse_win_rate', 'horse_avg_time_idx', 'horse_avg_last3f_idx', 'horse_avg_pace_idx', 'horse_avg_start_idx',
         'jockey_runs', 'jockey_wins', 'jockey_win_rate', 'jockey_track_win_rate', 'jp_runs', 'jp_wins',
-        'eff_hybrid_power_idx', 'pace_scenario_idx'
+        'eff_hybrid_power_idx', 'pace_scenario_idx',
+        # 🌟 NEW: 追加された最強特徴量4種
+        'trainer_win_rate', 'trainer_jockey_combo', 'horse_track_win_rate', 'frame_win_rate'
     ]
 
     use_features = [f for f in candidate_features if f in df_prep.columns]
 
-    # 🌟 NEW 3: Optunaを用いた超絶チューニングロジック
     print("🤖 OptunaによるAI超進化チューニングを開始します... (約1〜2分かかります)")
     
-    unique_races = df_prep['race_id'].unique()
-    split_idx = int(len(unique_races) * 0.9)
-    train_races = unique_races[:split_idx]
-    valid_races = unique_races[split_idx:]
-
-    df_train = df_prep[df_prep['race_id'].isin(train_races)]
-    df_valid = df_prep[df_prep['race_id'].isin(valid_races)]
+    # 🌟 NEW: データリーク完全防止の時間軸スプリット
+    # 未来（6月〜8月）を事前に見ないように、5月末までで学習し、6月以降で検証する
+    df_train = df_prep[df_prep['date_norm'] < '20260601'].sort_values(['race_id', '馬番']).copy()
+    df_valid = df_prep[(df_prep['date_norm'] >= '20260601') & (df_prep['date_norm'] <= '20260831')].sort_values(['race_id', '馬番']).copy()
 
     X_train, y_train = df_train[use_features], df_train['relevance']
     groups_train = df_train.groupby('race_id', sort=False).size().values
@@ -320,10 +314,9 @@ def main():
         )
         return model.best_score['valid_0']['ndcg@3']
 
-    # 学習ログを消してスッキリさせる
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     study = optuna.create_study(direction='maximize')
-    study.optimize(objective, n_trials=15) # 時間短縮のため15回厳選
+    study.optimize(objective, n_trials=15) 
 
     best_params = study.best_params
     best_params['objective'] = 'lambdarank'
@@ -334,8 +327,9 @@ def main():
 
     print(f"✨ チューニング完了！ 導き出された最強パラメータ: {best_params}")
 
-    # 最適化された頭脳で全データを使って本番学習
     print("🚀 最適パラメータを用いて全データでの最終本番トレーニングを実行中...")
+    # 本番モデルは全データを使って作成
+    df_prep = df_prep.sort_values(['race_id', '馬番'])
     X_full = df_prep[use_features]
     y_full = df_prep['relevance']
     groups_full = df_prep.groupby('race_id', sort=False).size().values

@@ -10,10 +10,17 @@ from selenium.webdriver.chrome.options import Options
 ML_TARGET_CSV = "ml_target_data.csv"
 
 def get_past_weekend_dates():
+    # 🌟 NEW: 手動で取得したい日付をここに直接指定します（YYYYMMDD形式）
+    # 取得したい日を追加したり減らしたりできます。
+    manual_dates = ["20260822", "20260823"]
+    
+    if manual_dates:
+        return sorted(list(set(manual_dates)))
+
+    # もし manual_dates = [] と空に設定した場合は、自動で直近3日間の土日だけを取得します
     today = datetime.now()
     dates = []
-    # 0(今日)〜14(2週間前)までの土日をすべて取得対象にする
-    for i in range(0, 15):
+    for i in range(0, 3):
         d = today - timedelta(days=i)
         if d.weekday() in [5, 6]:
             dates.append(d.strftime("%Y%m%d"))
@@ -36,7 +43,7 @@ def setup_driver():
 
 def fetch_race_results():
     target_dates = get_past_weekend_dates()
-    print(f"📥 取得対象日 (直近の土日): {target_dates}")
+    print(f"📥 取得対象日: {target_dates}")
     
     if not target_dates:
         print("ℹ️ 取得対象の日付がありません。")

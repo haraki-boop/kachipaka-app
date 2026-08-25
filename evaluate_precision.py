@@ -12,10 +12,10 @@ import pandas as pd
 MODEL_PATHS = ["keiba_ai_model.pkl", "勝ちパカくん.pkl"]
 DATA_FILE = "ml_target_data.csv"
 
-EVAL_MODE = "RECENT"
+EVAL_MODE = "DAILY"
 TARGET_YEAR = 2026
 TARGET_MONTH = 8
-TARGET_DAY = 2
+TARGET_DAY = 23
 TARGET_RACE_COUNT = 3000
 EXCLUDE_NEWCOMER = True
 
@@ -69,7 +69,7 @@ def preprocess_features(df):
     df_feat = df.copy()
 
     df_feat['馬名_clean'] = df_feat['馬名'].astype(str).apply(clean_horse_name)
-    df_feat['date_parsed'] = pd.to_datetime(df_feat['date'], errors='coerce')
+    df_feat['date_parsed'] = pd.to_datetime(df_feat['date'].astype(str).str.replace(r'[年月/]', '-', regex=True).str.replace('日', ''), errors='coerce')
     df_feat = df_feat.dropna(subset=['date_parsed']).sort_values(['馬名_clean', 'date_parsed'])
 
     sex_age = df_feat['性齢'].apply(parse_sex_age)

@@ -42,7 +42,12 @@ def main():
     if 'race_id' in df.columns:
         df['race_num'] = df['race_id'].astype(str).str[-2:]
         df['race_num'] = pd.to_numeric(df['race_num'], errors='coerce').fillna(1.0)
-        df['meet_day_num'] = pd.to_numeric(df.get('meet_day_num', 1.0), errors='coerce').fillna(1.0)
+        
+        if 'meet_day_num' not in df.columns:
+            df['meet_day_num'] = 1.0
+        else:
+            df['meet_day_num'] = pd.to_numeric(df['meet_day_num'], errors='coerce').fillna(1.0)
+            
         df['track_degradation'] = df['meet_day_num'] * df['race_num']
 
     if 'eff_my_start_idx' in df.columns and 'eff_my_last3f_idx' in df.columns:
