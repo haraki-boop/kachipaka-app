@@ -707,7 +707,7 @@ Pythonが算出した定量データ（ベース予測）に、あなたが検�
                                 system_instruction=system_instruction, 
                                 temperature=0.2,
                                 tools=[{"googleSearch": {}}],
-                                response_mime_type="application/json"
+                                
                             )
                         )
                         res_text = response.text if response.text else (response.candidates[0].content.parts[0].text if response.candidates else "")
