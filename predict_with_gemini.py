@@ -145,7 +145,6 @@ def load_data():
                 if not df_f.empty:
                     df_f['race_id'] = df_f['race_id'].astype(str).str.zfill(12)
                     df_f['place_name'] = df_f['race_id'].str[4:6].map({"01":"札幌","02":"函館","03":"福島","04":"新潟","05":"東京","06":"中山","07":"中京","08":"京都","09":"阪神","10":"小倉"}).fillna("開催場")
-                    # 🌟 修正ポイント: .str の後ろに [-2:] を追加して正常にレース番号を取得
                     df_f['r_num'] = pd.to_numeric(df_f['race_id'].str[-2:], errors='coerce').fillna(1).astype(int)
                     df_f['馬名_clean'] = df_f['馬名'].astype(str).apply(clean_horse_name)
                     df_f['day_label'] = df_f['date'].astype(str).str.strip() if 'date' in df_f.columns else "当日"
@@ -182,7 +181,7 @@ if past_err:
     st.warning(f"⚠️ 【過去データ警告】 {past_err}")
 
 # ==========================================
-# 2. 過去データ辞書化 (🌟 v2特徴量のマッピング追加)
+# 2. 過去データ辞書化
 # ==========================================
 @st.cache_data
 def build_past_horse_dict(df_p):
@@ -259,10 +258,17 @@ def calculate_predictions(race_id_target, df_fut, cond):
     model = model_data['model']
     features = model_data['features']
 
-    # 新特徴量の安全補完
+    # 🌟 防弾仕様：カラムがない場合でも絶対にエラーを起こさないヘルパー関数
+    def safe_numeric_col(df, col_name, default_val):
+        if col_name in df.columns:
+            return pd.to_numeric(df[col_name], errors='coerce').fillna(default_val)
+        return pd.Series(default_val, index=df.index)
+
     race_df['race_num'] = race_df['race_id'].astype(str).str[-2:]
     race_df['race_num'] = pd.to_numeric(race_df['race_num'], errors='coerce').fillna(1.0)
-    race_df['meet_day_num'] = pd.to_numeric(race_df.get('meet_day_num', 1.0), errors='coerce').fillna(1.0)
+    
+    # ここがエラーの原因でした！安全な関数で処理します。
+    race_df['meet_day_num'] = safe_numeric_col(race_df, 'meet_day_num', 1.0)
     race_df['track_degradation'] = race_df['meet_day_num'] * race_df['race_num']
 
     target_cols = [
@@ -280,19 +286,38 @@ def calculate_predictions(race_id_target, df_fut, cond):
         race_df['race_avg_start_idx'] = race_df['eff_my_start_idx'].mean()
         race_df['pace_scenario_idx'] = race_df['eff_my_last3f_idx'].fillna(50.0) * (race_df['race_avg_start_idx'] / 50.0)
 
-    sex_age = race_df.get('性齢', pd.Series()).apply(parse_sex_age)
+    if '性齢' in race_df.columns:
+        sex_age = race_df['性齢'].apply(parse_sex_age)
+    else:
+        sex_age = pd.Series([(0, 4.0)] * len(race_df), index=race_df.index)
+        
     race_df['sex_code'] = [s[0] for s in sex_age]
     race_df['age'] = [s[1] for s in sex_age]
 
-    weights_parsed = race_df.get('馬体重', pd.Series()).apply(parse_weight)
+    if '馬体重' in race_df.columns:
+        weights_parsed = race_df['馬体重'].apply(parse_weight)
+    else:
+        weights_parsed = pd.Series([(np.nan, np.nan)] * len(race_df), index=race_df.index)
+        
     race_df['body_weight'] = [p[0] for p in weights_parsed]
     race_df['body_weight_diff'] = [p[1] for p in weights_parsed]
     race_df['kinryo_body_ratio'] = race_df['kinryo_num'] / race_df['body_weight'].fillna(470)
 
-    # 🌟 NEW: v2拡張特徴量を予測データにマッピング
-    race_df['place_code_str'] = race_df.get('place_code', race_df['race_id'].astype(str).str[4:6]).astype(str)
-    race_df['trainer_win_rate'] = race_df.get('調教師', pd.Series([''])).map(trainer_map).fillna(0.08)
-    race_df['騎手_clean'] = race_df.get('騎手', pd.Series([''])).astype(str).str.strip()
+    if 'place_code' in race_df.columns:
+        race_df['place_code_str'] = race_df['place_code'].astype(str)
+    else:
+        race_df['place_code_str'] = race_df['race_id'].astype(str).str[4:6]
+        
+    if '調教師' in race_df.columns:
+        race_df['trainer_win_rate'] = race_df['調教師'].map(trainer_map).fillna(0.08)
+    else:
+        race_df['trainer_win_rate'] = 0.08
+        
+    if '騎手' in race_df.columns:
+        race_df['騎手_clean'] = race_df['騎手'].astype(str).str.strip()
+    else:
+        race_df['騎手_clean'] = ''
+        
     race_df['trainer_jockey_combo'] = race_df.apply(lambda r: combo_map.get((r.get('調教師'), r.get('騎手_clean')), 0.08), axis=1)
     race_df['horse_track_win_rate'] = race_df.apply(lambda r: horse_track_map.get((r.get('馬名_clean'), r.get('place_code_str')), 0.0), axis=1)
     race_df['frame_win_rate'] = race_df.apply(lambda r: frame_map.get((r.get('place_code_str'), r.get('distance_num'), r.get('wakuban_num')), 0.08), axis=1)
@@ -328,17 +353,28 @@ def calculate_predictions(race_id_target, df_fut, cond):
     race_df['course_front_rate'] = race_df['course_id'].map(course_front_map).fillna(0.3)
     race_df['style_course_fit'] = race_df['eff_my_start_idx'].fillna(50) * race_df['course_front_rate']
 
-    race_df['date_parsed_fut'] = pd.to_datetime(race_df['date'], errors='coerce')
+    if 'date' in race_df.columns:
+        race_df['date_parsed_fut'] = pd.to_datetime(race_df['date'], errors='coerce')
+    else:
+        race_df['date_parsed_fut'] = pd.to_datetime('today')
+        
     race_df['interval_days'] = (race_df['date_parsed_fut'] - race_df['last_date']).dt.days.fillna(30)
     race_df['is_long_rest'] = (race_df['interval_days'] >= 180).astype(int)
 
-    j_col = race_df.get('jockey_win_power', race_df.get('jockey_win_rate', pd.Series()))
+    if 'jockey_win_power' in race_df.columns:
+        j_col = race_df['jockey_win_power']
+    elif 'jockey_win_rate' in race_df.columns:
+        j_col = race_df['jockey_win_rate']
+    else:
+        j_col = pd.Series(0.1, index=race_df.index)
+        
     race_df['jockey_win_rate'] = pd.to_numeric(j_col, errors='coerce').fillna(0.1).clip(0.0, 1.0)
-    race_df['jockey_track_win_rate'] = pd.to_numeric(race_df.get('jockey_track_win_rate'), errors='coerce').fillna(0.1).clip(0.0, 1.0)
-    race_df['jockey_runs'] = pd.to_numeric(race_df.get('jockey_runs'), errors='coerce').fillna(100)
-    race_df['jockey_wins'] = pd.to_numeric(race_df.get('jockey_wins'), errors='coerce').fillna(10)
-    race_df['jp_runs'] = pd.to_numeric(race_df.get('jp_runs'), errors='coerce').fillna(20)
-    race_df['jp_wins'] = pd.to_numeric(race_df.get('jp_wins'), errors='coerce').fillna(2)
+    
+    race_df['jockey_track_win_rate'] = safe_numeric_col(race_df, 'jockey_track_win_rate', 0.1).clip(0.0, 1.0)
+    race_df['jockey_runs'] = safe_numeric_col(race_df, 'jockey_runs', 100)
+    race_df['jockey_wins'] = safe_numeric_col(race_df, 'jockey_wins', 10)
+    race_df['jp_runs'] = safe_numeric_col(race_df, 'jp_runs', 20)
+    race_df['jp_wins'] = safe_numeric_col(race_df, 'jp_wins', 2)
     race_df['jp_win_rate'] = race_df['jp_wins'] / (race_df['jp_runs'] + 1e-5)
 
     race_df['condition_code'] = cond
@@ -349,7 +385,7 @@ def calculate_predictions(race_id_target, df_fut, cond):
     race_df['pace_idx_diff'] = race_df['eff_my_pace_idx'] - race_df['horse_avg_pace_idx']
     race_df['start_idx_diff'] = race_df['eff_my_start_idx'] - race_df['horse_avg_start_idx']
 
-    race_df['first_corner_pos'] = pd.to_numeric(race_df.get('first_pos'), errors='coerce').fillna(8.0)
+    race_df['first_corner_pos'] = safe_numeric_col(race_df, 'first_pos', 8.0)
     race_df['last_corner_pos'] = race_df['first_corner_pos']
     race_df['pos_gain'] = 0.0
     
@@ -410,7 +446,13 @@ def calculate_predictions(race_id_target, df_fut, cond):
     else:
         race_df['win_prob'] = 0.10
 
-    race_df['単勝_num'] = pd.to_numeric(race_df.get('単勝', race_df.get('オッズ', pd.Series())), errors='coerce').fillna(10.0)
+    if '単勝' in race_df.columns:
+        race_df['単勝_num'] = pd.to_numeric(race_df['単勝'].astype(str).str.replace('倍', ''), errors='coerce').fillna(10.0)
+    elif 'オッズ' in race_df.columns:
+        race_df['単勝_num'] = pd.to_numeric(race_df['オッズ'].astype(str).str.replace('倍', ''), errors='coerce').fillna(10.0)
+    else:
+        race_df['単勝_num'] = 10.0
+        
     race_df['人気'] = race_df['単勝_num'].rank(method='min')
     race_df['ev'] = race_df['win_prob'] * race_df['単勝_num']
 
@@ -458,7 +500,6 @@ def calculate_predictions(race_id_target, df_fut, cond):
     gap_1_2 = p1 - p2
     gap_1_3 = p1 - p3
 
-    # 🌟 NEW: シミュレーション結果に基づく最強買い目ロジック（パターンA固定）
     is_3ren_tan_race = (gap_1_2 >= 0.07) or (gap_1_2 < 0.035 and gap_1_3 >= 0.06)
 
     if is_3ren_tan_race:
