@@ -49,7 +49,6 @@ if 'selected_race_id' not in st.session_state:
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 
 FUTURE_CSV = "future_races.csv"
-# 🌟 変更: v2データを指定
 ML_TARGET_CSV = "ml_target_data_v2.csv"
 
 def clean_horse_name(name):
@@ -146,7 +145,8 @@ def load_data():
                 if not df_f.empty:
                     df_f['race_id'] = df_f['race_id'].astype(str).str.zfill(12)
                     df_f['place_name'] = df_f['race_id'].str[4:6].map({"01":"札幌","02":"函館","03":"福島","04":"新潟","05":"東京","06":"中山","07":"中京","08":"京都","09":"阪神","10":"小倉"}).fillna("開催場")
-                    df_f['r_num'] = pd.to_numeric(df_f['race_id'].str, errors='coerce').fillna(1).astype(int)
+                    # 🌟 修正ポイント: .str の後ろに [-2:] を追加して正常にレース番号を取得
+                    df_f['r_num'] = pd.to_numeric(df_f['race_id'].str[-2:], errors='coerce').fillna(1).astype(int)
                     df_f['馬名_clean'] = df_f['馬名'].astype(str).apply(clean_horse_name)
                     df_f['day_label'] = df_f['date'].astype(str).str.strip() if 'date' in df_f.columns else "当日"
                     df_f['distance_num'] = pd.to_numeric(df_f.get('distance'), errors='coerce')
@@ -238,7 +238,6 @@ def build_past_horse_dict(df_p):
     course_front_map = df_p.groupby('course_id')['rank_num'].apply(lambda x: (x <= 3).mean()).to_dict()
     course_frame_map = df_p.groupby('course_frame_id')['rank_num'].apply(lambda x: (x == 1).mean()).to_dict()
     
-    # 🌟 NEW: v2拡張特徴量の抽出
     trainer_map = df_p.groupby('調教師')['trainer_win_rate'].last().to_dict() if 'trainer_win_rate' in df_p.columns else df_p.groupby('調教師')['is_win_past'].mean().to_dict()
     df_p['騎手_clean'] = df_p['騎手'].astype(str).str.strip()
     combo_map = df_p.groupby(['調教師', '騎手_clean'])['trainer_jockey_combo'].last().to_dict() if 'trainer_jockey_combo' in df_p.columns else df_p.groupby(['調教師', '騎手_clean'])['is_win_past'].mean().to_dict()

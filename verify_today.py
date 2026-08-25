@@ -7,7 +7,7 @@ import numpy as np
 import unicodedata
 
 # ==========================================
-# 🎯 勝ちぱかくん: 6〜8月完全検証（v2新特徴量・最強AI対応版）
+# 🎯 勝ちぱかくん: 3連複3パターン比較検証スクリプト
 # ==========================================
 
 SEED = 42
@@ -15,7 +15,6 @@ np.random.seed(SEED)
 random.seed(SEED)
 
 MODEL_FILE = "keiba_ai_model.pkl"
-# 🌟 変更点: 新特徴量が入った v2 データを指定
 DATA_FILE = "ml_target_data_v2.csv"
 
 def clean_horse_name(name):
@@ -72,25 +71,25 @@ def main():
 
     months = ["202606", "202607", "202608"]
     
-    def create_month_dict():
-        return {m: {'races': 0, 'skipped': 0, 'bet': 0, 'cost': 0, 'pay': 0, 'hit': 0} for m in months}
+    def create_stats_dict():
+        return {
+            'months': {m: {'bet': 0, 'cost': 0, 'pay': 0, 'hit': 0, 'skipped': 0} for m in months},
+            'tickets': {
+                '3連単(軸1頭24点)': {'bet': 0, 'hit': 0, 'cost': 0, 'pay': 0},
+                '3連複': {'bet': 0, 'hit': 0, 'cost': 0, 'pay': 0}
+            }
+        }
 
-    monthly_stats_A = create_month_dict()
-    monthly_stats_B = create_month_dict()
-
-    ticket_stats_A = {
-        '3連単(軸1頭24点)': {'bet': 0, 'hit': 0, 'cost': 0, 'pay': 0},
-        '3連複(従来型10点)': {'bet': 0, 'hit': 0, 'cost': 0, 'pay': 0}
-    }
-    ticket_stats_B = {
-        '3連単(軸2頭18点)': {'bet': 0, 'hit': 0, 'cost': 0, 'pay': 0},
-        '3連複(従来型10点)': {'bet': 0, 'hit': 0, 'cost': 0, 'pay': 0}
-    }
+    # ① 従来型（波乱=BOX / 混戦=流し）
+    stats_1 = create_stats_dict()
+    # ② 全て5頭BOX
+    stats_2 = create_stats_dict()
+    # ③ 全て1軸5頭流し
+    stats_3 = create_stats_dict()
 
     marks = ["◎", "◯", "▲", "△", "☆1", "☆2", "☆3"]
     top5 = {"◎", "◯", "▲", "△", "☆1"}
     top6 = {"◎", "◯", "▲", "△", "☆1", "☆2"}
-    top7 = {"◎", "◯", "▲", "△", "☆1", "☆2", "☆3"}
 
     for target_date in unique_dates:
         m_key = target_date[:6]
@@ -110,14 +109,12 @@ def main():
         df_today['raw_score'] = model.predict(X_test)
 
         for race_id, group in df_today.groupby('race_id'):
-            monthly_stats_A[m_key]['races'] += 1
-            monthly_stats_B[m_key]['races'] += 1
             group = group.copy()
 
             # 見送り判定：新馬戦のみ除外
             if '新馬' in str(group.get('race_name', pd.Series()).iloc[0]):
-                monthly_stats_A[m_key]['skipped'] += 1
-                monthly_stats_B[m_key]['skipped'] += 1
+                for st in [stats_1, stats_2, stats_3]:
+                    st['months'][m_key]['skipped'] += 1
                 continue
             
             raw_scores = group['raw_score'].values
@@ -141,111 +138,77 @@ def main():
             actual_top3 = group[group['rank_num'] <= 3].sort_values('rank_num')
             actual_marks = actual_top3['印'].tolist()
             if len(actual_marks) < 3: continue
-            
             actual_top3_set = set(actual_marks)
 
-            monthly_stats_A[m_key]['bet'] += 1
-            monthly_stats_B[m_key]['bet'] += 1
-
-            # 3連単を買う明確な本命・対抗決着条件
             is_3ren_tan_race = (gap_1_2 >= 0.07) or (gap_1_2 < 0.035 and gap_1_3 >= 0.06)
 
-            # ====================================================
-            # 【パターンA】 3連単(軸1頭24点) vs 3連複(従来型10点)
-            # ====================================================
-            pA_hit, pA_cost = False, 0
             if is_3ren_tan_race:
-                ticket_A = "3連単(軸1頭24点)"
-                pA_cost = 2400
-                if "◎" in actual_top3_set and actual_top3_set.issubset(top5): pA_hit = True
-            elif (p1 - p4) < 0.08: # 3連複波乱 (5頭BOX 10点)
-                ticket_A = "3連複(従来型10点)"
-                pA_cost = 1000
-                if actual_top3_set.issubset(top5): pA_hit = True
-            else: # 3連複混戦 (1頭軸5頭流し 10点)
-                ticket_A = "3連複(従来型10点)"
-                pA_cost = 1000
-                if "◎" in actual_top3_set and actual_top3_set.issubset(top6): pA_hit = True
-
-            monthly_stats_A[m_key]['cost'] += pA_cost
-            ticket_stats_A[ticket_A]['bet'] += 1
-            ticket_stats_A[ticket_A]['cost'] += pA_cost
-
-            if pA_hit:
-                monthly_stats_A[m_key]['hit'] += 1
-                ticket_stats_A[ticket_A]['hit'] += 1
-                pay_type = "3連単" if "3連単" in ticket_A else "3連複"
-                pA_pay = get_payout_estimate_fixed(group, pay_type)
-                monthly_stats_A[m_key]['pay'] += pA_pay
-                ticket_stats_A[ticket_A]['pay'] += pA_pay
-
-            # ====================================================
-            # 【パターンB】 3連単(軸2頭18点) vs 3連複(従来型10点)
-            # ====================================================
-            pB_hit, pB_cost = False, 0
-            if is_3ren_tan_race:
-                ticket_B = "3連単(軸2頭18点)"
-                pB_cost = 1800
-                if "◎" in actual_top3_set and "◯" in actual_top3_set and actual_top3_set.issubset(top7): pB_hit = True
-            elif (p1 - p4) < 0.08: # 3連複波乱 (5頭BOX 10点)
-                ticket_B = "3連複(従来型10点)"
-                pB_cost = 1000
-                if actual_top3_set.issubset(top5): pB_hit = True
-            else: # 3連複混戦 (1頭軸5頭流し 10点)
-                ticket_B = "3連複(従来型10点)"
-                pB_cost = 1000
-                if "◎" in actual_top3_set and actual_top3_set.issubset(top6): pB_hit = True
-
-            monthly_stats_B[m_key]['cost'] += pB_cost
-            ticket_stats_B[ticket_B]['bet'] += 1
-            ticket_stats_B[ticket_B]['cost'] += pB_cost
-
-            if pB_hit:
-                monthly_stats_B[m_key]['hit'] += 1
-                ticket_stats_B[ticket_B]['hit'] += 1
-                pay_type = "3連単" if "3連単" in ticket_B else "3連複"
-                pB_pay = get_payout_estimate_fixed(group, pay_type)
-                monthly_stats_B[m_key]['pay'] += pB_pay
-                ticket_stats_B[ticket_B]['pay'] += pB_pay
+                cost_tan = 2400
+                hit_tan = ("◎" in actual_top3_set and actual_top3_set.issubset(top5))
+                pay_tan = get_payout_estimate_fixed(group, "3連単") if hit_tan else 0
+                
+                for st in [stats_1, stats_2, stats_3]:
+                    st['months'][m_key]['bet'] += 1
+                    st['months'][m_key]['cost'] += cost_tan
+                    st['tickets']['3連単(軸1頭24点)']['bet'] += 1
+                    st['tickets']['3連単(軸1頭24点)']['cost'] += cost_tan
+                    if hit_tan:
+                        st['months'][m_key]['hit'] += 1
+                        st['months'][m_key]['pay'] += pay_tan
+                        st['tickets']['3連単(軸1頭24点)']['hit'] += 1
+                        st['tickets']['3連単(軸1頭24点)']['pay'] += pay_tan
+            else:
+                cost_fuku = 1000
+                pay_fuku_raw = get_payout_estimate_fixed(group, "3連複")
+                
+                hit_box = actual_top3_set.issubset(top5)
+                hit_nagashi = ("◎" in actual_top3_set and actual_top3_set.issubset(top6))
+                
+                is_harAN = (p1 - p4) < 0.08
+                
+                hit_1 = hit_box if is_harAN else hit_nagashi
+                hit_2 = hit_box
+                hit_3 = hit_nagashi
+                
+                hits_and_stats = [(hit_1, stats_1), (hit_2, stats_2), (hit_3, stats_3)]
+                for hit_f, st in hits_and_stats:
+                    st['months'][m_key]['bet'] += 1
+                    st['months'][m_key]['cost'] += cost_fuku
+                    st['tickets']['3連複']['bet'] += 1
+                    st['tickets']['3連複']['cost'] += cost_fuku
+                    if hit_f:
+                        st['months'][m_key]['hit'] += 1
+                        st['months'][m_key]['pay'] += pay_fuku_raw
+                        st['tickets']['3連複']['hit'] += 1
+                        st['tickets']['3連複']['pay'] += pay_fuku_raw
 
     # Output
     print("\n" + "="*85)
-    print("🏆 【6月〜8月 3連単マルチ2パターン比較 フルスペック修正版(v2)】")
+    print("🏆 【6月〜8月 3連複買い方3パターン検証結果】")
     print("="*85)
 
-    def print_full_report(title, monthly_dict, ticket_dict):
+    def print_summary(title, st):
+        tot_c = sum(st['months'][m]['cost'] for m in months)
+        tot_p = sum(st['months'][m]['pay'] for m in months)
+        tot_b = sum(st['months'][m]['bet'] for m in months)
+        tot_h = sum(st['months'][m]['hit'] for m in months)
+        
+        t_fuku = st['tickets']['3連複']
+        f_rate = (t_fuku['hit']/t_fuku['bet']*100) if t_fuku['bet']>0 else 0
+        f_rec = (t_fuku['pay']/t_fuku['cost']*100) if t_fuku['cost']>0 else 0
+        f_prof = t_fuku['pay'] - t_fuku['cost']
+        
+        rec = (tot_p / tot_c * 100) if tot_c > 0 else 0
+        prof = tot_p - tot_c
+        
         print(f"\n📢 【{title}】")
         print("─" * 85)
-        print("📅 月別収支推移:")
-        tot_c, tot_p, tot_b, tot_h = 0, 0, 0, 0
-        for m in months:
-            d = monthly_dict[m]
-            m_name = f"{m[4:6]}月"
-            rec = (d['pay'] / d['cost'] * 100) if d['cost'] > 0 else 0
-            prof = d['pay'] - d['cost']
-            prof_s = f"+{int(prof):,}円" if prof >= 0 else f"{int(prof):,}円"
-            rate = (d['hit'] / d['bet'] * 100) if d['bet'] > 0 else 0
-            print(f"   ▶ {m_name} | 勝負:{d['bet']}R (見送り:{d['skipped']}R) | 的中:{d['hit']}R ({rate:.1f}%) | 投資:{d['cost']:,}円 | 払戻:{int(d['pay']):,}円 | 損益:{prof_s} | 回収率:{rec:.1f}%")
-            tot_c += d['cost']
-            tot_p += d['pay']
-            tot_b += d['bet']
-            tot_h += d['hit']
+        print(f"   ▶ 3連複のみ成績 : 勝負:{t_fuku['bet']}R | 的中:{t_fuku['hit']}R ({f_rate:.1f}%) | 投資:{t_fuku['cost']:,}円 | 払戻:{t_fuku['pay']:,}円 | 損益:{'+' if f_prof>=0 else ''}{f_prof:,}円 | 回収率:{f_rec:.1f}%")
+        print(f"   🔥 通算回収率  : 勝負:{tot_b}R | 的中:{tot_h}R ({tot_h/tot_b*100:.1f}%) | 投資:{tot_c:,}円 | 払戻:{tot_p:,}円 | 損益:{'+' if prof>=0 else ''}{prof:,}円 | 通算回収率:{rec:.1f}%")
 
-        print("🎫 券種別成績:")
-        for t_type, t_d in ticket_dict.items():
-            t_rec = (t_d['pay'] / t_d['cost'] * 100) if t_d['cost'] > 0 else 0
-            t_prof = t_d['pay'] - t_d['cost']
-            t_prof_s = f"+{int(t_prof):,}円" if t_prof >= 0 else f"{int(t_prof):,}円"
-            t_rate = (t_d['hit'] / t_d['bet'] * 100) if t_d['bet'] > 0 else 0
-            print(f"   ▶ {t_type} | 勝負:{t_d['bet']}R | 的中:{t_d['hit']}R ({t_rate:.1f}%) | 投資:{t_d['cost']:,}円 | 払戻:{int(t_d['pay']):,}円 | 損益:{t_prof_s} | 回収率:{t_rec:.1f}%")
-
-        tot_rec = (tot_p / tot_c * 100) if tot_c > 0 else 0
-        tot_prof = tot_p - tot_c
-        tot_prof_s = f"+{int(tot_prof):,}円" if tot_prof >= 0 else f"{int(tot_prof):,}円"
-        print(f"🔥 通算成績: 勝負 {tot_b} R | 的中 {tot_h} R ({tot_h/tot_b*100:.1f}%) | 投資:{tot_c:,}円 | 払戻:{int(tot_p):,}円 | 損益:{tot_prof_s} | 通算回収率:{tot_rec:.1f}%")
-
-    print_full_report("パターンA: 3連単【◎ 軸1頭 相手4頭マルチ (24点/2,400円)】", monthly_stats_A, ticket_stats_A)
-    print_full_report("パターンB: 3連単【◎◯ 軸2頭 相手5頭マルチ (18点/1,800円)】", monthly_stats_B, ticket_stats_B)
+    print_summary("① 従来型（波乱気配:5頭BOX / 混戦気配:1軸5頭流し）", stats_1)
+    print_summary("② 全て5頭BOX（波乱・混戦ともにBOX）", stats_2)
+    print_summary("③ 全て1軸5頭流し（波乱・混戦ともに◎軸流し）", stats_3)
     print("="*85)
 
 if __name__ == "__main__":
