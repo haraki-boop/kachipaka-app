@@ -92,6 +92,44 @@ def parse_weight(val):
     return np.nan, np.nan
 
 # ==========================================
+# 🌟 NEW: ダミーのEnsembleModelクラス（Pickle読み込み用）
+# ==========================================
+class EnsembleModel:
+    def __init__(self, lgb_model, xgb_model, cat_model, weights=(0.4, 0.3, 0.3)):
+        self.lgb_model = lgb_model
+        self.xgb_model = xgb_model
+        self.cat_model = cat_model
+        self.weights = weights
+
+    def predict(self, X):
+        import xgboost as xgb
+        X_num = X.copy()
+        for col in X_num.columns:
+            X_num[col] = pd.to_numeric(X_num[col], errors='coerce').fillna(0)
+
+        # LightGBM
+        lgb_pred = self.lgb_model.predict(X_num)
+        lgb_std = np.std(lgb_pred)
+        lgb_norm = (lgb_pred - np.mean(lgb_pred)) / (lgb_std + 1e-5) if lgb_std > 0 else lgb_pred
+
+        # XGBoost
+        xgb_pred = self.xgb_model.predict(xgb.DMatrix(X_num))
+        xgb_std = np.std(xgb_pred)
+        xgb_norm = (xgb_pred - np.mean(xgb_pred)) / (xgb_std + 1e-5) if xgb_std > 0 else xgb_pred
+
+        # CatBoost
+        cat_pred = self.cat_model.predict(X_num)
+        cat_std = np.std(cat_pred)
+        cat_norm = (cat_pred - np.mean(cat_pred)) / (cat_std + 1e-5) if cat_std > 0 else cat_pred
+
+        w1, w2, w3 = self.weights
+        return w1 * lgb_norm + w2 * xgb_norm + w3 * cat_norm
+
+# Pythonのメインスコープにクラスを登録しておかないと読み込みエラーになるため
+import __main__
+__main__.EnsembleModel = EnsembleModel
+
+# ==========================================
 # 1. データとモデルの読み込み
 # ==========================================
 @st.cache_resource
@@ -258,7 +296,6 @@ def calculate_predictions(race_id_target, df_fut, cond):
     model = model_data['model']
     features = model_data['features']
 
-    # 🌟 防弾仕様：カラムがない場合でも絶対にエラーを起こさないヘルパー関数
     def safe_numeric_col(df, col_name, default_val):
         if col_name in df.columns:
             return pd.to_numeric(df[col_name], errors='coerce').fillna(default_val)
@@ -266,8 +303,6 @@ def calculate_predictions(race_id_target, df_fut, cond):
 
     race_df['race_num'] = race_df['race_id'].astype(str).str[-2:]
     race_df['race_num'] = pd.to_numeric(race_df['race_num'], errors='coerce').fillna(1.0)
-    
-    # ここがエラーの原因でした！安全な関数で処理します。
     race_df['meet_day_num'] = safe_numeric_col(race_df, 'meet_day_num', 1.0)
     race_df['track_degradation'] = race_df['meet_day_num'] * race_df['race_num']
 
@@ -369,7 +404,6 @@ def calculate_predictions(race_id_target, df_fut, cond):
         j_col = pd.Series(0.1, index=race_df.index)
         
     race_df['jockey_win_rate'] = pd.to_numeric(j_col, errors='coerce').fillna(0.1).clip(0.0, 1.0)
-    
     race_df['jockey_track_win_rate'] = safe_numeric_col(race_df, 'jockey_track_win_rate', 0.1).clip(0.0, 1.0)
     race_df['jockey_runs'] = safe_numeric_col(race_df, 'jockey_runs', 100)
     race_df['jockey_wins'] = safe_numeric_col(race_df, 'jockey_wins', 10)

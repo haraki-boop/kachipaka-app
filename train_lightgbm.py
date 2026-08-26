@@ -5,7 +5,9 @@ import unicodedata
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
-import optuna  # 🌟 NEW: ハイパーパラメータ自動最適化AI
+import xgboost as xgb           # 🌟 NEW: XGBoost追加
+from catboost import CatBoost, Pool  # 🌟 NEW: CatBoost追加
+import optuna
 
 # ① 読み込みデータ（大元）をv2に変更
 INPUT_CSV = "ml_target_data_v2.csv"
@@ -221,6 +223,40 @@ def preprocess_features(df):
 
     return df_feat
 
+# 🌟 NEW: 3大AIを統合するアンサンブルラッパークラス
+class EnsembleModel:
+    def __init__(self, lgb_model, xgb_model, cat_model, weights=(0.4, 0.3, 0.3)):
+        self.lgb_model = lgb_model
+        self.xgb_model = xgb_model
+        self.cat_model = cat_model
+        self.weights = weights
+
+    def predict(self, X):
+        # 予測時にデータ型を揃える
+        X_num = X.copy()
+        for col in X_num.columns:
+            X_num[col] = pd.to_numeric(X_num[col], errors='coerce').fillna(0)
+
+        # 1. LightGBM 予測 (ベーススコア)
+        lgb_pred = self.lgb_model.predict(X_num)
+        lgb_std = np.std(lgb_pred)
+        lgb_norm = (lgb_pred - np.mean(lgb_pred)) / (lgb_std + 1e-5) if lgb_std > 0 else lgb_pred
+
+        # 2. XGBoost 予測 (堅実スコア)
+        xgb_pred = self.xgb_model.predict(xgb.DMatrix(X_num))
+        xgb_std = np.std(xgb_pred)
+        xgb_norm = (xgb_pred - np.mean(xgb_pred)) / (xgb_std + 1e-5) if xgb_std > 0 else xgb_pred
+
+        # 3. CatBoost 予測 (定性カテゴリ補正スコア)
+        cat_pred = self.cat_model.predict(X_num)
+        cat_std = np.std(cat_pred)
+        cat_norm = (cat_pred - np.mean(cat_pred)) / (cat_std + 1e-5) if cat_std > 0 else cat_pred
+
+        # 3つのモデルの正規化スコアを加重平均で結合
+        w1, w2, w3 = self.weights
+        final_score = w1 * lgb_norm + w2 * xgb_norm + w3 * cat_norm
+        return final_score
+
 def main():
     if not os.path.exists(INPUT_CSV):
         print(f"Error: {INPUT_CSV} not found.")
@@ -235,7 +271,6 @@ def main():
     df['rank_num_target'] = pd.to_numeric(df['着順'], errors='coerce')
     df_clean = df.dropna(subset=['rank_num_target', 'race_id']).copy()
 
-    # 🌟 NEW: 3着以内を当てるための配点（Relevance）に変更
     def calc_relevance(r):
         if r == 1: return 3
         elif r == 2: return 2
@@ -246,8 +281,6 @@ def main():
 
     print("Engineering features...")
     df_prep = preprocess_features(df_clean)
-    
-    # 日付を正規化（YYYYMMDD）
     df_prep['date_norm'] = df_prep['date'].astype(str).str.replace(r'\D', '', regex=True).str[:8]
 
     candidate_features = [
@@ -269,16 +302,13 @@ def main():
         'horse_runs', 'horse_wins', 'horse_win_rate', 'horse_avg_time_idx', 'horse_avg_last3f_idx', 'horse_avg_pace_idx', 'horse_avg_start_idx',
         'jockey_runs', 'jockey_wins', 'jockey_win_rate', 'jockey_track_win_rate', 'jp_runs', 'jp_wins',
         'eff_hybrid_power_idx', 'pace_scenario_idx',
-        # 🌟 NEW: 追加された最強特徴量4種
         'trainer_win_rate', 'trainer_jockey_combo', 'horse_track_win_rate', 'frame_win_rate'
     ]
 
     use_features = [f for f in candidate_features if f in df_prep.columns]
 
-    print("🤖 OptunaによるAI超進化チューニングを開始します... (約1〜2分かかります)")
+    print("🤖 OptunaによるLightGBM超進化チューニングを開始します... (約1〜2分)")
     
-    # 🌟 NEW: データリーク完全防止の時間軸スプリット
-    # 未来（6月〜8月）を事前に見ないように、5月末までで学習し、6月以降で検証する
     df_train = df_prep[df_prep['date_norm'] < '20260601'].sort_values(['race_id', '馬番']).copy()
     df_valid = df_prep[(df_prep['date_norm'] >= '20260601') & (df_prep['date_norm'] <= '20260831')].sort_values(['race_id', '馬番']).copy()
 
@@ -318,27 +348,69 @@ def main():
     study = optuna.create_study(direction='maximize')
     study.optimize(objective, n_trials=15) 
 
-    best_params = study.best_params
-    best_params['objective'] = 'lambdarank'
-    best_params['metric'] = 'ndcg'
-    best_params['eval_at'] = [1, 3]
-    best_params['verbose'] = -1
-    best_params['seed'] = 42
+    best_lgb_params = study.best_params
+    best_lgb_params['objective'] = 'lambdarank'
+    best_lgb_params['metric'] = 'ndcg'
+    best_lgb_params['eval_at'] = [1, 3]
+    best_lgb_params['verbose'] = -1
+    best_lgb_params['seed'] = 42
 
-    print(f"✨ チューニング完了！ 導き出された最強パラメータ: {best_params}")
+    print(f"✨ LightGBM 最適化完了: {best_lgb_params}")
 
-    print("🚀 最適パラメータを用いて全データでの最終本番トレーニングを実行中...")
-    # 本番モデルは全データを使って作成
+    print("🚀 3大AIモデル（LightGBM + XGBoost + CatBoost）の最終本番トレーニングを実行中...")
     df_prep = df_prep.sort_values(['race_id', '馬番'])
-    X_full = df_prep[use_features]
+    X_full = df_prep[use_features].copy()
+    for col in X_full.columns:
+        X_full[col] = pd.to_numeric(X_full[col], errors='coerce').fillna(0)
+        
     y_full = df_prep['relevance']
     groups_full = df_prep.groupby('race_id', sort=False).size().values
-    
-    full_train_data = lgb.Dataset(X_full, label=y_full, group=groups_full)
-    final_model = lgb.train(best_params, full_train_data, num_boost_round=250)
 
-    joblib.dump({'model': final_model, 'features': use_features}, MODEL_FILE)
-    print(f"🎉 Success! 全 {len(use_features)} 特徴量を持つ最強モデルを {MODEL_FILE} に保存しました！")
+    # 1. LightGBM フル学習
+    print("  [1/3] LightGBM の学習中...")
+    full_train_lgb = lgb.Dataset(X_full, label=y_full, group=groups_full)
+    final_lgb_model = lgb.train(best_lgb_params, full_train_lgb, num_boost_round=250)
+
+    # 2. XGBoost フル学習
+    print("  [2/3] XGBoost の学習中...")
+    dtrain_xgb = xgb.DMatrix(X_full, label=y_full)
+    dtrain_xgb.set_group(groups_full)
+    xgb_params = {
+        'objective': 'rank:ndcg',
+        'eval_metric': 'ndcg@3',
+        'eta': 0.05,
+        'max_depth': 6,
+        'subsample': 0.8,
+        'colsample_bytree': 0.8,
+        'seed': 42
+    }
+    final_xgb_model = xgb.train(xgb_params, dtrain_xgb, num_boost_round=200)
+
+    # 3. CatBoost フル学習
+    print("  [3/3] CatBoost の学習中...")
+    df_prep['group_id'] = df_prep.groupby('race_id', sort=False).ngroup()
+    cat_pool = Pool(X_full, label=y_full, group_id=df_prep['group_id'])
+    cat_params = {
+        'loss_function': 'YetiRank',
+        'iterations': 250,
+        'learning_rate': 0.05,
+        'depth': 6,
+        'verbose': 0,
+        'random_seed': 42
+    }
+    final_cat_model = CatBoost(cat_params)
+    final_cat_model.fit(cat_pool)
+
+    # 🌟 3大AIを融合した最強アンサンブルモデルを作成
+    ensemble_model = EnsembleModel(
+        lgb_model=final_lgb_model,
+        xgb_model=final_xgb_model,
+        cat_model=final_cat_model,
+        weights=(0.4, 0.3, 0.3)
+    )
+
+    joblib.dump({'model': ensemble_model, 'features': use_features}, MODEL_FILE)
+    print(f"🎉 Success! 3大AI（LightGBM+XGBoost+CatBoost）を融合した完全体モデルを {MODEL_FILE} に保存しました！")
 
 if __name__ == "__main__":
     main()
