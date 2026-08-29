@@ -95,7 +95,7 @@ def parse_weight(val):
     return np.nan, np.nan
 
 # ==========================================
-# 🌟 EnsembleModelクラスの定義
+# 🌟 EnsembleModelクラスの定義 (ランキング版へ更新)
 # ==========================================
 class EnsembleModel:
     def __init__(self, lgb_model, xgb_model, cat_model, weights=(0.4, 0.3, 0.3)):
@@ -110,19 +110,16 @@ class EnsembleModel:
             X_num[col] = pd.to_numeric(X_num[col], errors='coerce').fillna(0)
 
         lgb_pred = self.lgb_model.predict(X_num)
-        lgb_std = np.std(lgb_pred)
-        lgb_norm = (lgb_pred - np.mean(lgb_pred)) / (lgb_std + 1e-5) if lgb_std > 0 else lgb_pred
+        lgb_pred = (lgb_pred - np.mean(lgb_pred)) / (np.std(lgb_pred) + 1e-5)
 
         xgb_pred = self.xgb_model.predict(xgb.DMatrix(X_num))
-        xgb_std = np.std(xgb_pred)
-        xgb_norm = (xgb_pred - np.mean(xgb_pred)) / (xgb_std + 1e-5) if xgb_std > 0 else xgb_pred
+        xgb_pred = (xgb_pred - np.mean(xgb_pred)) / (np.std(xgb_pred) + 1e-5)
 
         cat_pred = self.cat_model.predict(X_num)
-        cat_std = np.std(cat_pred)
-        cat_norm = (cat_pred - np.mean(cat_pred)) / (cat_std + 1e-5) if cat_std > 0 else cat_pred
+        cat_pred = (cat_pred - np.mean(cat_pred)) / (np.std(cat_pred) + 1e-5)
 
         w1, w2, w3 = self.weights
-        return w1 * lgb_norm + w2 * xgb_norm + w3 * cat_norm
+        return w1 * lgb_pred + w2 * xgb_pred + w3 * cat_pred
 
 import __main__
 __main__.EnsembleModel = EnsembleModel
@@ -217,7 +214,7 @@ if past_err:
     st.warning(f"⚠️ 【過去データ警告】 {past_err}")
 
 # ==========================================
-# 2. 過去データ辞書化
+# 2. 過去データ辞書化 (地方ロジック特徴量を追加)
 # ==========================================
 @st.cache_data
 def build_past_horse_dict(df_p):
@@ -236,6 +233,20 @@ def build_past_horse_dict(df_p):
         top3_rows = group[group['rank_num'] <= 3]
         best_dist_avg = top3_rows['distance_num'].mean() if not top3_rows.empty else np.nan
 
+        # 🌟 地方ロジック用追加計算
+        prize_col = '賞金(万円)' if '賞金(万円)' in group.columns else 'prize'
+        prizes = pd.to_numeric(group.get(prize_col, pd.Series()), errors='coerce').fillna(0)
+        horse_prize_avg = prizes.mean() if not prizes.empty else 0.0
+
+        def parse_pass_tmp(val):
+            if pd.isna(val): return np.nan
+            parts = str(val).split('-')
+            try: return float(parts[0])
+            except: return np.nan
+        
+        prev_1c = parse_pass_tmp(last_row.get('通過', np.nan))
+        if pd.isna(prev_1c): prev_1c = 10.0
+
         cat_stats = {}
         for cat_name in ['sprint', 'mile_middle', 'stayer']:
             c_rows = group[group['dist_cat'] == cat_name]
@@ -243,8 +254,14 @@ def build_past_horse_dict(df_p):
             c_wins = (c_rows['rank_num'] == 1).sum()
             cat_stats[cat_name] = {
                 'runs': c_runs,
-                'win_rate': (c_wins / c_runs) if c_runs > 0 else np.nan
+                'win_rate': (c_wins / c_runs) if c_runs > 0 else np.nan,
+                'avg_rank': c_rows['rank_num'].mean() if c_runs > 0 else 7.0 
             }
+            
+        place_stats = {}
+        for p_code in group['place_code'].astype(str).unique():
+            p_rows = group[group['place_code'].astype(str) == p_code]
+            place_stats[p_code] = p_rows['rank_num'].mean() if len(p_rows) > 0 else 7.0 
 
         horse_dict[horse] = {
             'last_date': last_row['date_parsed'],
@@ -252,8 +269,12 @@ def build_past_horse_dict(df_p):
             'last_kinryo': last_row['kinryo_num'],
             'prev_prize': pd.to_numeric(last_row.get('賞金(万円)'), errors='coerce'),
             'prev_rank_num': last_row['rank_num'],
+            'prev_dist': last_row['distance_num'], 
+            'horse_prize_avg': horse_prize_avg, 
+            'prev_1c': prev_1c, 
             'best_dist_avg': best_dist_avg,
             'cat_stats': cat_stats,
+            'place_stats': place_stats, 
             'eff_rank_avg': ranks.tail(3).mean() if not ranks.empty else 8.0,
             'eff_top5_rate': (ranks.tail(5) <= 5).mean() if not ranks.empty else 0.2,
             'eff_top3_rate': (ranks.tail(5) <= 3).mean() if not ranks.empty else 0.1,
@@ -267,7 +288,8 @@ def build_past_horse_dict(df_p):
             'horse_avg_time_idx': pd.to_numeric(last_row.get('horse_avg_time_idx'), errors='coerce'),
             'horse_avg_last3f_idx': pd.to_numeric(last_row.get('horse_avg_last3f_idx'), errors='coerce'),
             'horse_avg_pace_idx': pd.to_numeric(last_row.get('horse_avg_pace_idx'), errors='coerce'),
-            'horse_avg_start_idx': pd.to_numeric(last_row.get('horse_avg_start_idx'), errors='coerce')
+            'horse_avg_start_idx': pd.to_numeric(last_row.get('horse_avg_start_idx'), errors='coerce'),
+            'last_3f_avg_rank': ranks.tail(5).mean() if not ranks.empty else 50.0 
         }
 
     course_front_map = df_p.groupby('course_id')['rank_num'].apply(lambda x: (x <= 3).mean()).to_dict()
@@ -291,13 +313,8 @@ def calculate_predictions(race_id_target, df_fut, cond):
     race_df = df_fut[df_fut['race_id'].astype(str) == str(race_id_target)].copy()
     if race_df.empty: return None, None, None, None
 
-    # モデルが辞書型の場合は 'model' キーから取り出す
-    if isinstance(model_data, dict) and 'model' in model_data:
-        model = model_data['model']
-        features = model_data.get('features', [])
-    else:
-        st.error("❌ モデルデータの形式が不正です。")
-        return None, None, None, None
+    model = model_data['model']
+    features = model_data.get('features', [])
 
     def safe_numeric_col(df, col_name, default_val):
         if col_name in df.columns:
@@ -309,16 +326,36 @@ def calculate_predictions(race_id_target, df_fut, cond):
     race_df['meet_day_num'] = safe_numeric_col(race_df, 'meet_day_num', 1.0)
     race_df['track_degradation'] = race_df['meet_day_num'] * race_df['race_num']
 
+    if 'place_code' in race_df.columns:
+        race_df['place_code_str'] = race_df['place_code'].astype(str)
+    else:
+        race_df['place_code_str'] = race_df['race_id'].astype(str).str[4:6]
+
     target_cols = [
         'last_date', 'prev_prize', 'prev_rank_num', 
         'eff_rank_avg', 'eff_top5_rate', 'eff_top3_rate',
         'eff_my_time_idx', 'eff_my_last3f_idx',
         'eff_my_pace_idx', 'eff_my_start_idx',
         'horse_runs', 'horse_wins', 'horse_win_rate',
-        'horse_avg_time_idx', 'horse_avg_last3f_idx', 'horse_avg_pace_idx', 'horse_avg_start_idx'
+        'horse_avg_time_idx', 'horse_avg_last3f_idx', 'horse_avg_pace_idx', 'horse_avg_start_idx',
+        'prev_dist', 'horse_prize_avg', 'prev_1c', 'last_3f_avg_rank'
     ]
     for col in target_cols:
         race_df[col] = race_df['馬名_clean'].apply(lambda x: past_dict.get(x, {}).get(col, np.nan))
+
+    race_df['dist_change_num'] = race_df['distance_num'] - race_df['prev_dist'].fillna(race_df['distance_num'])
+    race_df['same_dist_avg_rank'] = race_df.apply(lambda r: past_dict.get(r['馬名_clean'], {}).get('cat_stats', {}).get(r['dist_cat'], {}).get('avg_rank', 7.0), axis=1)
+    race_df['same_place_avg_rank'] = race_df.apply(lambda r: past_dict.get(r['馬名_clean'], {}).get('place_stats', {}).get(r['place_code_str'], 7.0), axis=1)
+    
+    race_df['horse_prize_avg'] = race_df['horse_prize_avg'].fillna(0.0)
+    race_df['race_avg_prize'] = race_df['horse_prize_avg'].mean()
+    race_df['race_avg_prize'] = race_df['race_avg_prize'].replace(0, 1)
+    race_df['race_prize_relative'] = race_df['horse_prize_avg'] / race_df['race_avg_prize']
+    race_df['race_prize_rank'] = race_df['horse_prize_avg'].rank(ascending=False, method='min')
+
+    race_df['first_corner'] = race_df['prev_1c']
+    race_df['last_corner'] = race_df['prev_1c']
+    race_df['corner_diff'] = 0.0
 
     if 'eff_my_start_idx' in race_df.columns and 'eff_my_last3f_idx' in race_df.columns:
         race_df['race_avg_start_idx'] = race_df['eff_my_start_idx'].mean()
@@ -339,12 +376,7 @@ def calculate_predictions(race_id_target, df_fut, cond):
         
     race_df['body_weight'] = [p[0] for p in weights_parsed]
     race_df['body_weight_diff'] = [p[1] for p in weights_parsed]
-    race_df['kinryo_body_ratio'] = race_df['kinryo_num'] / race_df['body_weight'].fillna(470)
-
-    if 'place_code' in race_df.columns:
-        race_df['place_code_str'] = race_df['place_code'].astype(str)
-    else:
-        race_df['place_code_str'] = race_df['race_id'].astype(str).str[4:6]
+    race_df['kinryo_weight_ratio'] = race_df['kinryo_num'] / race_df['body_weight'].fillna(470)
         
     if '調教師' in race_df.columns:
         race_df['trainer_win_rate'] = race_df['調教師'].map(trainer_map).fillna(0.08)
@@ -360,37 +392,6 @@ def calculate_predictions(race_id_target, df_fut, cond):
     race_df['horse_track_win_rate'] = race_df.apply(lambda r: horse_track_map.get((r.get('馬名_clean'), r.get('place_code_str')), 0.0), axis=1)
     race_df['frame_win_rate'] = race_df.apply(lambda r: frame_map.get((r.get('place_code_str'), r.get('distance_num'), r.get('wakuban_num')), 0.08), axis=1)
 
-    def calc_kinryo_diff(row):
-        p_kinryo = past_dict.get(row['馬名_clean'], {}).get('last_kinryo', np.nan)
-        c_kinryo = row['kinryo_num']
-        return c_kinryo - p_kinryo if pd.notna(c_kinryo) and pd.notna(p_kinryo) else 0.0
-
-    def calc_is_same_jockey(row):
-        p_jockey = past_dict.get(row['馬名_clean'], {}).get('last_jockey', '')
-        c_jockey = str(row.get('騎手', '')).strip()
-        return 1 if (c_jockey and c_jockey == p_jockey) else 0
-
-    def calc_dist_diff(row):
-        b_avg = past_dict.get(row['馬名_clean'], {}).get('best_dist_avg', np.nan)
-        c_dist = row['distance_num']
-        return abs(c_dist - b_avg) if pd.notna(b_avg) and pd.notna(c_dist) else 0.0
-
-    def calc_cat_win_rate(row):
-        return past_dict.get(row['馬名_clean'], {}).get('cat_stats', {}).get(row['dist_cat'], {}).get('win_rate', np.nan)
-
-    def calc_cat_runs(row):
-        return past_dict.get(row['馬名_clean'], {}).get('cat_stats', {}).get(row['dist_cat'], {}).get('runs', 0)
-
-    race_df['kinryo_diff'] = race_df.apply(calc_kinryo_diff, axis=1)
-    race_df['is_same_jockey'] = race_df.apply(calc_is_same_jockey, axis=1)
-    race_df['dist_diff'] = race_df.apply(calc_dist_diff, axis=1)
-    race_df['cat_win_rate'] = race_df.apply(calc_cat_win_rate, axis=1)
-    race_df['cat_runs'] = race_df.apply(calc_cat_runs, axis=1)
-
-    race_df['course_frame_win_rate'] = race_df['course_frame_id'].map(course_frame_map).fillna(0.08)
-    race_df['course_front_rate'] = race_df['course_id'].map(course_front_map).fillna(0.3)
-    race_df['style_course_fit'] = race_df['eff_my_start_idx'].fillna(50) * race_df['course_front_rate']
-
     if 'date' in race_df.columns:
         race_df['date_parsed_fut'] = pd.to_datetime(race_df['date'], errors='coerce')
     else:
@@ -399,71 +400,12 @@ def calculate_predictions(race_id_target, df_fut, cond):
     race_df['interval_days'] = (race_df['date_parsed_fut'] - race_df['last_date']).dt.days.fillna(30)
     race_df['is_long_rest'] = (race_df['interval_days'] >= 180).astype(int)
 
-    if 'jockey_win_power' in race_df.columns:
-        j_col = race_df['jockey_win_power']
-    elif 'jockey_win_rate' in race_df.columns:
-        j_col = race_df['jockey_win_rate']
-    else:
-        j_col = pd.Series(0.1, index=race_df.index)
-        
-    race_df['jockey_win_rate'] = pd.to_numeric(j_col, errors='coerce').fillna(0.1).clip(0.0, 1.0)
+    race_df['jockey_win_rate'] = safe_numeric_col(race_df, 'jockey_win_rate', 0.1).clip(0.0, 1.0)
     race_df['jockey_track_win_rate'] = safe_numeric_col(race_df, 'jockey_track_win_rate', 0.1).clip(0.0, 1.0)
-    race_df['jockey_runs'] = safe_numeric_col(race_df, 'jockey_runs', 100)
-    race_df['jockey_wins'] = safe_numeric_col(race_df, 'jockey_wins', 10)
-    race_df['jp_runs'] = safe_numeric_col(race_df, 'jp_runs', 20)
-    race_df['jp_wins'] = safe_numeric_col(race_df, 'jp_wins', 2)
-    race_df['jp_win_rate'] = race_df['jp_wins'] / (race_df['jp_runs'] + 1e-5)
-
-    race_df['condition_code'] = cond
-    race_df['condition'] = cond
-
-    race_df['time_idx_diff'] = race_df['eff_my_time_idx'] - race_df['horse_avg_time_idx']
-    race_df['last3f_idx_diff'] = race_df['eff_my_last3f_idx'] - race_df['horse_avg_last3f_idx']
-    race_df['pace_idx_diff'] = race_df['eff_my_pace_idx'] - race_df['horse_avg_pace_idx']
-    race_df['start_idx_diff'] = race_df['eff_my_start_idx'] - race_df['horse_avg_start_idx']
-
-    race_df['first_corner_pos'] = safe_numeric_col(race_df, 'first_pos', 8.0)
-    race_df['last_corner_pos'] = race_df['first_corner_pos']
-    race_df['pos_gain'] = 0.0
-    
-    if 'eff_my_time_idx' in race_df.columns and 'eff_my_start_idx' in race_df.columns:
-        race_df['eff_hybrid_power_idx'] = race_df['eff_my_time_idx'] * 0.5 + race_df['eff_my_start_idx'] * 0.5
-
-    z_cols = [
-        'eff_rank_avg', 'eff_top3_rate', 'prev_prize', 'eff_my_time_idx', 
-        'eff_my_last3f_idx', 'eff_my_pace_idx', 'jockey_win_rate', 'jockey_track_win_rate',
-        'horse_win_rate', 'horse_avg_time_idx', 'horse_avg_last3f_idx', 'horse_avg_pace_idx', 'horse_avg_start_idx',
-        'age', 'kinryo_num', 'body_weight', 'prev_rank', 'first_pos',
-        'eff_hybrid_power_idx', 'pace_scenario_idx'
-    ]
-    for c in z_cols:
-        if c in race_df.columns:
-            s_val = pd.to_numeric(race_df[c], errors='coerce')
-            s_std = s_val.std()
-            if pd.isna(s_std) or s_std == 0:
-                race_df[f'{c}_z'] = 0.0
-            else:
-                race_df[f'{c}_z'] = (s_val - s_val.mean()) / s_std
-
-    rank_cols = ['eff_my_time_idx', 'horse_avg_time_idx', 'jockey_win_rate', 'horse_win_rate', 'eff_hybrid_power_idx']
-    for c in rank_cols:
-        if c in race_df.columns:
-            s_val = pd.to_numeric(race_df[c], errors='coerce')
-            race_df[f'{c}_rank_in_race'] = s_val.rank(ascending=False, method='min')
 
     X = pd.DataFrame(index=race_df.index)
     for f in features:
         X[f] = race_df[f] if f in race_df.columns else np.nan
-
-    cat_cols = ['surface_code', 'condition_code', 'sex_code']
-    for cat in cat_cols:
-        if cat in X.columns:
-            if cat == 'sex_code': 
-                X[cat] = X[cat].replace({'牡':0,'牝':1,'セ':2}).fillna(0)
-            elif cat == 'surface_code': 
-                X[cat] = X[cat].replace({'芝':0,'ダート':1,'障害':2}).fillna(0)
-            elif cat == 'condition_code': 
-                X[cat] = X[cat].replace({'良':0,'稍重':1,'稍':1,'重':2,'不良':3}).fillna(0)
 
     X_num = X.copy()
     for col in X_num.columns:
@@ -475,14 +417,19 @@ def calculate_predictions(race_id_target, df_fut, cond):
         st.error(f"❌ モデル予測エラー: {e}")
         return None, None, None, None
 
+    # 🌟 NEW: Softmaxで入選確率（1〜3着率）を算出
     s_std = np.std(raw_scores)
     if pd.notna(s_std) and s_std > 0:
         z_scores = (raw_scores - np.mean(raw_scores)) / s_std
-        # Softmax関数で実力差をくっきりさせる
         exp_scores = np.exp(z_scores)
+        
         race_df['win_prob'] = exp_scores / np.sum(exp_scores)
+        race_df['top2_prob'] = race_df['win_prob'].apply(lambda p: min(1.0, p * 1.8))
+        race_df['top3_prob'] = race_df['win_prob'].apply(lambda p: min(1.0, p * 2.5))
     else:
         race_df['win_prob'] = 1.0 / len(race_df) if len(race_df) > 0 else 0.10
+        race_df['top2_prob'] = race_df['win_prob'] * 1.8
+        race_df['top3_prob'] = race_df['win_prob'] * 2.5
 
     if '単勝' in race_df.columns:
         race_df['単勝_num'] = pd.to_numeric(race_df['単勝'].astype(str).str.replace('倍', ''), errors='coerce').fillna(10.0)
@@ -559,29 +506,39 @@ def calculate_predictions(race_id_target, df_fut, cond):
     return race_df, pat, rec_ticket, buy_detail
 
 # ==========================================
-# 4. テーブル生成
+# 4. テーブル生成 (1・2・3着率表示機能追加)
 # ==========================================
 def generate_base_table(disp_df, is_newcomer):
     html = "<div class='table-container'><table class='kachi-table'>"
-    html += "<tr><th>馬番</th><th style='text-align:left;'>馬名</th><th>脚質</th><th>AIスコア</th><th>AI勝率</th><th>オッズ</th><th>期待値</th><th>Python印</th></tr>"
+    html += "<tr><th>馬番</th><th style='text-align:left;'>馬名</th><th>脚質</th><th>スコア</th><th>1着率</th><th>2着内率</th><th>3着内率</th><th>オッズ</th><th>期待値</th><th>Python印</th></tr>"
     
     for _, r in disp_df.iterrows():
         ev_val = float(r.get('ev', 0)) if pd.notna(r.get('ev')) else 0.0
         odds_val = float(r.get('単勝_num', 0)) if pd.notna(r.get('単勝_num')) else 0.0
-        win_prob_val = float(r.get('win_prob', 0)) if pd.notna(r.get('win_prob')) else 0.0
+        win_val = float(r.get('win_prob', 0)) if pd.notna(r.get('win_prob')) else 0.0
+        top2_val = float(r.get('top2_prob', 0)) if pd.notna(r.get('top2_prob')) else 0.0
+        top3_val = float(r.get('top3_prob', 0)) if pd.notna(r.get('top3_prob')) else 0.0
+        
         mark = r.get('印', '消')
         b_cls = get_badge_class(mark)
         
         score_str = f"<b>{int(r.get('ai_score', 100))}</b>" if not is_newcomer else "-"
-        win_str = f"{win_prob_val*100:.1f}%" if win_prob_val > 0 else "-"
+        win_str = f"{win_val*100:.1f}%" if win_val > 0 else "-"
+        top2_str = f"{top2_val*100:.1f}%" if top2_val > 0 else "-"
+        top3_str = f"{top3_val*100:.1f}%" if top3_val > 0 else "-"
         ev_str = f"<b>{ev_val:.2f}</b>" if ev_val > 0 and not is_newcomer else "-"
         
+        if win_val >= 0.25: win_str = f"<span style='color:#e74c3c; font-weight:bold;'>{win_str}</span>"
+        if top3_val >= 0.50: top3_str = f"<span style='color:#3498db; font-weight:bold;'>{top3_str}</span>"
+
         html += f"<tr>"
         html += f"<td><b>{int(r['馬番']):02d}</b></td>"
         html += f"<td style='text-align:left; font-weight:bold;'>{r.get('馬名', '-')}</td>"
         html += f"<td>{r.get('脚質', '-')}</td>"
         html += f"<td>{score_str}</td>"
         html += f"<td>{win_str}</td>"
+        html += f"<td>{top2_str}</td>"
+        html += f"<td>{top3_str}</td>"
         html += f"<td>{odds_val:.1f}倍</td>"
         html += f"<td>{ev_str}</td>"
         html += f"<td><span class='badge-mark {b_cls}'>{mark}</span></td>"
@@ -591,7 +548,7 @@ def generate_base_table(disp_df, is_newcomer):
 
 def generate_fusion_table(merged_df, is_newcomer):
     html = "<div class='table-container'><table class='kachi-table'>"
-    html += "<tr><th>馬番</th><th style='text-align:left;'>馬名</th><th>AIｽｺア</th><th>AI勝率</th><th>期待値</th><th>Python印</th><th>Gemini印</th><th style='text-align:left;'>Gemini短評</th></tr>"
+    html += "<tr><th>馬番</th><th style='text-align:left;'>馬名</th><th>AIｽｺア</th><th>1着率</th><th>3着内率</th><th>期待値</th><th>Python印</th><th>Gemini印</th><th style='text-align:left;'>Gemini短評</th></tr>"
     
     for _, r in merged_df.iterrows():
         sys_mark = r.get('印', '消') 
@@ -600,15 +557,22 @@ def generate_fusion_table(merged_df, is_newcomer):
         gem_cls = get_badge_class(gem_mark)
         
         score_str = f"<b>{int(r.get('ai_score', 100))}</b>" if not is_newcomer else "-"
-        win_prob_val = float(r.get('win_prob', 0)) if pd.notna(r.get('win_prob')) else 0.0
-        win_str = f"{win_prob_val*100:.1f}%" if win_prob_val > 0 else "-"
+        win_val = float(r.get('win_prob', 0)) if pd.notna(r.get('win_prob')) else 0.0
+        top3_val = float(r.get('top3_prob', 0)) if pd.notna(r.get('top3_prob')) else 0.0
+        
+        win_str = f"{win_val*100:.1f}%" if win_val > 0 else "-"
+        top3_str = f"{top3_val*100:.1f}%" if top3_val > 0 else "-"
         ev_str = f"<b>{float(r.get('ev', 0)):.2f}</b>" if float(r.get('ev', 0)) > 0 and not is_newcomer else "-"
         
+        if win_val >= 0.25: win_str = f"<span style='color:#e74c3c; font-weight:bold;'>{win_str}</span>"
+        if top3_val >= 0.50: top3_str = f"<span style='color:#3498db; font-weight:bold;'>{top3_str}</span>"
+
         html += f"<tr>"
         html += f"<td><b>{int(r['馬番']):02d}</b></td>"
         html += f"<td style='text-align:left; font-weight:bold;'>{r.get('馬名', '-')}</td>"
         html += f"<td>{score_str}</td>"
         html += f"<td>{win_str}</td>"
+        html += f"<td>{top3_str}</td>"
         html += f"<td>{ev_str}</td>"
         html += f"<td><span class='badge-mark {sys_cls}'>{sys_mark}</span></td>"
         html += f"<td><span class='badge-mark {gem_cls}'>{gem_mark}</span></td>"
