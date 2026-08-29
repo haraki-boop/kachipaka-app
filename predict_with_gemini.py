@@ -9,6 +9,9 @@ import unicodedata
 import streamlit as st
 from google import genai
 from google.genai import types
+import lightgbm as lgb
+import xgboost as xgb
+import catboost as cb
 
 # ==========================================
 # 🎨 アプリの基本設定
@@ -92,7 +95,7 @@ def parse_weight(val):
     return np.nan, np.nan
 
 # ==========================================
-# 🌟 NEW: ダミーのEnsembleModelクラス（Pickle読み込み用）
+# 🌟 EnsembleModelクラスの定義
 # ==========================================
 class EnsembleModel:
     def __init__(self, lgb_model, xgb_model, cat_model, weights=(0.4, 0.3, 0.3)):
@@ -102,22 +105,18 @@ class EnsembleModel:
         self.weights = weights
 
     def predict(self, X):
-        import xgboost as xgb
         X_num = X.copy()
         for col in X_num.columns:
             X_num[col] = pd.to_numeric(X_num[col], errors='coerce').fillna(0)
 
-        # LightGBM
         lgb_pred = self.lgb_model.predict(X_num)
         lgb_std = np.std(lgb_pred)
         lgb_norm = (lgb_pred - np.mean(lgb_pred)) / (lgb_std + 1e-5) if lgb_std > 0 else lgb_pred
 
-        # XGBoost
         xgb_pred = self.xgb_model.predict(xgb.DMatrix(X_num))
         xgb_std = np.std(xgb_pred)
         xgb_norm = (xgb_pred - np.mean(xgb_pred)) / (xgb_std + 1e-5) if xgb_std > 0 else xgb_pred
 
-        # CatBoost
         cat_pred = self.cat_model.predict(X_num)
         cat_std = np.std(cat_pred)
         cat_norm = (cat_pred - np.mean(cat_pred)) / (cat_std + 1e-5) if cat_std > 0 else cat_pred
@@ -125,7 +124,6 @@ class EnsembleModel:
         w1, w2, w3 = self.weights
         return w1 * lgb_norm + w2 * xgb_norm + w3 * cat_norm
 
-# Pythonのメインスコープにクラスを登録しておかないと読み込みエラーになるため
 import __main__
 __main__.EnsembleModel = EnsembleModel
 
@@ -293,8 +291,13 @@ def calculate_predictions(race_id_target, df_fut, cond):
     race_df = df_fut[df_fut['race_id'].astype(str) == str(race_id_target)].copy()
     if race_df.empty: return None, None, None, None
 
-    model = model_data['model']
-    features = model_data['features']
+    # モデルが辞書型の場合は 'model' キーから取り出す
+    if isinstance(model_data, dict) and 'model' in model_data:
+        model = model_data['model']
+        features = model_data.get('features', [])
+    else:
+        st.error("❌ モデルデータの形式が不正です。")
+        return None, None, None, None
 
     def safe_numeric_col(df, col_name, default_val):
         if col_name in df.columns:
@@ -475,10 +478,11 @@ def calculate_predictions(race_id_target, df_fut, cond):
     s_std = np.std(raw_scores)
     if pd.notna(s_std) and s_std > 0:
         z_scores = (raw_scores - np.mean(raw_scores)) / s_std
-        base_probs = 1.0 / (1.0 + np.exp(-1.2 * z_scores))
-        race_df['win_prob'] = base_probs * 0.35 + 0.01
+        # Softmax関数で実力差をくっきりさせる
+        exp_scores = np.exp(z_scores)
+        race_df['win_prob'] = exp_scores / np.sum(exp_scores)
     else:
-        race_df['win_prob'] = 0.10
+        race_df['win_prob'] = 1.0 / len(race_df) if len(race_df) > 0 else 0.10
 
     if '単勝' in race_df.columns:
         race_df['単勝_num'] = pd.to_numeric(race_df['単勝'].astype(str).str.replace('倍', ''), errors='coerce').fillna(10.0)

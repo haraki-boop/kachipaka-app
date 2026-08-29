@@ -10,6 +10,10 @@ import pandas as pd
 from datetime import datetime
 from colorama import init, Fore, Style
 
+import xgboost as xgb
+import lightgbm as lgb
+import catboost as cb
+
 # Windows環境の文字色初期化
 init(autoreset=True)
 
@@ -19,6 +23,43 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 FUTURE_CSV = "future_races.csv"
 ML_TARGET_CSV = "ml_target_data.csv"
 MODEL_PATHS = ["keiba_ai_model.pkl", "勝ちパカくん.pkl"]
+
+# ==========================================
+# 🌟 EnsembleModel クラスの定義（joblib読み込み用）
+# ==========================================
+class EnsembleModel:
+    def __init__(self, lgb_model, xgb_model, cat_model, weights=(0.4, 0.3, 0.3)):
+        self.lgb_model = lgb_model
+        self.xgb_model = xgb_model
+        self.cat_model = cat_model
+        self.weights = weights
+
+    def predict(self, X):
+        X_num = X.copy()
+        for col in X_num.columns:
+            X_num[col] = pd.to_numeric(X_num[col], errors='coerce').fillna(0)
+
+        # LightGBM
+        lgb_pred = self.lgb_model.predict(X_num)
+        lgb_std = np.std(lgb_pred)
+        lgb_norm = (lgb_pred - np.mean(lgb_pred)) / (lgb_std + 1e-5) if lgb_std > 0 else lgb_pred
+
+        # XGBoost
+        xgb_pred = self.xgb_model.predict(xgb.DMatrix(X_num))
+        xgb_std = np.std(xgb_pred)
+        xgb_norm = (xgb_pred - np.mean(xgb_pred)) / (xgb_std + 1e-5) if xgb_std > 0 else xgb_pred
+
+        # CatBoost
+        cat_pred = self.cat_model.predict(X_num)
+        cat_std = np.std(cat_pred)
+        cat_norm = (cat_pred - np.mean(cat_pred)) / (cat_std + 1e-5) if cat_std > 0 else cat_pred
+
+        w1, w2, w3 = self.weights
+        return w1 * lgb_norm + w2 * xgb_norm + w3 * cat_norm
+
+import __main__
+__main__.EnsembleModel = EnsembleModel
+
 
 def print_header(title):
     print(f"\n{Fore.YELLOW}{'='*60}")
@@ -126,8 +167,14 @@ def step3_5_predict_with_ai_sense():
 
     try:
         model_data = joblib.load(model_path)
-        model = model_data['model']
-        features = model_data['features']
+        
+        # 辞書形式か、そのままモデルクラスかを判定して取得
+        if isinstance(model_data, dict) and 'model' in model_data:
+            model = model_data['model']
+            features = model_data.get('features', [])
+        else:
+            model = model_data
+            features = [] # 特徴量リストがない場合は空にする
 
         df = pd.read_csv(FUTURE_CSV, low_memory=False)
         if 'race_id' not in df.columns or df.empty:
@@ -135,8 +182,16 @@ def step3_5_predict_with_ai_sense():
             return True
 
         X_future = pd.DataFrame(index=df.index)
-        for f in features:
-            X_future[f] = pd.to_numeric(df[f], errors='coerce') if f in df.columns else np.nan
+        
+        # 特徴量リストがある場合は指定の列だけを抽出し、ない場合は除外列以外を使用
+        if features:
+            for f in features:
+                X_future[f] = pd.to_numeric(df[f], errors='coerce') if f in df.columns else np.nan
+        else:
+            exclude_cols = ['date', 'race_id', '馬名', '騎手', '調教師', 'place_name', 'race_name', 'day_label']
+            use_cols = [c for c in df.columns if c not in exclude_cols]
+            for c in use_cols:
+                X_future[c] = pd.to_numeric(df[c], errors='coerce')
 
         df['raw_score'] = model.predict(X_future)
 
