@@ -95,7 +95,7 @@ def parse_weight(val):
     return np.nan, np.nan
 
 # ==========================================
-# 🌟 EnsembleModelクラスの定義 (ランキング版へ更新)
+# 🌟 EnsembleModelクラスの定義 (ノイズ過大増幅の防止を適用)
 # ==========================================
 class EnsembleModel:
     def __init__(self, lgb_model, xgb_model, cat_model, weights=(0.4, 0.3, 0.3)):
@@ -109,17 +109,21 @@ class EnsembleModel:
         for col in X_num.columns:
             X_num[col] = pd.to_numeric(X_num[col], errors='coerce').fillna(0)
 
+        # 🚨 バグ修正: STDが小さすぎる場合(ノイズのみ)はZスコア化せずスケール爆発を防止
         lgb_pred = self.lgb_model.predict(X_num)
-        lgb_pred = (lgb_pred - np.mean(lgb_pred)) / (np.std(lgb_pred) + 1e-5)
+        lgb_std = np.std(lgb_pred)
+        lgb_norm = (lgb_pred - np.mean(lgb_pred)) / lgb_std if lgb_std > 0.01 else (lgb_pred - np.mean(lgb_pred))
 
         xgb_pred = self.xgb_model.predict(xgb.DMatrix(X_num))
-        xgb_pred = (xgb_pred - np.mean(xgb_pred)) / (np.std(xgb_pred) + 1e-5)
+        xgb_std = np.std(xgb_pred)
+        xgb_norm = (xgb_pred - np.mean(xgb_pred)) / xgb_std if xgb_std > 0.01 else (xgb_pred - np.mean(xgb_pred))
 
         cat_pred = self.cat_model.predict(X_num)
-        cat_pred = (cat_pred - np.mean(cat_pred)) / (np.std(cat_pred) + 1e-5)
+        cat_std = np.std(cat_pred)
+        cat_norm = (cat_pred - np.mean(cat_pred)) / cat_std if cat_std > 0.01 else (cat_pred - np.mean(cat_pred))
 
         w1, w2, w3 = self.weights
-        return w1 * lgb_pred + w2 * xgb_pred + w3 * cat_pred
+        return w1 * lgb_norm + w2 * xgb_norm + w3 * cat_norm
 
 import __main__
 __main__.EnsembleModel = EnsembleModel
@@ -214,7 +218,7 @@ if past_err:
     st.warning(f"⚠️ 【過去データ警告】 {past_err}")
 
 # ==========================================
-# 2. 過去データ辞書化 (地方ロジック特徴量を追加)
+# 2. 過去データ辞書化 (地方ロジック特徴量を修正)
 # ==========================================
 @st.cache_data
 def build_past_horse_dict(df_p):
@@ -233,19 +237,21 @@ def build_past_horse_dict(df_p):
         top3_rows = group[group['rank_num'] <= 3]
         best_dist_avg = top3_rows['distance_num'].mean() if not top3_rows.empty else np.nan
 
-        # 🌟 地方ロジック用追加計算
         prize_col = '賞金(万円)' if '賞金(万円)' in group.columns else 'prize'
         prizes = pd.to_numeric(group.get(prize_col, pd.Series()), errors='coerce').fillna(0)
         horse_prize_avg = prizes.mean() if not prizes.empty else 0.0
 
-        def parse_pass_tmp(val):
-            if pd.isna(val): return np.nan
+        # 🚨 バグ修正: 前回通過コーナーと変動値を正しく抽出
+        def parse_pass_full(val):
+            if pd.isna(val): return np.nan, np.nan, np.nan
             parts = str(val).split('-')
-            try: return float(parts[0])
-            except: return np.nan
-        
-        prev_1c = parse_pass_tmp(last_row.get('通過', np.nan))
-        if pd.isna(prev_1c): prev_1c = 10.0
+            try: return float(parts[0]), float(parts[-1]), float(parts[0]) - float(parts[-1])
+            except: return np.nan, np.nan, np.nan
+
+        p_1c, p_lc, p_cdiff = parse_pass_full(last_row.get('通過', np.nan))
+        if pd.isna(p_1c): p_1c = 10.0
+        if pd.isna(p_lc): p_lc = 10.0
+        if pd.isna(p_cdiff): p_cdiff = 0.0
 
         cat_stats = {}
         for cat_name in ['sprint', 'mile_middle', 'stayer']:
@@ -271,7 +277,9 @@ def build_past_horse_dict(df_p):
             'prev_rank_num': last_row['rank_num'],
             'prev_dist': last_row['distance_num'], 
             'horse_prize_avg': horse_prize_avg, 
-            'prev_1c': prev_1c, 
+            'prev_1c': p_1c, 
+            'prev_last_corner': p_lc,  # 🌟 修正反映
+            'prev_corner_diff': p_cdiff, # 🌟 修正反映
             'best_dist_avg': best_dist_avg,
             'cat_stats': cat_stats,
             'place_stats': place_stats, 
@@ -289,7 +297,7 @@ def build_past_horse_dict(df_p):
             'horse_avg_last3f_idx': pd.to_numeric(last_row.get('horse_avg_last3f_idx'), errors='coerce'),
             'horse_avg_pace_idx': pd.to_numeric(last_row.get('horse_avg_pace_idx'), errors='coerce'),
             'horse_avg_start_idx': pd.to_numeric(last_row.get('horse_avg_start_idx'), errors='coerce'),
-            'last_3f_avg_rank': ranks.tail(5).mean() if not ranks.empty else 50.0 
+            'last_3f_avg_rank': l_vals.mean() if not l_vals.empty else 50.0 # 🚨 致命的バグ修正(着順平均→指数平均)
         }
 
     course_front_map = df_p.groupby('course_id')['rank_num'].apply(lambda x: (x <= 3).mean()).to_dict()
@@ -349,13 +357,15 @@ def calculate_predictions(race_id_target, df_fut, cond):
     
     race_df['horse_prize_avg'] = race_df['horse_prize_avg'].fillna(0.0)
     race_df['race_avg_prize'] = race_df['horse_prize_avg'].mean()
-    race_df['race_avg_prize'] = race_df['race_avg_prize'].replace(0, 1)
+    if race_df['race_avg_prize'].mean() == 0:
+        race_df['race_avg_prize'] = 1.0
     race_df['race_prize_relative'] = race_df['horse_prize_avg'] / race_df['race_avg_prize']
     race_df['race_prize_rank'] = race_df['horse_prize_avg'].rank(ascending=False, method='min')
 
+    # 🚨 バグ修正: 前走の通過データを使用
     race_df['first_corner'] = race_df['prev_1c']
-    race_df['last_corner'] = race_df['prev_1c']
-    race_df['corner_diff'] = 0.0
+    race_df['last_corner'] = race_df['馬名_clean'].apply(lambda x: past_dict.get(x, {}).get('prev_last_corner', 10.0))
+    race_df['corner_diff'] = race_df['馬名_clean'].apply(lambda x: past_dict.get(x, {}).get('prev_corner_diff', 0.0))
 
     if 'eff_my_start_idx' in race_df.columns and 'eff_my_last3f_idx' in race_df.columns:
         race_df['race_avg_start_idx'] = race_df['eff_my_start_idx'].mean()
@@ -417,12 +427,11 @@ def calculate_predictions(race_id_target, df_fut, cond):
         st.error(f"❌ モデル予測エラー: {e}")
         return None, None, None, None
 
-    # 🌟 NEW: Softmaxで入選確率（1〜3着率）を算出
+    # 🌟 バグ修正: 強すぎるSoftmaxを抑制(温度1.5) ＆ 無駄なZスコア化を回避
     s_std = np.std(raw_scores)
-    if pd.notna(s_std) and s_std > 0:
+    if pd.notna(s_std) and s_std > 0.001:
         z_scores = (raw_scores - np.mean(raw_scores)) / s_std
-        exp_scores = np.exp(z_scores)
-        
+        exp_scores = np.exp(z_scores / 1.5)
         race_df['win_prob'] = exp_scores / np.sum(exp_scores)
         race_df['top2_prob'] = race_df['win_prob'].apply(lambda p: min(1.0, p * 1.8))
         race_df['top3_prob'] = race_df['win_prob'].apply(lambda p: min(1.0, p * 2.5))
@@ -506,7 +515,7 @@ def calculate_predictions(race_id_target, df_fut, cond):
     return race_df, pat, rec_ticket, buy_detail
 
 # ==========================================
-# 4. テーブル生成 (1・2・3着率表示機能追加)
+# 4. テーブル生成
 # ==========================================
 def generate_base_table(disp_df, is_newcomer):
     html = "<div class='table-container'><table class='kachi-table'>"
