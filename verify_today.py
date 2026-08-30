@@ -21,14 +21,10 @@ class EnsembleModel:
         for col in X_num.columns:
             X_num[col] = pd.to_numeric(X_num[col], errors='coerce').fillna(0)
 
+        # 🌟 Zスコア化を削除し、回帰予測値（確率）をそのまま加重平均
         lgb_pred = self.lgb_model.predict(X_num)
-        lgb_pred = (lgb_pred - np.mean(lgb_pred)) / (np.std(lgb_pred) + 1e-5)
-
         xgb_pred = self.xgb_model.predict(xgb.DMatrix(X_num))
-        xgb_pred = (xgb_pred - np.mean(xgb_pred)) / (np.std(xgb_pred) + 1e-5)
-
         cat_pred = self.cat_model.predict(X_num)
-        cat_pred = (cat_pred - np.mean(cat_pred)) / (np.std(cat_pred) + 1e-5)
 
         w1, w2, w3 = self.weights
         return w1 * lgb_pred + w2 * xgb_pred + w3 * cat_pred
@@ -38,7 +34,7 @@ def verify():
         print("❌ モデルファイルまたはCSVファイルが見つかりません。")
         return
 
-    print("📊 地方成功ロジック移植版モデルの検証（バックテスト）を開始します...")
+    print("📊 複勝圏内特化・特徴量選別モデルの検証（バックテスト）を開始します...")
     
     # 1. モデルとデータの読み込み
     model_data = joblib.load(MODEL_FILE)
@@ -125,14 +121,24 @@ def verify():
     test_df['last_corner'] = [p[1] for p in passing]
     test_df['corner_diff'] = [p[2] for p in passing]
     test_df['prev_1c'] = test_df.groupby('馬名_clean')['first_corner'].shift(1).fillna(10.0)
-    
+
+    # 🌟 追加: テンの安定度
+    if 'my_start_idx' in test_df.columns:
+        start_num = pd.to_numeric(test_df['my_start_idx'], errors='coerce')
+        test_df['start_idx_avg'] = test_df.groupby('馬名_clean')[start_num.name].apply(lambda x: x.shift(1).expanding().mean()).reset_index(level=0, drop=True).fillna(50.0)
+        test_df['start_idx_std'] = test_df.groupby('馬名_clean')[start_num.name].apply(lambda x: x.shift(1).rolling(3, min_periods=1).std()).reset_index(level=0, drop=True).fillna(0.0)
+    else:
+        test_df['start_idx_avg'] = 50.0
+        test_df['start_idx_std'] = 0.0
+
+    # 🌟 追加: 上がりの安定度
     if 'my_last3f_idx' in test_df.columns:
-        test_df['last_3f_idx_num'] = pd.to_numeric(test_df['my_last3f_idx'], errors='coerce')
-        test_df['last_3f_avg_rank'] = test_df.groupby('馬名_clean')['last_3f_idx_num'].apply(
-            lambda x: x.shift(1).expanding().mean()
-        ).reset_index(level=0, drop=True).fillna(50.0)
+        last3f_num = pd.to_numeric(test_df['my_last3f_idx'], errors='coerce')
+        test_df['last_3f_avg_rank'] = test_df.groupby('馬名_clean')[last3f_num.name].apply(lambda x: x.shift(1).expanding().mean()).reset_index(level=0, drop=True).fillna(50.0)
+        test_df['last_3f_std'] = test_df.groupby('馬名_clean')[last3f_num.name].apply(lambda x: x.shift(1).rolling(3, min_periods=1).std()).reset_index(level=0, drop=True).fillna(0.0)
     else:
         test_df['last_3f_avg_rank'] = 50.0
+        test_df['last_3f_std'] = 0.0
 
     test_df['kinryo_num'] = pd.to_numeric(test_df.get('斤量'), errors='coerce').fillna(55.0)
     weights_parsed = test_df.get('馬体重', pd.Series()).apply(parse_weight)
@@ -172,7 +178,7 @@ def verify():
 
     # 4. 結果表示
     print("\n" + "="*55)
-    print(f"🏁 地方ロジック移植モデル 検証レポート（{total_races} レース）")
+    print(f"🏁 複勝圏内特化・特徴量選別モデル 検証レポート（{total_races} レース）")
     print("="*55)
     print(f"【👑 本命（スコア1位）の成績】")
     print(f"  ・1着 的中率（勝率） : {top1_win_rate:.1f}%")

@@ -53,9 +53,8 @@ def preprocess_features(df):
     df_feat['place_code'] = df_feat.get('place_code', pd.Series(['00']*len(df_feat))).astype(str)
     
     df_feat['rank_num'] = pd.to_numeric(df_feat.get('着順'), errors='coerce')
-    df_feat['is_top3_past'] = (df_feat['rank_num'] <= 3).astype(int)
 
-    # 2. 地方モデル成功ロジック: 距離変化と条件別平均着順
+    # 2. 距離変化と条件別平均着順
     df_feat['prev_dist'] = df_feat.groupby('馬名_clean')['distance_num'].shift(1)
     df_feat['dist_change_num'] = df_feat['distance_num'] - df_feat['prev_dist'].fillna(df_feat['distance_num'])
     
@@ -67,7 +66,7 @@ def preprocess_features(df):
         lambda x: x.shift(1).expanding().mean()
     ).reset_index(level=[0,1], drop=True).fillna(7.0)
 
-    # 3. 地方モデル成功ロジック: 賞金の相対評価
+    # 3. 賞金の相対評価
     prize_col = '賞金(万円)' if '賞金(万円)' in df_feat.columns else 'prize'
     df_feat['prize_num'] = pd.to_numeric(df_feat.get(prize_col, 0), errors='coerce').fillna(0.0)
     df_feat['horse_prize_avg'] = df_feat.groupby('馬名_clean')['prize_num'].apply(
@@ -83,17 +82,24 @@ def preprocess_features(df):
     df_feat['first_corner'] = [p[0] for p in passing]
     df_feat['last_corner'] = [p[1] for p in passing]
     df_feat['corner_diff'] = [p[2] for p in passing]
-    
     df_feat['prev_1c'] = df_feat.groupby('馬名_clean')['first_corner'].shift(1).fillna(10.0)
     
-    # 上がり3Fの平均順位
+    # 🌟 新規チューニング: テン（先行力）の安定度を追加
+    if 'my_start_idx' in df_feat.columns:
+        start_num = pd.to_numeric(df_feat['my_start_idx'], errors='coerce')
+        df_feat['start_idx_avg'] = df_feat.groupby('馬名_clean')[start_num.name].apply(lambda x: x.shift(1).expanding().mean()).reset_index(level=0, drop=True).fillna(50.0)
+        df_feat['start_idx_std'] = df_feat.groupby('馬名_clean')[start_num.name].apply(lambda x: x.shift(1).rolling(3, min_periods=1).std()).reset_index(level=0, drop=True).fillna(0.0)
+    else:
+        df_feat['start_idx_avg'] = 50.0
+        df_feat['start_idx_std'] = 0.0
+
     if 'my_last3f_idx' in df_feat.columns:
-        df_feat['last_3f_idx_num'] = pd.to_numeric(df_feat['my_last3f_idx'], errors='coerce')
-        df_feat['last_3f_avg_rank'] = df_feat.groupby('馬名_clean')['last_3f_idx_num'].apply(
-            lambda x: x.shift(1).expanding().mean()
-        ).reset_index(level=0, drop=True).fillna(50.0)
+        last3f_num = pd.to_numeric(df_feat['my_last3f_idx'], errors='coerce')
+        df_feat['last_3f_avg_rank'] = df_feat.groupby('馬名_clean')[last3f_num.name].apply(lambda x: x.shift(1).expanding().mean()).reset_index(level=0, drop=True).fillna(50.0)
+        df_feat['last_3f_std'] = df_feat.groupby('馬名_clean')[last3f_num.name].apply(lambda x: x.shift(1).rolling(3, min_periods=1).std()).reset_index(level=0, drop=True).fillna(0.0)
     else:
         df_feat['last_3f_avg_rank'] = 50.0
+        df_feat['last_3f_std'] = 0.0
 
     # 5. その他基礎指標
     df_feat['kinryo_num'] = pd.to_numeric(df_feat.get('斤量'), errors='coerce').fillna(55.0)
@@ -106,7 +112,6 @@ def preprocess_features(df):
     for c in num_cols:
         df_feat[c] = pd.to_numeric(df_feat.get(c, 0), errors='coerce').fillna(0.0)
 
-    # NaN 埋め
     df_feat = df_feat.fillna(0)
     return df_feat
 
@@ -124,13 +129,13 @@ class EnsembleModel:
 
         # ランキング予測値のスケール合わせ（Zスコア化）
         lgb_pred = self.lgb_model.predict(X_num)
-        lgb_pred = (lgb_pred - np.mean(lgb_pred)) / (np.std(lgb_pred) + 1e-5)
+        lgb_pred = (lgb_pred - np.mean(lgb_pred)) / (np.std(lgb_pred) + 1e-8)
 
         xgb_pred = self.xgb_model.predict(xgb.DMatrix(X_num))
-        xgb_pred = (xgb_pred - np.mean(xgb_pred)) / (np.std(xgb_pred) + 1e-5)
+        xgb_pred = (xgb_pred - np.mean(xgb_pred)) / (np.std(xgb_pred) + 1e-8)
 
         cat_pred = self.cat_model.predict(X_num)
-        cat_pred = (cat_pred - np.mean(cat_pred)) / (np.std(cat_pred) + 1e-5)
+        cat_pred = (cat_pred - np.mean(cat_pred)) / (np.std(cat_pred) + 1e-8)
 
         w1, w2, w3 = self.weights
         return w1 * lgb_pred + w2 * xgb_pred + w3 * cat_pred
@@ -158,15 +163,16 @@ def main():
     df_prep = preprocess_features(df_clean)
     df_prep['date_norm'] = df_prep['date'].astype(str).str.replace(r'\D', '', regex=True).str[:8]
 
-    # 🌟 地方モデルの強力な特徴量を抽出
-    features = [
+    # 🌟 特徴量の候補
+    initial_features = [
         'horse_prize_avg', 'race_prize_relative', 'race_prize_rank', 
         'same_dist_avg_rank', 'same_place_avg_rank', 'dist_change_num',
-        'prev_1c', 'last_corner', 'corner_diff', 'last_3f_avg_rank',
+        'prev_1c', 'last_corner', 'corner_diff', 'last_3f_avg_rank', 'last_3f_std',
+        'start_idx_avg', 'start_idx_std',
         'interval_days', 'horse_runs', 'jockey_win_rate', 'trainer_win_rate',
         'kinryo_num', 'body_weight', 'kinryo_weight_ratio', 'distance_num'
     ]
-    use_features = [f for f in features if f in df_prep.columns]
+    use_features = [f for f in initial_features if f in df_prep.columns]
 
     df_train = df_prep[df_prep['date_norm'] < '20260601'].sort_values(['race_id', '馬番']).copy()
     df_valid = df_prep[(df_prep['date_norm'] >= '20260601') & (df_prep['date_norm'] <= '20260831')].sort_values(['race_id', '馬番']).copy()
@@ -177,7 +183,7 @@ def main():
     X_valid, y_valid = df_valid[use_features], df_valid['relevance']
     groups_valid = df_valid.groupby('race_id', sort=False).size().values
 
-    print("\n🤖 Optuna: lambdarank モデルのチューニングを開始...")
+    print("\n🤖 Optuna: lambdarank モデルのチューニングを開始 (50回)...")
     def objective(trial):
         params = {
             'objective': 'lambdarank',
@@ -185,10 +191,11 @@ def main():
             'eval_at': [1, 3],
             'boosting_type': 'gbdt',
             'learning_rate': 0.05,
-            # 🌟 過学習防止のため、num_leaves を地方モデル並に小さく制限
-            'num_leaves': trial.suggest_int('num_leaves', 15, 31),
+            'num_leaves': trial.suggest_int('num_leaves', 15, 63),
             'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 20, 100),
-            'feature_fraction': trial.suggest_float('feature_fraction', 0.7, 1.0),
+            'feature_fraction': trial.suggest_float('feature_fraction', 0.6, 1.0),
+            'bagging_fraction': trial.suggest_float('bagging_fraction', 0.6, 1.0),
+            'bagging_freq': trial.suggest_int('bagging_freq', 1, 5),
             'verbose': -1,
             'seed': 42
         }
@@ -203,37 +210,55 @@ def main():
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     study = optuna.create_study(direction='maximize')
-    study.optimize(objective, n_trials=10) 
+    study.optimize(objective, n_trials=50) 
     
     best_params = study.best_params
     best_params.update({'objective': 'lambdarank', 'metric': 'ndcg', 'eval_at': [1, 3], 'learning_rate': 0.05, 'verbose': -1, 'seed': 42})
-    print(f"✨ 枝数を絞った最適化完了: {best_params}")
+    print(f"✨ 50回の最適化完了: {best_params}")
 
+    print("\n🧹 特徴量の自動選別（Feature Selection）を実行中...")
+    fs_train_data = lgb.Dataset(X_train, label=y_train, group=groups_train)
+    fs_valid_data = lgb.Dataset(X_valid, label=y_valid, group=groups_valid, reference=fs_train_data)
+    fs_model = lgb.train(
+        best_params, fs_train_data, valid_sets=[fs_valid_data],
+        num_boost_round=300, callbacks=[lgb.early_stopping(stopping_rounds=20, verbose=False)]
+    )
+    
+    importance = fs_model.feature_importance(importance_type='gain')
+    feat_imp_df = pd.DataFrame({'feature': use_features, 'importance': importance}).sort_values('importance', ascending=False)
+    
+    cutoff_threshold = feat_imp_df['importance'].quantile(0.2)
+    selected_features = feat_imp_df[feat_imp_df['importance'] > cutoff_threshold]['feature'].tolist()
+    
+    print(f"🗑️ 除外されたノイズ特徴量: {set(use_features) - set(selected_features)}")
+    print(f"✅ 最終的に使用する精鋭特徴量 ({len(selected_features)}個): {selected_features}")
+
+    # 🌟 最終モデルの学習
     df_full = df_prep.sort_values(['race_id', '馬番'])
-    X_full = df_full[use_features].copy()
+    X_full_selected = df_full[selected_features].copy()
     y_full = df_full['relevance']
     groups_full = df_full.groupby('race_id', sort=False).size().values
 
-    print("🚀 最終アンサンブルモデル（Ranker）の学習中...")
+    print("\n🚀 最終アンサンブルモデル（Ranker）の学習中（厳選データ使用）...")
     # 1. LightGBM
-    lgb_model = lgb.train(best_params, lgb.Dataset(X_full, label=y_full, group=groups_full), num_boost_round=250)
+    lgb_model = lgb.train(best_params, lgb.Dataset(X_full_selected, label=y_full, group=groups_full), num_boost_round=300)
     
     # 2. XGBoost
-    dtrain_xgb = xgb.DMatrix(X_full, label=y_full)
+    dtrain_xgb = xgb.DMatrix(X_full_selected, label=y_full)
     dtrain_xgb.set_group(groups_full)
-    xgb_params = {'objective': 'rank:ndcg', 'eval_metric': 'ndcg@3', 'eta': 0.05, 'max_depth': 5, 'seed': 42}
-    xgb_model = xgb.train(xgb_params, dtrain_xgb, num_boost_round=200)
+    xgb_params = {'objective': 'rank:ndcg', 'eval_metric': 'ndcg@3', 'eta': 0.05, 'max_depth': 6, 'subsample': 0.8, 'seed': 42}
+    xgb_model = xgb.train(xgb_params, dtrain_xgb, num_boost_round=250)
     
     # 3. CatBoost
     df_full['group_id'] = df_full.groupby('race_id', sort=False).ngroup()
-    cat_pool = Pool(X_full, label=y_full, group_id=df_full['group_id'])
-    cat_params = {'loss_function': 'YetiRank', 'iterations': 250, 'learning_rate': 0.05, 'depth': 5, 'verbose': 0, 'random_seed': 42}
+    cat_pool = Pool(X_full_selected, label=y_full, group_id=df_full['group_id'])
+    cat_params = {'loss_function': 'YetiRank', 'iterations': 300, 'learning_rate': 0.05, 'depth': 6, 'verbose': 0, 'random_seed': 42}
     cat_model = CatBoost(cat_params)
     cat_model.fit(cat_pool)
 
     ensemble_model = EnsembleModel(lgb_model, xgb_model, cat_model)
-    joblib.dump({'model': ensemble_model, 'features': use_features}, MODEL_FILE)
-    print(f"\n🎉 地方競馬の成功ロジックを注入した新モデルを {MODEL_FILE} に保存しました！")
+    joblib.dump({'model': ensemble_model, 'features': selected_features}, MODEL_FILE)
+    print(f"\n🎉 lambdarank特化・特徴量選別・50回チューニング済みの最強モデルを {MODEL_FILE} に保存しました！")
 
 if __name__ == "__main__":
     main()

@@ -486,15 +486,23 @@ def calculate_predictions(race_id_target, df_fut, cond):
     else:
         race_df['脚質'] = "-"
 
-    race_df = race_df.sort_values(by=['ai_score', 'win_prob'], ascending=[False, False]).reset_index(drop=True)
+    # 🌟 バグ修正: 印のロジックをより安全に（IndexError回避）
+    race_df = race_df.sort_values(by='win_prob', ascending=False).reset_index(drop=True)
     race_df['印'] = "消"
     
-    if len(race_df) > 0: race_df.loc[0, '印'] = "◎"
-    if len(race_df) > 1: race_df.loc[1, '印'] = "◯"
-    if len(race_df) > 2: race_df.loc[2, '印'] = "▲"
-    if len(race_df) > 3: race_df.loc[3, '印'] = "△"
-    if len(race_df) > 4: race_df.loc[4, '印'] = "☆1"
-    if len(race_df) > 5: race_df.loc[5, '印'] = "☆2"
+    if len(race_df) > 0:
+        race_df.loc[0, '印'] = "◎"
+        
+    if len(race_df) > 1:
+        rest_idx = race_df.index[1:]
+        # 紐（相手）は期待値（ev）が高い順にソートして印を打つ
+        rest_df = race_df.loc[rest_idx].sort_values(by='ev', ascending=False)
+        marks = ["◯", "▲", "△", "☆1", "☆2"]
+        
+        # 安全なループ処理（馬の数が少ない場合でもエラーにならないように）
+        for i in range(min(len(rest_df), len(marks))):
+            target_idx = rest_df.index[i]
+            race_df.loc[target_idx, '印'] = marks[i]
 
     mark_order = {"◎":1, "◯":2, "▲":3, "△":4, "☆1":5, "☆2":6, "消":7}
     race_df['mark_rank'] = race_df['印'].map(mark_order).fillna(99)
@@ -507,11 +515,12 @@ def calculate_predictions(race_id_target, df_fut, cond):
 
     is_3ren_tan_race = (gap_1_2 >= 0.07) or (gap_1_2 < 0.035 and gap_1_3 >= 0.06)
 
+    # 🌟 バグ修正: おすすめ買い目の馬番取得を、必ず存在する行数（min関数）で安全に取得
     if is_3ren_tan_race:
         pat = "① 1強気配 (軸圧倒)" if gap_1_2 >= 0.07 else "② 2強気配 (頭分け対抗)"
         rec_ticket = "3連単 軸1頭相手4頭マルチ (24点 / 2,400円)"
         u_aite = [f"{race_df.loc[k, '馬番']}({race_df.loc[k, '印']})" for k in range(1, min(5, len(race_df)))]
-        buy_detail = f"1頭軸: {race_df.loc[0, '馬番']}(◎) ⇔ 相手: {', '.join(u_aite)}"
+        buy_detail = f"1頭軸: {race_df.loc[0, '馬番']}(◎) ⇔ 相手: {', '.join(u_aite)}" if len(race_df) > 0 else "データ不足"
     elif (p1 - p4) < 0.08:
         pat = "④ 波乱気配 (大混戦)"
         rec_ticket = "3連複 5頭BOX (10点 / 1,000円)"
@@ -521,7 +530,7 @@ def calculate_predictions(race_id_target, df_fut, cond):
         pat = "③ 混戦気配 (標準展開)"
         rec_ticket = "3連複 ◎1頭軸相手5頭流し (10点 / 1,000円)"
         u_others = [f"{race_df.loc[k, '馬番']}({race_df.loc[k, '印']})" for k in range(1, min(6, len(race_df)))]
-        buy_detail = f"軸: {race_df.loc[0, '馬番']}(◎) -> 相手: {', '.join(u_others)}"
+        buy_detail = f"軸: {race_df.loc[0, '馬番']}(◎) -> 相手: {', '.join(u_others)}" if len(race_df) > 0 else "データ不足"
 
     return race_df, pat, rec_ticket, buy_detail
 
@@ -673,7 +682,7 @@ if st.session_state['selected_race_id']:
             st.markdown(generate_base_table(res_df, is_newcomer), unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("🧠 調教・血統・敗因データを検索し、表を最強アップデートする", type="primary", use_container_width=True):
+        if st.button("🧠 Geminiを独立させて、泥臭く穴馬を発掘させる", type="primary", use_container_width=True):
             if not GEMINI_API_KEY:
                 st.error("【設定エラー】APIキーが見つかりません。")
                 st.stop()
@@ -683,23 +692,27 @@ if st.session_state['selected_race_id']:
 
             table_summary = []
             for idx, row in res_df.iterrows():
-                ev_val = float(row.get('ev', 0)) if pd.notna(row.get('ev')) else 0.0
-                odds_val = float(row.get('単勝_num', 0)) if pd.notna(row.get('単勝_num')) else 0.0
-                win_val = float(row.get('win_prob', 0)) * 100 if pd.notna(row.get('win_prob')) else 0.0
-                table_summary.append(f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | 脚質:{row.get('脚質', '不明')} | オッズ:{odds_val}倍 | AI勝率:{win_val:.1f}% | 期待値:{ev_val:.2f} | Python印:{row.get('印', '消')}")
+                table_summary.append(f"馬番:{int(row.get('馬番', 0)):02d} | 馬名:{row.get('馬名', '不明')} | 脚質:{row.get('脚質', '不明')}")
 
             system_instruction = f"""
-あなたはプロの競馬分析AI「勝ちぱかくん」の最終意思決定者（Gemini脳）です。
-Pythonが算出した定量データ（ベース予測）に、あなたが検索で得る「最新の定性データ」を掛け合わせ、最終的な評価を下す（骨格を太くする）のがあなたの役割です。
+あなたは百戦錬磨のプロ競馬予想家（トラックマン）です。
+今からお渡しする出走馬リストに対して、独自の取材（検索）を行い、あなた自身の相馬眼で評価を下してください。
 
 【あなたの3大定性チェック・ワークフロー】
-1. まず、提供された「Python算出データ」を確認してください。
-2. 次に、Google検索ツールを駆使して、各出走馬に関する以下の【3大定性情報】を深掘り検索してください。
-   ①【調教（追い切り状態）】: 前走時と比較した状態の変化、勝負気配
-   ②【血統（コース/馬場適性）】: 今日のコース・馬場状態に対する血統的裏付け
-   ③【前走敗因・不利】: 前走の大敗に明確な不利や理由があり、今回巻き返せるか
-   ※注意: 検索のタイムアウトを防ぐため、Python印が上位の馬や、期待値が高い穴馬を中心に重点的に検索・評価を行ってください。
-3. Pythonの定量データと、あなたが検索で得た定性情報を掛け合わせ、あなた自身の最終評価（Gemini印と短評）を下してください。
+1. まず、提供された「出走馬リスト」を確認してください。（過去のオッズや勝率は一切気にしないでください）
+2. 次に、Google検索ツールを駆使して、各出走馬に関する以下の【3大定性情報】を深く、泥臭く検索してください。
+   ①【陣営の勝負気配】: 「馬名 陣営コメント」等で検索し、今回のレースに向けた本気度（メイチか叩き台か）を探る。
+   ②【馬場適性】: 今日のコース・馬場状態に対する血統的裏付けや過去の実績。
+   ③【前走の致命的な不利】: 「馬名 前走 不利」「馬名 どん詰まり」等で検索し、前走大敗だが今回巻き返せる「隠れた実力馬」を発掘する。
+3. 検索で得た定性情報のみを基に、あなた自身の最終評価（Gemini印と短評）を下してください。
+
+【印の打ち方】
+・◎（本命）: 1頭のみ
+・◯（対抗）: 1頭のみ
+・▲（単穴）: 1頭のみ
+・△（連下）: 1頭のみ
+・☆（穴馬）: 1〜2頭（前走不利などで激走気配のある馬）
+・消: それ以外
 
 【重要：カンニング絶対禁止ルール】
 実際のレース結果（着順・配当など）を検索してカンニングすることは絶対に禁止です。発走前の事前情報のみで評価を構成してください。
@@ -709,14 +722,14 @@ Pythonが算出した定量データ（ベース予測）に、あなたが検�
 
 {{
   "evaluations": [
-    {{"馬番": 1, "Gemini印": "◎", "短評": "坂路自己ベスト。洋芝適性高く好勝負"}},
-    {{"馬番": 2, "Gemini印": "☆", "短評": "前走直線詰まる。巻き返し期待"}}
+    {{"馬番": 1, "Gemini印": "◎", "短評": "陣営は『ここがメイチ』と強気。重馬場適性も高い。"}},
+    {{"馬番": 2, "Gemini印": "☆", "短評": "前走は直線で前が壁になり全く追えず。度外視可能で巻き返し必至。"}}
   ]
 }}
 """
-            prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R 【{r_name}】\n【想定馬場状態】: {cond}\n【AI勝負気配】: {pat} ({rec_ticket})\n\n【Python算定データ】:\n{chr(10).join(table_summary)}"
+            prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R 【{r_name}】\n【今日の想定馬場状態】: {cond}\n\n【出走馬リスト（純粋なリストです）】:\n{chr(10).join(table_summary)}"
 
-            with st.spinner("🧠 Geminiが調教・血統・敗因データを検索＆分析し、表をアップデート中..."):
+            with st.spinner("🧠 GeminiがPythonに頼らず、独自の視点で前走の不利や勝負気配を泥臭く検索中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 gemini_data = None
                 
@@ -727,9 +740,8 @@ Pythonが算出した定量データ（ベース予測）に、あなたが検�
                             contents=prompt, 
                             config=types.GenerateContentConfig(
                                 system_instruction=system_instruction, 
-                                temperature=0.2,
+                                temperature=0.7,
                                 tools=[{"googleSearch": {}}],
-                                
                             )
                         )
                         res_text = response.text if response.text else (response.candidates[0].content.parts[0].text if response.candidates else "")
@@ -751,12 +763,14 @@ Pythonが算出した定量データ（ベース予測）に、あなたが検�
                         evals = gemini_data.get("evaluations", [])
                         eval_df = pd.DataFrame(evals)
                         if not eval_df.empty and '馬番' in eval_df.columns:
-                            eval_df['馬番_num'] = pd.to_numeric(eval_df['馬番'], errors='coerce')
+                            # 🌟 バグ修正: Geminiからの戻り値（馬番）を確実に整数型（Int64）にしてから結合する
+                            eval_df['馬番_num'] = pd.to_numeric(eval_df['馬番'], errors='coerce').astype('Int64')
                             if 'Gemini印' not in eval_df.columns: eval_df['Gemini印'] = '消'
                             if '短評' not in eval_df.columns: eval_df['短評'] = '-'
-                            eval_df_clean = eval_df[['馬番_num', 'Gemini印', '短評']]
+                            eval_df_clean = eval_df[['馬番_num', 'Gemini印', '短評']].dropna(subset=['馬番_num'])
                             
-                            res_df['馬番_num'] = pd.to_numeric(res_df['馬番'], errors='coerce')
+                            # 🌟 バグ修正: 元データ（res_df）の馬番も確実に整数型（Int64）に統一する
+                            res_df['馬番_num'] = pd.to_numeric(res_df['馬番'], errors='coerce').astype('Int64')
                             
                             merged_df = pd.merge(res_df, eval_df_clean, on='馬番_num', how='left')
                             merged_df['Gemini印'] = merged_df['Gemini印'].fillna('消')
@@ -764,10 +778,10 @@ Pythonが算出した定量データ（ベース予測）に、あなたが検�
                             
                             table_placeholder.empty()
                             with table_placeholder.container():
-                                st.markdown("<div class='section-header'>🔥 Python × Gemini 融合データ</div>", unsafe_allow_html=True)
+                                st.markdown("<div class='section-header'>🔥 Python（確率脳） × Gemini（定性脳） 独立評価比較テーブル</div>", unsafe_allow_html=True)
                                 st.markdown(generate_fusion_table(merged_df, is_newcomer), unsafe_allow_html=True)
                             
-                            st.success("📝 調教・適性を加味した最強の印（骨格）をアップデートしました！")
+                            st.success("📝 2つのAIがそれぞれの視点で評価を下しました！PythonとGeminiの評価がズレている馬（期待値の歪み）を探してみてください。")
                     except Exception as e:
                         st.error(f"❌ データの結合に失敗しました: {e}")
                 else:
