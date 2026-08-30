@@ -95,7 +95,7 @@ def parse_weight(val):
     return np.nan, np.nan
 
 # ==========================================
-# 🌟 EnsembleModelクラスの定義 (ノイズ過大増幅の防止を適用)
+# 🌟 EnsembleModelクラス
 # ==========================================
 class EnsembleModel:
     def __init__(self, lgb_model, xgb_model, cat_model, weights=(0.4, 0.3, 0.3)):
@@ -109,18 +109,17 @@ class EnsembleModel:
         for col in X_num.columns:
             X_num[col] = pd.to_numeric(X_num[col], errors='coerce').fillna(0)
 
-        # 🚨 バグ修正: STDが小さすぎる場合(ノイズのみ)はZスコア化せずスケール爆発を防止
         lgb_pred = self.lgb_model.predict(X_num)
         lgb_std = np.std(lgb_pred)
-        lgb_norm = (lgb_pred - np.mean(lgb_pred)) / lgb_std if lgb_std > 0.01 else (lgb_pred - np.mean(lgb_pred))
+        lgb_norm = (lgb_pred - np.mean(lgb_pred)) / (lgb_std + 1e-8) if lgb_std > 1e-4 else lgb_pred
 
         xgb_pred = self.xgb_model.predict(xgb.DMatrix(X_num))
         xgb_std = np.std(xgb_pred)
-        xgb_norm = (xgb_pred - np.mean(xgb_pred)) / xgb_std if xgb_std > 0.01 else (xgb_pred - np.mean(xgb_pred))
+        xgb_norm = (xgb_pred - np.mean(xgb_pred)) / (xgb_std + 1e-8) if xgb_std > 1e-4 else xgb_pred
 
         cat_pred = self.cat_model.predict(X_num)
         cat_std = np.std(cat_pred)
-        cat_norm = (cat_pred - np.mean(cat_pred)) / cat_std if cat_std > 0.01 else (cat_pred - np.mean(cat_pred))
+        cat_norm = (cat_pred - np.mean(cat_pred)) / (cat_std + 1e-8) if cat_std > 1e-4 else cat_pred
 
         w1, w2, w3 = self.weights
         return w1 * lgb_norm + w2 * xgb_norm + w3 * cat_norm
@@ -218,44 +217,52 @@ if past_err:
     st.warning(f"⚠️ 【過去データ警告】 {past_err}")
 
 # ==========================================
-# 2. 過去データ辞書化 (地方ロジック特徴量を修正)
+# 2. 過去データ辞書化
 # ==========================================
 @st.cache_data
 def build_past_horse_dict(df_p):
-    if df_p.empty: return {}, {}, {}, {}, {}, {}, {}
+    if df_p.empty: return {}, {}, {}, {}, {}, {}, {}, {}
     horse_dict = {}
+    
+    df_p['騎手_clean'] = df_p['騎手'].astype(str).str.strip()
+    jockey_map = df_p.dropna(subset=['rank_num']).groupby('騎手_clean')['is_win_past'].mean().to_dict()
+
     for horse, group in df_p.groupby('馬名_clean'):
         if not horse: continue
-        last_row = group.iloc[-1]
         
-        t_vals = pd.to_numeric(group.get('my_time_idx', pd.Series()), errors='coerce').clip(40, 80).dropna()
-        l_vals = pd.to_numeric(group.get('my_last3f_idx', pd.Series()), errors='coerce').clip(40, 80).dropna()
-        p_vals = pd.to_numeric(group.get('my_pace_idx', pd.Series()), errors='coerce').clip(40, 80).dropna()
-        s_vals = pd.to_numeric(group.get('my_start_idx', pd.Series()), errors='coerce').clip(40, 80).dropna()
-        ranks = pd.to_numeric(group.get('rank_num', pd.Series()), errors='coerce').dropna()
+        valid_past = group.dropna(subset=['rank_num'])
+        if valid_past.empty:
+            last_valid_row = group.iloc[-1]
+        else:
+            last_valid_row = valid_past.iloc[-1]
+        
+        t_vals = pd.to_numeric(valid_past.get('my_time_idx', pd.Series()), errors='coerce').dropna()
+        l_vals = pd.to_numeric(valid_past.get('my_last3f_idx', pd.Series()), errors='coerce').dropna()
+        p_vals = pd.to_numeric(valid_past.get('my_pace_idx', pd.Series()), errors='coerce').dropna()
+        s_vals = pd.to_numeric(valid_past.get('my_start_idx', pd.Series()), errors='coerce').dropna()
+        ranks = pd.to_numeric(valid_past.get('rank_num', pd.Series()), errors='coerce').dropna()
 
-        top3_rows = group[group['rank_num'] <= 3]
+        top3_rows = valid_past[valid_past['rank_num'] <= 3]
         best_dist_avg = top3_rows['distance_num'].mean() if not top3_rows.empty else np.nan
 
-        prize_col = '賞金(万円)' if '賞金(万円)' in group.columns else 'prize'
-        prizes = pd.to_numeric(group.get(prize_col, pd.Series()), errors='coerce').fillna(0)
+        prize_col = '賞金(万円)' if '賞金(万円)' in valid_past.columns else 'prize'
+        prizes = pd.to_numeric(valid_past.get(prize_col, pd.Series()), errors='coerce').fillna(0)
         horse_prize_avg = prizes.mean() if not prizes.empty else 0.0
 
-        # 🚨 バグ修正: 前回通過コーナーと変動値を正しく抽出
         def parse_pass_full(val):
             if pd.isna(val): return np.nan, np.nan, np.nan
             parts = str(val).split('-')
             try: return float(parts[0]), float(parts[-1]), float(parts[0]) - float(parts[-1])
             except: return np.nan, np.nan, np.nan
-
-        p_1c, p_lc, p_cdiff = parse_pass_full(last_row.get('通過', np.nan))
+        
+        p_1c, p_lc, p_cdiff = parse_pass_full(last_valid_row.get('通過', np.nan))
         if pd.isna(p_1c): p_1c = 10.0
         if pd.isna(p_lc): p_lc = 10.0
         if pd.isna(p_cdiff): p_cdiff = 0.0
 
         cat_stats = {}
         for cat_name in ['sprint', 'mile_middle', 'stayer']:
-            c_rows = group[group['dist_cat'] == cat_name]
+            c_rows = valid_past[valid_past['dist_cat'] == cat_name]
             c_runs = len(c_rows)
             c_wins = (c_rows['rank_num'] == 1).sum()
             cat_stats[cat_name] = {
@@ -265,21 +272,21 @@ def build_past_horse_dict(df_p):
             }
             
         place_stats = {}
-        for p_code in group['place_code'].astype(str).unique():
-            p_rows = group[group['place_code'].astype(str) == p_code]
+        for p_code in valid_past['place_code'].astype(str).unique():
+            p_rows = valid_past[valid_past['place_code'].astype(str) == p_code]
             place_stats[p_code] = p_rows['rank_num'].mean() if len(p_rows) > 0 else 7.0 
 
         horse_dict[horse] = {
-            'last_date': last_row['date_parsed'],
-            'last_jockey': str(last_row.get('騎手', '')).strip(),
-            'last_kinryo': last_row['kinryo_num'],
-            'prev_prize': pd.to_numeric(last_row.get('賞金(万円)'), errors='coerce'),
-            'prev_rank_num': last_row['rank_num'],
-            'prev_dist': last_row['distance_num'], 
+            'last_date': last_valid_row['date_parsed'],
+            'last_jockey': str(last_valid_row.get('騎手', '')).strip(),
+            'last_kinryo': last_valid_row.get('kinryo_num', 55.0),
+            'prev_prize': pd.to_numeric(last_valid_row.get('賞金(万円)'), errors='coerce'),
+            'prev_rank_num': last_valid_row.get('rank_num', 7.0),
+            'prev_dist': last_valid_row.get('distance_num', np.nan), 
             'horse_prize_avg': horse_prize_avg, 
             'prev_1c': p_1c, 
-            'prev_last_corner': p_lc,  # 🌟 修正反映
-            'prev_corner_diff': p_cdiff, # 🌟 修正反映
+            'prev_last_corner': p_lc,
+            'prev_corner_diff': p_cdiff,
             'best_dist_avg': best_dist_avg,
             'cat_stats': cat_stats,
             'place_stats': place_stats, 
@@ -290,28 +297,27 @@ def build_past_horse_dict(df_p):
             'eff_my_last3f_idx': l_vals.tail(3).median() if not l_vals.empty else 50.0,
             'eff_my_pace_idx': p_vals.tail(3).median() if not p_vals.empty else 50.0,
             'eff_my_start_idx': s_vals.tail(3).median() if not s_vals.empty else 50.0,
-            'horse_runs': pd.to_numeric(last_row.get('horse_runs'), errors='coerce'),
-            'horse_wins': pd.to_numeric(last_row.get('horse_wins'), errors='coerce'),
-            'horse_win_rate': pd.to_numeric(last_row.get('horse_win_rate'), errors='coerce'),
-            'horse_avg_time_idx': pd.to_numeric(last_row.get('horse_avg_time_idx'), errors='coerce'),
-            'horse_avg_last3f_idx': pd.to_numeric(last_row.get('horse_avg_last3f_idx'), errors='coerce'),
-            'horse_avg_pace_idx': pd.to_numeric(last_row.get('horse_avg_pace_idx'), errors='coerce'),
-            'horse_avg_start_idx': pd.to_numeric(last_row.get('horse_avg_start_idx'), errors='coerce'),
-            'last_3f_avg_rank': l_vals.mean() if not l_vals.empty else 50.0 # 🚨 致命的バグ修正(着順平均→指数平均)
+            'horse_runs': pd.to_numeric(last_valid_row.get('horse_runs'), errors='coerce'),
+            'horse_wins': pd.to_numeric(last_valid_row.get('horse_wins'), errors='coerce'),
+            'horse_win_rate': pd.to_numeric(last_valid_row.get('horse_win_rate'), errors='coerce'),
+            'horse_avg_time_idx': pd.to_numeric(last_valid_row.get('horse_avg_time_idx'), errors='coerce'),
+            'horse_avg_last3f_idx': pd.to_numeric(last_valid_row.get('horse_avg_last3f_idx'), errors='coerce'),
+            'horse_avg_pace_idx': pd.to_numeric(last_valid_row.get('horse_avg_pace_idx'), errors='coerce'),
+            'horse_avg_start_idx': pd.to_numeric(last_valid_row.get('horse_avg_start_idx'), errors='coerce'),
+            'last_3f_avg_rank': l_vals.mean() if not l_vals.empty else 50.0 
         }
 
     course_front_map = df_p.groupby('course_id')['rank_num'].apply(lambda x: (x <= 3).mean()).to_dict()
     course_frame_map = df_p.groupby('course_frame_id')['rank_num'].apply(lambda x: (x == 1).mean()).to_dict()
     
     trainer_map = df_p.groupby('調教師')['trainer_win_rate'].last().to_dict() if 'trainer_win_rate' in df_p.columns else df_p.groupby('調教師')['is_win_past'].mean().to_dict()
-    df_p['騎手_clean'] = df_p['騎手'].astype(str).str.strip()
     combo_map = df_p.groupby(['調教師', '騎手_clean'])['trainer_jockey_combo'].last().to_dict() if 'trainer_jockey_combo' in df_p.columns else df_p.groupby(['調教師', '騎手_clean'])['is_win_past'].mean().to_dict()
     horse_track_map = df_p.groupby(['馬名_clean', 'place_code'])['horse_track_win_rate'].last().to_dict() if 'horse_track_win_rate' in df_p.columns else df_p.groupby(['馬名_clean', 'place_code'])['is_win_past'].mean().to_dict()
     frame_map = df_p.groupby(['place_code', 'distance_num', 'wakuban_num'])['frame_win_rate'].last().to_dict() if 'frame_win_rate' in df_p.columns else df_p.groupby(['place_code', 'distance_num', 'wakuban_num'])['is_win_past'].mean().to_dict()
 
-    return horse_dict, course_front_map, course_frame_map, trainer_map, combo_map, horse_track_map, frame_map
+    return horse_dict, course_front_map, course_frame_map, trainer_map, combo_map, horse_track_map, frame_map, jockey_map
 
-past_dict, course_front_map, course_frame_map, trainer_map, combo_map, horse_track_map, frame_map = build_past_horse_dict(df_past)
+past_dict, course_front_map, course_frame_map, trainer_map, combo_map, horse_track_map, frame_map, jockey_map = build_past_horse_dict(df_past)
 
 # ==========================================
 # 3. AI推論＆勝負気配算出ロジック
@@ -362,7 +368,6 @@ def calculate_predictions(race_id_target, df_fut, cond):
     race_df['race_prize_relative'] = race_df['horse_prize_avg'] / race_df['race_avg_prize']
     race_df['race_prize_rank'] = race_df['horse_prize_avg'].rank(ascending=False, method='min')
 
-    # 🚨 バグ修正: 前走の通過データを使用
     race_df['first_corner'] = race_df['prev_1c']
     race_df['last_corner'] = race_df['馬名_clean'].apply(lambda x: past_dict.get(x, {}).get('prev_last_corner', 10.0))
     race_df['corner_diff'] = race_df['馬名_clean'].apply(lambda x: past_dict.get(x, {}).get('prev_corner_diff', 0.0))
@@ -410,7 +415,7 @@ def calculate_predictions(race_id_target, df_fut, cond):
     race_df['interval_days'] = (race_df['date_parsed_fut'] - race_df['last_date']).dt.days.fillna(30)
     race_df['is_long_rest'] = (race_df['interval_days'] >= 180).astype(int)
 
-    race_df['jockey_win_rate'] = safe_numeric_col(race_df, 'jockey_win_rate', 0.1).clip(0.0, 1.0)
+    race_df['jockey_win_rate'] = race_df['騎手_clean'].map(jockey_map).fillna(0.1).clip(0.0, 1.0)
     race_df['jockey_track_win_rate'] = safe_numeric_col(race_df, 'jockey_track_win_rate', 0.1).clip(0.0, 1.0)
 
     X = pd.DataFrame(index=race_df.index)
@@ -427,11 +432,12 @@ def calculate_predictions(race_id_target, df_fut, cond):
         st.error(f"❌ モデル予測エラー: {e}")
         return None, None, None, None
 
-    # 🌟 バグ修正: 強すぎるSoftmaxを抑制(温度1.5) ＆ 無駄なZスコア化を回避
-    s_std = np.std(raw_scores)
-    if pd.notna(s_std) and s_std > 0.001:
-        z_scores = (raw_scores - np.mean(raw_scores)) / s_std
-        exp_scores = np.exp(z_scores / 1.5)
+    min_score = np.min(raw_scores)
+    max_score = np.max(raw_scores)
+    
+    if pd.notna(max_score) and pd.notna(min_score) and max_score > min_score:
+        norm_scores = (raw_scores - min_score) / (max_score - min_score) * 5.0
+        exp_scores = np.exp(norm_scores)
         race_df['win_prob'] = exp_scores / np.sum(exp_scores)
         race_df['top2_prob'] = race_df['win_prob'].apply(lambda p: min(1.0, p * 1.8))
         race_df['top3_prob'] = race_df['win_prob'].apply(lambda p: min(1.0, p * 2.5))
@@ -441,13 +447,18 @@ def calculate_predictions(race_id_target, df_fut, cond):
         race_df['top3_prob'] = race_df['win_prob'] * 2.5
 
     if '単勝' in race_df.columns:
-        race_df['単勝_num'] = pd.to_numeric(race_df['単勝'].astype(str).str.replace('倍', ''), errors='coerce').fillna(10.0)
+        race_df['単勝_num'] = pd.to_numeric(race_df['単勝'].astype(str).str.replace('倍', '').str.replace(',', ''), errors='coerce')
     elif 'オッズ' in race_df.columns:
-        race_df['単勝_num'] = pd.to_numeric(race_df['オッズ'].astype(str).str.replace('倍', ''), errors='coerce').fillna(10.0)
+        race_df['単勝_num'] = pd.to_numeric(race_df['オッズ'].astype(str).str.replace('倍', '').str.replace(',', ''), errors='coerce')
     else:
-        race_df['単勝_num'] = 10.0
+        race_df['単勝_num'] = np.nan
         
+    if race_df['単勝_num'].isna().any():
+       race_df['人気'] = pd.to_numeric(race_df.get('人気', race_df['単勝_num'].rank(method='min')), errors='coerce')
+       race_df['単勝_num'] = race_df['単勝_num'].fillna(race_df['人気'] * 2.5 + 2.0)
+       
     race_df['人気'] = race_df['単勝_num'].rank(method='min')
+    
     race_df['ev'] = race_df['win_prob'] * race_df['単勝_num']
 
     p_min = race_df['win_prob'].min()
