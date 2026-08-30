@@ -486,23 +486,16 @@ def calculate_predictions(race_id_target, df_fut, cond):
     else:
         race_df['脚質'] = "-"
 
-    # 🌟 バグ修正: 印のロジックをより安全に（IndexError回避）
+    # 🌟 修正: 期待値(EV)というノイズを捨て、純粋なAI勝率(win_prob)のみで印を打つ
     race_df = race_df.sort_values(by='win_prob', ascending=False).reset_index(drop=True)
     race_df['印'] = "消"
     
-    if len(race_df) > 0:
-        race_df.loc[0, '印'] = "◎"
-        
-    if len(race_df) > 1:
-        rest_idx = race_df.index[1:]
-        # 紐（相手）は期待値（ev）が高い順にソートして印を打つ
-        rest_df = race_df.loc[rest_idx].sort_values(by='ev', ascending=False)
-        marks = ["◯", "▲", "△", "☆1", "☆2"]
-        
-        # 安全なループ処理（馬の数が少ない場合でもエラーにならないように）
-        for i in range(min(len(rest_df), len(marks))):
-            target_idx = rest_df.index[i]
-            race_df.loc[target_idx, '印'] = marks[i]
+    if len(race_df) > 0: race_df.loc[0, '印'] = "◎"
+    if len(race_df) > 1: race_df.loc[1, '印'] = "◯"
+    if len(race_df) > 2: race_df.loc[2, '印'] = "▲"
+    if len(race_df) > 3: race_df.loc[3, '印'] = "△"
+    if len(race_df) > 4: race_df.loc[4, '印'] = "☆1"
+    if len(race_df) > 5: race_df.loc[5, '印'] = "☆2"
 
     mark_order = {"◎":1, "◯":2, "▲":3, "△":4, "☆1":5, "☆2":6, "消":7}
     race_df['mark_rank'] = race_df['印'].map(mark_order).fillna(99)
