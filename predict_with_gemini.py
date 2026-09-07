@@ -12,8 +12,8 @@ from google.genai import types
 import lightgbm as lgb
 import xgboost as xgb
 import catboost as cb
-from datetime import datetime
-import pytz
+# 🌟 pytzを削除し、Python標準機能だけで完結させました
+from datetime import datetime, timezone, timedelta
 
 # ==========================================
 # 🎨 アプリの基本設定
@@ -256,7 +256,10 @@ past_dict, trainer_map, horse_track_map, jockey_map = build_past_horse_dict(df_p
 def check_paddock_time(time_str):
     if not time_str or ':' not in str(time_str): return False, ""
     try:
-        now = datetime.now(pytz.timezone('Asia/Tokyo'))
+        # 🌟 pytzを使わずに日本標準時(JST)を設定
+        JST = timezone(timedelta(hours=+9), 'JST')
+        now = datetime.now(JST)
+        
         h, m = map(int, str(time_str).split(':'))
         race_dt = now.replace(hour=h, minute=m, second=0)
         diff_mins = (race_dt - now).total_seconds() / 60
@@ -283,7 +286,6 @@ def calculate_predictions(race_id_target, df_fut, cond):
     model = model_data['model']
     features = model_data.get('features', [])
 
-    # 🌟 改修①: 馬場状態・芝ダートをエンコードして反映
     if le_cond is not None and hasattr(le_cond, 'classes_'):
         known_conds = set(le_cond.classes_)
         race_df['condition_code'] = le_cond.transform([cond])[0] if cond in known_conds else 0
@@ -381,7 +383,6 @@ def calculate_predictions(race_id_target, df_fut, cond):
     else:
         race_df['脚質'] = "-"
 
-    # 🌟 印付けロジック（純粋な勝率順でノイズなし）
     race_df = race_df.sort_values(by='win_prob', ascending=False).reset_index(drop=True)
     race_df['印'] = "消"
     
@@ -497,7 +498,6 @@ if st.session_state['selected_race_id']:
     st.markdown("---")
     st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{r_name}】</h2>", unsafe_allow_html=True)
     
-    # 🌟 改修①: 馬場状態の入力（裏のAIロジックに連携済）
     cond = st.radio("想定馬場 (AI予測に反映されます)", ["良", "稍重", "重", "不良"], horizontal=True)
     
     res_df, pat, rec_ticket, buy_detail = calculate_predictions(t_id, df_future, cond)
@@ -511,7 +511,6 @@ if st.session_state['selected_race_id']:
         </div>
         """, unsafe_allow_html=True)
 
-        # 🌟 改修③: WIN5特化の買い目・候補馬表示
         win5_1 = [f"{int(x)}番" for x in res_df.head(1)['馬番'].tolist()]
         win5_20 = [f"{int(x)}番" for x in res_df[res_df['win_prob'] >= 0.20]['馬番'].tolist()]
         win5_10 = [f"{int(x)}番" for x in res_df[res_df['win_prob'] >= 0.10]['馬番'].tolist()]
@@ -539,7 +538,6 @@ if st.session_state['selected_race_id']:
 
         st.markdown("<br>", unsafe_allow_html=True)
         
-        # 🌟 改修②: 発走時刻からパドック検索の必要性を自動判定
         race_time_str = r_info.get('time', r_info.get('発走時間', ''))
         is_paddock_close, time_msg = check_paddock_time(race_time_str)
         
