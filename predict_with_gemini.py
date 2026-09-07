@@ -197,7 +197,7 @@ le_cond, le_surf = load_encoders()
 df_past, df_future, past_err, future_err = load_data()
 
 # ==========================================
-# 2. 過去データ辞書化
+# 2. 過去データ辞書化 (🌟 EMA魔改造版)
 # ==========================================
 @st.cache_data
 def build_past_horse_dict(df_p):
@@ -219,24 +219,32 @@ def build_past_horse_dict(df_p):
             except: return np.nan, np.nan, np.nan
         
         p_1c, p_lc, p_cdiff = parse_pass_full(last_valid_row.get('通過', np.nan))
+        
+        # 🌟 魔改造: 賞金平均も直近5走を重視（EMA）
         prize_col = '賞金(万円)' if '賞金(万円)' in valid_past.columns else 'prize'
         prizes = pd.to_numeric(valid_past.get(prize_col, pd.Series()), errors='coerce').fillna(0)
+        horse_prize_avg = prizes.ewm(span=5, min_periods=1).mean().iloc[-1] if not prizes.empty else 0.0
         
+        # 🌟 魔改造: 条件別平均着順も直近3走を重視（EMA）
         cat_stats = {}
         for cat_name in ['sprint', 'mile_middle', 'stayer']:
             c_rows = valid_past[valid_past['dist_cat'] == cat_name]
-            cat_stats[cat_name] = {'avg_rank': c_rows['rank_num'].mean() if len(c_rows) > 0 else 7.0}
+            cat_stats[cat_name] = {'avg_rank': c_rows['rank_num'].ewm(span=3, min_periods=1).mean().iloc[-1] if len(c_rows) > 0 else 7.0}
             
         place_stats = {}
         for p_code in valid_past['place_code'].astype(str).unique():
             p_rows = valid_past[valid_past['place_code'].astype(str) == p_code]
-            place_stats[p_code] = p_rows['rank_num'].mean() if len(p_rows) > 0 else 7.0 
+            place_stats[p_code] = p_rows['rank_num'].ewm(span=3, min_periods=1).mean().iloc[-1] if len(p_rows) > 0 else 7.0 
+
+        # 🌟 魔改造: 上がりの速さも直近3走を重視（EMA）
+        l_vals = pd.to_numeric(valid_past.get('my_last3f_idx', pd.Series()), errors='coerce').dropna()
+        last_3f_avg_rank = l_vals.ewm(span=3, min_periods=1).mean().iloc[-1] if not l_vals.empty else 50.0
 
         horse_dict[horse] = {
             'last_date': last_valid_row['date_parsed'],
             'last_kinryo': last_valid_row.get('kinryo_num', 55.0),
             'prev_dist': last_valid_row.get('distance_num', np.nan), 
-            'horse_prize_avg': prizes.mean() if not prizes.empty else 0.0, 
+            'horse_prize_avg': horse_prize_avg, 
             'prev_1c': p_1c if not pd.isna(p_1c) else 10.0, 
             'prev_last_corner': p_lc if not pd.isna(p_lc) else 10.0,
             'prev_corner_diff': p_cdiff if not pd.isna(p_cdiff) else 0.0,
@@ -244,7 +252,7 @@ def build_past_horse_dict(df_p):
             'place_stats': place_stats, 
             'eff_my_start_idx': pd.to_numeric(valid_past.get('my_start_idx', pd.Series()), errors='coerce').tail(3).median(),
             'eff_my_last3f_idx': pd.to_numeric(valid_past.get('my_last3f_idx', pd.Series()), errors='coerce').tail(3).median(),
-            'last_3f_avg_rank': pd.to_numeric(valid_past.get('my_last3f_idx', pd.Series()), errors='coerce').mean()
+            'last_3f_avg_rank': last_3f_avg_rank
         }
 
     trainer_map = df_p.groupby('調教師')['is_win_past'].mean().to_dict()
@@ -492,6 +500,7 @@ with st.expander("👑 今日のWIN5をAIに一発予想させる（Python × Ge
                         python_top = f"{int(r_df.iloc[0]['馬番'])}番 {r_df.iloc[0]['馬名']}"
                         all_horses = [f"{int(r['馬番'])}番 {r['馬名']}" for _, r in r_df.iterrows()]
                         
+                        # 🌟 ここで改行文字を安全に埋め込む
                         win5_prompt_text += f"■ {p_name} {r_n}R 【{rc_name}】\n"
                         win5_prompt_text += f"  🤖 Python本命: {python_top}\n"
                         win5_prompt_text += f"  出走馬: {', '.join(all_horses)}\n\n"

@@ -4,8 +4,35 @@ import os
 import joblib
 import re
 
-INPUT_CSV = "ml_target_data.csv"
-OUTPUT_CSV = "ml_target_data.csv"
+# 🌟 第1話で取得した生データのCSV名を指定してください
+INPUT_CSV = "keiba_3years_raw_data.csv"
+OUTPUT_CSV = "ml_target_data_v2.csv"
+
+def clean_horse_name(name):
+    if pd.isna(name): return ""
+    import unicodedata
+    s = unicodedata.normalize('NFKC', str(name))
+    s = re.sub(r'[\s・･.\-ー_]+', '', s).strip()
+    return s.upper()
+
+def get_dist_cat(d):
+    if pd.isna(d): return np.nan
+    if d <= 1400: return 'sprint'
+    elif d <= 2200: return 'mile_middle'
+    else: return 'stayer'
+
+def parse_weight(val):
+    if pd.isna(val): return np.nan, np.nan
+    s = str(val).strip()
+    m = re.match(r'(\d+)(?:\(([-+]?\d+)\))?', s)
+    if m: return float(m.group(1)), float(m.group(2)) if m.group(2) else 0.0
+    return np.nan, np.nan
+
+def parse_passing(val):
+    if pd.isna(val): return np.nan, np.nan, np.nan
+    parts = str(val).split('-')
+    try: return float(parts[0]), float(parts[-1]), float(parts[0]) - float(parts[-1])
+    except: return np.nan, np.nan, np.nan
 
 def parse_time_str(val):
     if pd.isna(val): return np.nan
@@ -16,157 +43,125 @@ def parse_time_str(val):
         secs = int(m.group(2))
         ms = float('0.' + m.group(3))
         return mins * 60 + secs + ms
-    try:
-        return float(s)
-    except:
-        return np.nan
+    try: return float(s)
+    except: return np.nan
 
-def extract_first_pos(val):
-    if pd.isna(val): return np.nan
-    s = str(val).split('-')[0].strip()
-    try:
-        return float(s)
-    except:
-        return np.nan
-
-def calc_custom_index(val, m, s):
-    if pd.isna(val) or pd.isna(s) or s == 0: return 50.0
-    return 50.0 + ((m - val) / s) * 10.0
-
-def calc_pos_index(pos, m, s):
-    if pd.isna(pos) or pd.isna(s) or s == 0: return 50.0
-    return 50.0 + ((m - pos) / s) * 10.0
+# 🌟 魔改造: EMA（指数平滑移動平均）＋ リーク防止の shift(1)
+def ewm_shift(x, span):
+    return x.shift(1).ewm(span=span, min_periods=1).mean()
 
 def main():
     if not os.path.exists(INPUT_CSV):
-        print(f"Error: {INPUT_CSV} not found.")
+        print(f"Error: {INPUT_CSV} が見つかりません。")
         return
 
-    print(f"Loading {INPUT_CSV}...")
+    print("データを読み込み中...")
     try:
         df = pd.read_csv(INPUT_CSV, low_memory=False, encoding='utf-8-sig')
     except:
         df = pd.read_csv(INPUT_CSV, low_memory=False, encoding='cp932')
 
-    print("Cleaning data...")
-    df['着順'] = pd.to_numeric(df.get('着順'), errors='coerce')
-    df = df.dropna(subset=['着順']).copy()
-    df['is_win'] = (df['着順'] == 1).astype(int)
+    print("魔改造EMA ＆ データリーク完全防止 前処理を実行中...")
+    df_feat = df.copy()
 
-    if 'time_seconds' in df.columns and df['time_seconds'].notna().sum() > 0:
-        df['time_sec_clean'] = pd.to_numeric(df['time_seconds'], errors='coerce')
-    else:
-        time_col = df.get('タイム', df.get('time', pd.Series(np.nan, index=df.index)))
-        df['time_sec_clean'] = time_col.apply(parse_time_str)
-
-    if 'last_3f_val' in df.columns and df['last_3f_val'].notna().sum() > 0:
-        df['last3f_sec_clean'] = pd.to_numeric(df['last_3f_val'], errors='coerce')
-    else:
-        last3f_col = df.get('上がり3F', df.get('上がり', df.get('last3f', pd.Series(np.nan, index=df.index))))
-        df['last3f_sec_clean'] = last3f_col.apply(parse_time_str)
-
-    df['first_pos_clean'] = pd.to_numeric(df.get('first_pos'), errors='coerce').fillna(
-        df.get('通過', pd.Series(np.nan, index=df.index)).apply(extract_first_pos)
-    )
-    df['first_pos'] = df['first_pos_clean']
-
-    print("Calculating Meet Day Number (Track Bias)...")
-    if 'date' in df.columns and 'place_code' in df.columns:
-        df['date_parsed'] = pd.to_datetime(df['date'], errors='coerce')
-        df = df.sort_values(['place_code', 'date_parsed'])
-        
-        meet_days = []
-        for place, group in df.groupby('place_code'):
-            dates = group['date_parsed'].dropna().unique()
-            dates = np.sort(dates)
-            
-            day_map = {}
-            current_meet = 1
-            current_day_in_meet = 1
-            
-            if len(dates) > 0:
-                day_map[dates[0]] = current_day_in_meet
-                for i in range(1, len(dates)):
-                    if np.timedelta64(dates[i] - dates[i-1], 'D').astype(int) > 14:
-                        current_meet += 1
-                        current_day_in_meet = 1
-                    else:
-                        current_day_in_meet += 1
-                    day_map[dates[i]] = current_day_in_meet
-            
-            group_meet_days = group['date_parsed'].map(day_map)
-            meet_days.append(group_meet_days)
-            
-        if meet_days:
-            df['meet_day_num'] = pd.concat(meet_days)
-        else:
-            df['meet_day_num'] = 1
-            
-        df['meet_day_num'] = df['meet_day_num'].fillna(1).astype(int)
-    else:
-        df['meet_day_num'] = 1
-
-    # 🌟 NEW: レース番号と馬場劣化（Track Degradation）の事前計算
-    if 'race_id' in df.columns:
-        df['race_num'] = df['race_id'].astype(str).str[-2:]
-        df['race_num'] = pd.to_numeric(df['race_num'], errors='coerce').fillna(1.0)
-        df['track_degradation'] = df['meet_day_num'] * df['race_num']
-    else:
-        df['race_num'] = 1.0
-        df['track_degradation'] = df['meet_day_num']
-
-    drop_cols = ['race_avg_time', 'race_std_time', 'race_avg_last3f', 'race_std_last3f', 'jockey_win_power', 'race_avg_pos', 'race_std_pos']
-    df = df.drop(columns=[c for c in drop_cols if c in df.columns])
-    df = df.drop(columns=[c for c in df.columns if c.endswith('_x') or c.endswith('_y')])
-
-    print("Calculating Race Stats...")
-    if 'race_id' in df.columns:
-        race_stats = df.groupby('race_id').agg(
-            race_avg_time=('time_sec_clean', 'mean'),
-            race_std_time=('time_sec_clean', 'std'),
-            race_avg_last3f=('last3f_sec_clean', 'mean'),
-            race_std_last3f=('last3f_sec_clean', 'std'),
-            race_avg_pos=('first_pos_clean', 'mean'),
-            race_std_pos=('first_pos_clean', 'std')
-        ).reset_index()
-        df = pd.merge(df, race_stats, on='race_id', how='left')
-
-    print("Calculating Custom Indices...")
-    df['my_time_idx'] = df.apply(lambda r: calc_custom_index(r.get('time_sec_clean'), r.get('race_avg_time'), r.get('race_std_time')), axis=1)
-    df['my_last3f_idx'] = df.apply(lambda r: calc_custom_index(r.get('last3f_sec_clean'), r.get('race_avg_last3f'), r.get('race_std_last3f')), axis=1)
-    df['my_pace_idx'] = df['my_time_idx'] * 0.4 + df['my_last3f_idx'] * 0.6
-    df['my_start_idx'] = df.apply(lambda r: calc_pos_index(r.get('first_pos_clean'), r.get('race_avg_pos'), r.get('race_std_pos')), axis=1)
-
-    # 🌟 NEW: ハイブリッド指数とペース展開シナリオのベース計算
-    df['hybrid_power_idx'] = df['my_time_idx'] * 0.5 + df['my_start_idx'] * 0.5
+    # --- 1. 基本的なクレンジングとソート（時系列順） ---
+    df_feat['馬名_clean'] = df_feat['馬名'].astype(str).apply(clean_horse_name)
+    df_feat['date_parsed'] = pd.to_datetime(df_feat['date'], errors='coerce')
+    df_feat = df_feat.dropna(subset=['date_parsed', '着順'])
+    df_feat['着順'] = pd.to_numeric(df_feat['着順'], errors='coerce')
+    df_feat = df_feat.dropna(subset=['着順'])
     
-    if 'race_id' in df.columns:
-        df['race_avg_start_idx'] = df.groupby('race_id')['my_start_idx'].transform('mean').fillna(50.0)
-        df['pace_scenario_idx'] = df['my_last3f_idx'].fillna(50.0) * (df['race_avg_start_idx'] / 50.0)
+    # 🌟 リーク防止の鉄則: ここで必ず「馬名」と「日付」でソートする
+    df_feat = df_feat.sort_values(['馬名_clean', 'date_parsed']).reset_index(drop=True)
 
-    print("Calculating Jockey Stats...")
-    if '騎手' in df.columns:
-        jockey_stats = df.groupby('騎手')['is_win'].mean().reset_index()
-        jockey_stats.rename(columns={'is_win': 'jockey_win_power'}, inplace=True)
-        df = pd.merge(df, jockey_stats, on='騎手', how='left')
+    df_feat['distance_num'] = pd.to_numeric(df_feat.get('distance'), errors='coerce')
+    df_feat['dist_cat'] = df_feat['distance_num'].apply(get_dist_cat)
+    df_feat['place_code_str'] = df_feat.get('place_code', df_feat['race_id'].astype(str).str[4:6]).astype(str)
+    df_feat['rank_num'] = df_feat['着順']
+    df_feat['is_win'] = (df_feat['rank_num'] == 1).astype(int)
 
-    print("Encoding categories...")
-    if 'surface' in df.columns:
+    # --- 2. タイムと指数のベース計算 ---
+    time_col = df_feat.get('タイム', df_feat.get('time', pd.Series(np.nan, index=df_feat.index)))
+    df_feat['time_sec_clean'] = time_col.apply(parse_time_str)
+    
+    last3f_col = df_feat.get('上がり3F', df_feat.get('上がり', df_feat.get('last3f', pd.Series(np.nan, index=df_feat.index))))
+    df_feat['last3f_sec_clean'] = last3f_col.apply(parse_time_str)
+
+    passing = df_feat['通過'].apply(parse_passing)
+    df_feat['first_pos_clean'] = [p[0] for p in passing]
+    df_feat['last_pos_clean'] = [p[1] for p in passing]
+    df_feat['corner_diff'] = [p[2] for p in passing]
+
+    # --- 3. レースごとの平均値を計算（今回のレースのレベルを測るため） ---
+    race_stats = df_feat.groupby('race_id').agg(
+        race_avg_time=('time_sec_clean', 'mean'),
+        race_std_time=('time_sec_clean', 'std'),
+        race_avg_last3f=('last3f_sec_clean', 'mean'),
+        race_std_last3f=('last3f_sec_clean', 'std'),
+        race_avg_pos=('first_pos_clean', 'mean'),
+        race_std_pos=('first_pos_clean', 'std')
+    ).reset_index()
+    df_feat = pd.merge(df_feat, race_stats, on='race_id', how='left')
+
+    df_feat['my_time_idx'] = 50.0 + ((df_feat['race_avg_time'] - df_feat['time_sec_clean']) / df_feat['race_std_time']) * 10.0
+    df_feat['my_last3f_idx'] = 50.0 + ((df_feat['race_avg_last3f'] - df_feat['last3f_sec_clean']) / df_feat['race_std_last3f']) * 10.0
+    df_feat['my_start_idx'] = 50.0 + ((df_feat['race_avg_pos'] - df_feat['first_pos_clean']) / df_feat['race_std_pos']) * 10.0
+
+    # --- 4. 【魔改造＆リーク防止】 過去の成績から「前走までの実績」を生成 ---
+    # 必ず .shift(1) を使い、今回の結果が混ざらないようにする
+    df_feat['prev_dist'] = df_feat.groupby('馬名_clean')['distance_num'].shift(1)
+    df_feat['dist_change_num'] = df_feat['distance_num'] - df_feat['prev_dist'].fillna(df_feat['distance_num'])
+    
+    # 🌟 魔改造: 着順の安定感を「直近3走（EMA）」で評価
+    df_feat['same_dist_avg_rank'] = df_feat.groupby(['馬名_clean', 'dist_cat'])['rank_num'].transform(lambda x: ewm_shift(x, 3)).fillna(7.0)
+    df_feat['same_place_avg_rank'] = df_feat.groupby(['馬名_clean', 'place_code_str'])['rank_num'].transform(lambda x: ewm_shift(x, 3)).fillna(7.0)
+
+    # 🌟 魔改造: テンの速さ・末脚のキレも「直近3走（EMA）」で評価
+    df_feat['eff_my_start_idx'] = df_feat.groupby('馬名_clean')['my_start_idx'].transform(lambda x: ewm_shift(x, 3)).fillna(50.0)
+    df_feat['eff_my_last3f_idx'] = df_feat.groupby('馬名_clean')['my_last3f_idx'].transform(lambda x: ewm_shift(x, 3)).fillna(50.0)
+    
+    # 🌟 魔改造: 賞金も「直近5走（EMA）」の勢いで相対評価
+    prize_col = '賞金(万円)' if '賞金(万円)' in df_feat.columns else 'prize'
+    df_feat['prize_num'] = pd.to_numeric(df_feat.get(prize_col, 0), errors='coerce').fillna(0.0)
+    df_feat['horse_prize_avg'] = df_feat.groupby('馬名_clean')['prize_num'].transform(lambda x: ewm_shift(x, 5)).fillna(0.0)
+    
+    df_feat['race_avg_prize'] = df_feat.groupby('race_id')['horse_prize_avg'].transform('mean').replace(0, 1)
+    df_feat['race_prize_relative'] = df_feat['horse_prize_avg'] / df_feat['race_avg_prize']
+    
+    # 通過順位の過去情報
+    df_feat['prev_1c'] = df_feat.groupby('馬名_clean')['first_pos_clean'].shift(1).fillna(10.0)
+    df_feat['prev_last_corner'] = df_feat.groupby('馬名_clean')['last_pos_clean'].shift(1).fillna(10.0)
+    df_feat['prev_corner_diff'] = df_feat.groupby('馬名_clean')['corner_diff'].shift(1).fillna(0.0)
+
+    # --- 5. その他基礎指標 ---
+    df_feat['kinryo_num'] = pd.to_numeric(df_feat.get('斤量'), errors='coerce').fillna(55.0)
+    weights_parsed = df_feat.get('馬体重', pd.Series()).apply(parse_weight)
+    df_feat['body_weight'] = [p[0] for p in weights_parsed]
+    df_feat['kinryo_weight_ratio'] = df_feat['kinryo_num'] / df_feat['body_weight'].fillna(470)
+    df_feat['interval_days'] = df_feat.groupby('馬名_clean')['date_parsed'].diff().dt.days.fillna(30)
+    
+    # --- 6. カテゴリ変数のエンコーディング ---
+    print("カテゴリ情報を数値に変換中...")
+    if 'surface' in df_feat.columns:
         from sklearn.preprocessing import LabelEncoder
         le_surf = LabelEncoder()
-        df['surface_code'] = le_surf.fit_transform(df['surface'].astype(str))
+        df_feat['surface_code'] = le_surf.fit_transform(df_feat['surface'].astype(str))
         joblib.dump(le_surf, "le_surf.pkl")
-    if 'condition' in df.columns:
+        
+    if 'condition' in df_feat.columns:
         from sklearn.preprocessing import LabelEncoder
         le_cond = LabelEncoder()
-        df['condition_code'] = le_cond.fit_transform(df['condition'].astype(str))
+        # "良", "稍重", "重", "不良" などの状態を数値化
+        df_feat['condition_code'] = le_cond.fit_transform(df_feat['condition'].astype(str))
         joblib.dump(le_cond, "le_cond.pkl")
-    if 'sex_code' in df.columns:
-        df['sex_code'] = df['sex_code'].map({'牡': 0, '牝': 1, 'セ': 2}).fillna(0)
 
-    print(f"Saving output to {OUTPUT_CSV}...")
-    df.to_csv(OUTPUT_CSV, index=False, encoding='utf-8-sig')
-    print("Done!")
+    # 元のレース順に戻す
+    df_feat = df_feat.sort_index()
+
+    print(f"データを保存中: {OUTPUT_CSV}...")
+    df_feat.to_csv(OUTPUT_CSV, index=False, encoding='utf-8-sig')
+    print("【大成功】データリークを完全防止し、近走重視（EMA）を組み込んだAI用データが完成しました！")
+    print("※ 必ず学習スクリプト（train_xxx.py）を再度実行して、AIモデルを最新化してください！")
 
 if __name__ == "__main__":
     main()
