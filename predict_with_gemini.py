@@ -12,7 +12,6 @@ from google.genai import types
 import lightgbm as lgb
 import xgboost as xgb
 import catboost as cb
-# 🌟 pytzを削除し、Python標準機能だけで完結させました
 from datetime import datetime, timezone, timedelta
 
 # ==========================================
@@ -52,6 +51,11 @@ st.markdown("""
     .sense-title { font-size: 1.2rem; font-weight: bold; color: #8e44ad; }
     .win5-title { font-size: 1.2rem; font-weight: bold; color: #d35400; }
     .ticket-badge { font-size: 1.1rem; font-weight: bold; color: #d35400; background: #fef5e7; padding: 4px 10px; border-radius: 4px; display: inline-block; }
+    
+    /* Gemini出力枠 */
+    .gemini-win5-box {
+        background-color: #f8f9fa; border: 2px solid #f1c40f; border-radius: 8px; padding: 20px; margin-top: 10px; line-height: 1.6; font-size: 16px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -193,7 +197,7 @@ le_cond, le_surf = load_encoders()
 df_past, df_future, past_err, future_err = load_data()
 
 # ==========================================
-# 2. 過去データ辞書化 (一部省略・軽量化)
+# 2. 過去データ辞書化
 # ==========================================
 @st.cache_data
 def build_past_horse_dict(df_p):
@@ -256,7 +260,6 @@ past_dict, trainer_map, horse_track_map, jockey_map = build_past_horse_dict(df_p
 def check_paddock_time(time_str):
     if not time_str or ':' not in str(time_str): return False, ""
     try:
-        # 🌟 pytzを使わずに日本標準時(JST)を設定
         JST = timezone(timedelta(hours=+9), 'JST')
         now = datetime.now(JST)
         
@@ -264,11 +267,9 @@ def check_paddock_time(time_str):
         race_dt = now.replace(hour=h, minute=m, second=0)
         diff_mins = (race_dt - now).total_seconds() / 60
         
-        # 深夜などに明日/昨日のレースを見ている場合の補正
         if diff_mins < -12 * 60: diff_mins += 24 * 60
         elif diff_mins > 12 * 60: diff_mins -= 24 * 60
             
-        # 60分前〜15分後 ならパドック・直前気配モードをON
         is_close = -15 <= diff_mins <= 60
         msg = f"（発走まで約{int(diff_mins)}分）" if diff_mins >= 0 else f"（発走から約{abs(int(diff_mins))}分経過）"
         return is_close, msg
@@ -331,7 +332,7 @@ def calculate_predictions(race_id_target, df_fut, cond):
     race_df['jockey_win_rate'] = race_df['騎手_clean'].map(jockey_map).fillna(0.1).clip(0.0, 1.0)
     race_df['horse_track_win_rate'] = race_df.apply(lambda r: horse_track_map.get((r.get('馬名_clean'), r.get('place_code_str')), 0.0), axis=1)
     
-    race_df['interval_days'] = 30 # 出馬表時点では簡易補完
+    race_df['interval_days'] = 30 
 
     # モデル推論
     X = pd.DataFrame(index=race_df.index)
@@ -468,8 +469,69 @@ if df_future.empty:
 dates = sorted(df_future['day_label'].unique())
 sel_date = st.radio("開催日", dates, horizontal=True, label_visibility="collapsed")
 day_df = df_future[df_future['day_label'] == sel_date]
-places = day_df['place_name'].unique()
 
+# 🌟 改修③: WIN5一発予想（PythonとGeminiのダブル推奨）
+with st.expander("👑 今日のWIN5をAIに一発予想させる（Python × Gemini ダブル推奨）"):
+    st.write("※確率に基づく「Python本命馬」と、直感・定性検索に基づく「Gemini独立推奨馬」の2頭立てでWIN5対象レースを攻略します。")
+    if st.button("🔥 WIN5の買い目を生成する", type="primary", use_container_width=True):
+        if not GEMINI_API_KEY:
+            st.error("【設定エラー】APIキーが見つかりません。")
+        else:
+            with st.spinner("各競馬場のメインレースをAIで推論し、Geminiが独立推奨馬を検索中...（数分かかります）"):
+                main_races = day_df[day_df['r_num'].isin([9, 10, 11])].sort_values(by=['r_num', 'place_name'])
+                win5_prompt_text = ""
+                
+                for r_id in main_races['race_id'].unique():
+                    r_rows = main_races[main_races['race_id'] == r_id]
+                    if r_rows.empty: continue
+                    p_name = r_rows.iloc[0]['place_name']
+                    r_n = r_rows.iloc[0]['r_num']
+                    rc_name = r_rows.iloc[0].get('race_name', '')
+                    
+                    r_df, _, _, _ = calculate_predictions(r_id, df_future, "良")
+                    if r_df is not None and not r_df.empty:
+                        # Pythonの1番手を明示
+                        python_top = f"{int(r_df.iloc[0]['馬番'])}番 {r_df.iloc[0]['馬名']}"
+                        all_horses = [f"{int(r['馬番'])}番 {r['馬名']}" for _, r in r_df.iterrows()]
+                        
+                        win5_prompt_text += f"■ {p_name} {r_n}R 【{rc_name}】\n"
+                        win5_prompt_text += f"  🤖 Python本命: {python_top}\n"
+                        win5_prompt_text += f"  出走馬: {', '.join(all_horses)}\n\n"
+                
+                win5_sys_prompt = """
+                あなたは超一流のWIN5予想職人（Gemini）です。
+                提供された本日のメインレース付近（9R〜11R）の情報から、WIN5対象となりそうな5レースを選び、以下の【ダブル推奨形式】で予想を展開してください。
+                
+                【あなたのミッション】
+                1. 各レースの「🤖 Python本命（定量データ1位）」は既に決まっています。
+                2. あなたはGoogle検索を駆使して「定性データ（展開、血統、陣営コメント、直近の気配など）」を独自に調べ、Pythonの意見に引きずられない【🧠 Gemini独立推奨馬】を各レース1頭（または2頭）必ずピックアップしてください。
+                3. PythonとGeminiの意見が一致した場合は「鉄板」、割れた場合は「波乱含み」として見解を書いてください。
+                4. 結果を以下のフォーマットで出力してください。
+                
+                ### 📍 [競馬場] [レース番号]R 【レース名】
+                *   🤖 **Python推奨**: [Python本命馬] (定量データトップ)
+                *   🧠 **Gemini推奨**: [あなたが独自に選んだ馬]
+                *   📝 **見解**: [なぜその馬をGemini枠として推奨するのか、Python推奨馬との比較、展開予想など]
+                """
+                
+                try:
+                    client = genai.Client(api_key=GEMINI_API_KEY)
+                    response = client.models.generate_content(
+                        model='gemini-2.5-flash',
+                        contents=f"【本日のWIN5候補レース】\n{win5_prompt_text}",
+                        config=types.GenerateContentConfig(
+                            system_instruction=win5_sys_prompt,
+                            temperature=0.7,
+                            tools=[{"googleSearch": {}}]
+                        )
+                    )
+                    st.markdown("<div class='gemini-win5-box'>", unsafe_allow_html=True)
+                    st.write(response.text)
+                    st.markdown("</div>", unsafe_allow_html=True)
+                except Exception as e:
+                    st.error(f"エラーが発生しました: {e}")
+
+places = day_df['place_name'].unique()
 place_tabs = st.tabs([f"📍 {p}" for p in places])
 for i, place in enumerate(places):
     with place_tabs[i]:
@@ -511,21 +573,6 @@ if st.session_state['selected_race_id']:
         </div>
         """, unsafe_allow_html=True)
 
-        win5_1 = [f"{int(x)}番" for x in res_df.head(1)['馬番'].tolist()]
-        win5_20 = [f"{int(x)}番" for x in res_df[res_df['win_prob'] >= 0.20]['馬番'].tolist()]
-        win5_10 = [f"{int(x)}番" for x in res_df[res_df['win_prob'] >= 0.10]['馬番'].tolist()]
-        
-        st.markdown(f"""
-        <div class='win5-card'>
-            <div class='win5-title'>👑 WIN5 推奨ピック (AI勝率ベース)</div>
-            <div style='margin-top: 8px; font-size: 15px; line-height: 1.6;'>
-                <b>🔥 1点突破 (絶対軸):</b> {", ".join(win5_1)}<br>
-                <b>🛡️ 少点数カバー (勝率20%超):</b> {", ".join(win5_20) if win5_20 else "該当なし"}<br>
-                <b>🌪️ 波乱・広く網打ち (勝率10%超):</b> {", ".join(win5_10) if win5_10 else "該当なし"}
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
         sort_option = st.selectbox("🔄 テーブルの表示順", ["システム推奨（印順）", "馬番順（昇順）", "AIスコア順", "予想オッズ順"], index=0)
         if sort_option == "馬番順（昇順）": res_df = res_df.sort_values(by='馬番')
         elif sort_option == "AIスコア順": res_df = res_df.sort_values(by=['ai_score'], ascending=False)
@@ -538,10 +585,19 @@ if st.session_state['selected_race_id']:
 
         st.markdown("<br>", unsafe_allow_html=True)
         
-        race_time_str = r_info.get('time', r_info.get('発走時間', ''))
+        race_time_str = ""
+        for col_name in ['発走', '発走時刻', '発走時間', 'time']:
+            if col_name in r_info and pd.notna(r_info[col_name]) and str(r_info[col_name]).strip() != "":
+                race_time_str = str(r_info[col_name]).strip()
+                match = re.search(r'\d{1,2}:\d{2}', race_time_str)
+                if match:
+                    race_time_str = match.group(0)
+                break
+                
         is_paddock_close, time_msg = check_paddock_time(race_time_str)
         
-        st.info(f"🕒 発走予定時刻: {race_time_str if race_time_str else '不明'} {time_msg}")
+        display_time = race_time_str if race_time_str else "不明（手動でパドック検索をONにできます）"
+        st.info(f"🕒 発走予定時刻: {display_time} {time_msg}")
         use_paddock = st.checkbox("🐎 レース直前：Geminiに「パドック・馬体気配」を最優先で検索させる", value=is_paddock_close)
 
         if st.button("🧠 Geminiを独立させて、泥臭く穴馬を発掘させる", type="primary", use_container_width=True):
