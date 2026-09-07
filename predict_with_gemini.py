@@ -470,15 +470,14 @@ dates = sorted(df_future['day_label'].unique())
 sel_date = st.radio("開催日", dates, horizontal=True, label_visibility="collapsed")
 day_df = df_future[df_future['day_label'] == sel_date]
 
-# 🌟 改修③: WIN5一発予想（PythonとGeminiのダブル推奨）
 with st.expander("👑 今日のWIN5をAIに一発予想させる（Python × Gemini ダブル推奨）"):
-    st.write("※確率に基づく「Python本命馬」と、直感・定性検索に基づく「Gemini独立推奨馬」の2頭立てでWIN5対象レースを攻略します。")
+    st.write("※Geminiが本日のWIN5対象レースを自動検索し、「Python本命馬」と「Gemini独自推奨馬」の2頭立てで攻略します。")
     if st.button("🔥 WIN5の買い目を生成する", type="primary", use_container_width=True):
         if not GEMINI_API_KEY:
             st.error("【設定エラー】APIキーが見つかりません。")
         else:
-            with st.spinner("各競馬場のメインレースをAIで推論し、Geminiが独立推奨馬を検索中...（数分かかります）"):
-                main_races = day_df[day_df['r_num'].isin([9, 10, 11])].sort_values(by=['r_num', 'place_name'])
+            with st.spinner("Geminiが本日のWIN5対象レースを検索し、買い目を構築中...（数分かかります）"):
+                main_races = day_df[day_df['r_num'].isin([9, 10, 11, 12])].sort_values(by=['r_num', 'place_name'])
                 win5_prompt_text = ""
                 
                 for r_id in main_races['race_id'].unique():
@@ -490,7 +489,6 @@ with st.expander("👑 今日のWIN5をAIに一発予想させる（Python × Ge
                     
                     r_df, _, _, _ = calculate_predictions(r_id, df_future, "良")
                     if r_df is not None and not r_df.empty:
-                        # Pythonの1番手を明示
                         python_top = f"{int(r_df.iloc[0]['馬番'])}番 {r_df.iloc[0]['馬名']}"
                         all_horses = [f"{int(r['馬番'])}番 {r['馬名']}" for _, r in r_df.iterrows()]
                         
@@ -498,36 +496,42 @@ with st.expander("👑 今日のWIN5をAIに一発予想させる（Python × Ge
                         win5_prompt_text += f"  🤖 Python本命: {python_top}\n"
                         win5_prompt_text += f"  出走馬: {', '.join(all_horses)}\n\n"
                 
-                win5_sys_prompt = """
+                win5_sys_prompt = f"""
                 あなたは超一流のWIN5予想職人（Gemini）です。
-                提供された本日のメインレース付近（9R〜11R）の情報から、WIN5対象となりそうな5レースを選び、以下の【ダブル推奨形式】で予想を展開してください。
+                以下のデータは、本日の各競馬場のメインレース付近のAI予測スコアです。
                 
-                【あなたのミッション】
-                1. 各レースの「🤖 Python本命（定量データ1位）」は既に決まっています。
-                2. あなたはGoogle検索を駆使して「定性データ（展開、血統、陣営コメント、直近の気配など）」を独自に調べ、Pythonの意見に引きずられない【🧠 Gemini独立推奨馬】を各レース1頭（または2頭）必ずピックアップしてください。
-                3. PythonとGeminiの意見が一致した場合は「鉄板」、割れた場合は「波乱含み」として見解を書いてください。
-                4. 結果を以下のフォーマットで出力してください。
+                【最重要ミッション：対象レースの特定】
+                まずは必ず「JRA {sel_date} WIN5 対象レース」でGoogle検索を行い、本日の【公式のWIN5対象の5レース】を正確に特定してください。（勝手に推測して選ぶのは厳禁です）
                 
-                ### 📍 [競馬場] [レース番号]R 【レース名】
+                【予想ミッション】
+                1. 検索で特定した【本物の対象5レース】についてのみ、以下のダブル推奨形式で予想を展開してください。
+                2. 各レースの「🤖 Python本命（定量データ1位）」は既に決まっています。
+                3. あなたはGoogle検索を駆使して定性データ（陣営コメント、直近の気配など）を独自に調べ、Pythonに引きずられない【🧠 Gemini独立推奨馬】を各レース1〜2頭ピックアップしてください。
+                
+                【出力フォーマット】
+                ### 📍 [競馬場] [レース番号]R 【レース名】 (WIN5 対象Xレース目)
                 *   🤖 **Python推奨**: [Python本命馬] (定量データトップ)
                 *   🧠 **Gemini推奨**: [あなたが独自に選んだ馬]
-                *   📝 **見解**: [なぜその馬をGemini枠として推奨するのか、Python推奨馬との比較、展開予想など]
+                *   📝 **見解**: [なぜその馬をGemini枠として推奨するのか、展開予想など]
                 """
                 
                 try:
                     client = genai.Client(api_key=GEMINI_API_KEY)
                     response = client.models.generate_content(
                         model='gemini-2.5-flash',
-                        contents=f"【本日のWIN5候補レース】\n{win5_prompt_text}",
+                        contents=f"【本日のWIN5候補レース群】\n{win5_prompt_text}",
                         config=types.GenerateContentConfig(
                             system_instruction=win5_sys_prompt,
-                            temperature=0.7,
+                            temperature=0.3,
                             tools=[{"googleSearch": {}}]
                         )
                     )
-                    st.markdown("<div class='gemini-win5-box'>", unsafe_allow_html=True)
-                    st.write(response.text)
-                    st.markdown("</div>", unsafe_allow_html=True)
+                    
+                    st.markdown(f"""
+                    <div class='gemini-win5-box'>
+                        {response.text}
+                    </div>
+                    """, unsafe_allow_html=True)
                 except Exception as e:
                     st.error(f"エラーが発生しました: {e}")
 
