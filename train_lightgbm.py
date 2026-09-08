@@ -54,24 +54,21 @@ def preprocess_features(df):
     
     df_feat['rank_num'] = pd.to_numeric(df_feat.get('着順'), errors='coerce')
 
-    # 2. 距離変化と条件別平均着順
+    # 🌟 魔改造EMA版に合わせ、学習時の前処理でも EMA (ewm) を使って特徴量を再生成・補完する
+    def ewm_shift(x, span):
+        return x.shift(1).ewm(span=span, min_periods=1).mean()
+
+    # 2. 距離変化と条件別平均着順 (EMA)
     df_feat['prev_dist'] = df_feat.groupby('馬名_clean')['distance_num'].shift(1)
     df_feat['dist_change_num'] = df_feat['distance_num'] - df_feat['prev_dist'].fillna(df_feat['distance_num'])
     
-    df_feat['same_dist_avg_rank'] = df_feat.groupby(['馬名_clean', 'dist_cat'])['rank_num'].apply(
-        lambda x: x.shift(1).expanding().mean()
-    ).reset_index(level=[0,1], drop=True).fillna(7.0)
+    df_feat['same_dist_avg_rank'] = df_feat.groupby(['馬名_clean', 'dist_cat'])['rank_num'].transform(lambda x: ewm_shift(x, 3)).fillna(7.0)
+    df_feat['same_place_avg_rank'] = df_feat.groupby(['馬名_clean', 'place_code'])['rank_num'].transform(lambda x: ewm_shift(x, 3)).fillna(7.0)
 
-    df_feat['same_place_avg_rank'] = df_feat.groupby(['馬名_clean', 'place_code'])['rank_num'].apply(
-        lambda x: x.shift(1).expanding().mean()
-    ).reset_index(level=[0,1], drop=True).fillna(7.0)
-
-    # 3. 賞金の相対評価
+    # 3. 賞金の相対評価 (EMA)
     prize_col = '賞金(万円)' if '賞金(万円)' in df_feat.columns else 'prize'
     df_feat['prize_num'] = pd.to_numeric(df_feat.get(prize_col, 0), errors='coerce').fillna(0.0)
-    df_feat['horse_prize_avg'] = df_feat.groupby('馬名_clean')['prize_num'].apply(
-        lambda x: x.shift(1).expanding().mean()
-    ).reset_index(level=0, drop=True).fillna(0.0)
+    df_feat['horse_prize_avg'] = df_feat.groupby('馬名_clean')['prize_num'].transform(lambda x: ewm_shift(x, 5)).fillna(0.0)
     
     df_feat['race_avg_prize'] = df_feat.groupby('race_id')['horse_prize_avg'].transform('mean').replace(0, 1)
     df_feat['race_prize_relative'] = df_feat['horse_prize_avg'] / df_feat['race_avg_prize']
@@ -84,10 +81,10 @@ def preprocess_features(df):
     df_feat['corner_diff'] = [p[2] for p in passing]
     df_feat['prev_1c'] = df_feat.groupby('馬名_clean')['first_corner'].shift(1).fillna(10.0)
     
-    # 🌟 新規チューニング: テン（先行力）の安定度を追加
+    # テン（先行力）と上がりの安定度 (EMA)
     if 'my_start_idx' in df_feat.columns:
         start_num = pd.to_numeric(df_feat['my_start_idx'], errors='coerce')
-        df_feat['start_idx_avg'] = df_feat.groupby('馬名_clean')[start_num.name].apply(lambda x: x.shift(1).expanding().mean()).reset_index(level=0, drop=True).fillna(50.0)
+        df_feat['start_idx_avg'] = df_feat.groupby('馬名_clean')[start_num.name].transform(lambda x: ewm_shift(x, 3)).fillna(50.0)
         df_feat['start_idx_std'] = df_feat.groupby('馬名_clean')[start_num.name].apply(lambda x: x.shift(1).rolling(3, min_periods=1).std()).reset_index(level=0, drop=True).fillna(0.0)
     else:
         df_feat['start_idx_avg'] = 50.0
@@ -95,7 +92,7 @@ def preprocess_features(df):
 
     if 'my_last3f_idx' in df_feat.columns:
         last3f_num = pd.to_numeric(df_feat['my_last3f_idx'], errors='coerce')
-        df_feat['last_3f_avg_rank'] = df_feat.groupby('馬名_clean')[last3f_num.name].apply(lambda x: x.shift(1).expanding().mean()).reset_index(level=0, drop=True).fillna(50.0)
+        df_feat['last_3f_avg_rank'] = df_feat.groupby('馬名_clean')[last3f_num.name].transform(lambda x: ewm_shift(x, 3)).fillna(50.0)
         df_feat['last_3f_std'] = df_feat.groupby('馬名_clean')[last3f_num.name].apply(lambda x: x.shift(1).rolling(3, min_periods=1).std()).reset_index(level=0, drop=True).fillna(0.0)
     else:
         df_feat['last_3f_avg_rank'] = 50.0
@@ -108,9 +105,11 @@ def preprocess_features(df):
     df_feat['kinryo_weight_ratio'] = df_feat['kinryo_num'] / df_feat['body_weight'].fillna(470)
     df_feat['interval_days'] = df_feat.groupby('馬名_clean')['date_parsed'].diff().dt.days.fillna(30)
     
+    # 🌟 バグ修正: 列が存在しない場合は「要素数が同じ0のSeries」を渡す
     num_cols = ['horse_runs', 'jockey_win_rate', 'trainer_win_rate']
     for c in num_cols:
-        df_feat[c] = pd.to_numeric(df_feat.get(c, 0), errors='coerce').fillna(0.0)
+        val = df_feat.get(c, pd.Series([0.0]*len(df_feat), index=df_feat.index))
+        df_feat[c] = pd.to_numeric(val, errors='coerce').fillna(0.0)
 
     df_feat = df_feat.fillna(0)
     return df_feat

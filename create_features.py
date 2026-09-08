@@ -4,8 +4,8 @@ import os
 import joblib
 import re
 
-# 🌟 第1話で取得した生データのCSV名を指定してください
-INPUT_CSV = "keiba_3years_raw_data.csv"
+# 🌟 実際の環境に合わせてファイル名を指定
+INPUT_CSV = "ml_target_data.csv"
 OUTPUT_CSV = "ml_target_data_v2.csv"
 
 def clean_horse_name(name):
@@ -92,6 +92,10 @@ def main():
     df_feat['last_pos_clean'] = [p[1] for p in passing]
     df_feat['corner_diff'] = [p[2] for p in passing]
 
+    # 🌟 エラー解消: すでに計算済みの列が残っていると、merge時に _x, _y がついてエラーになるため削除
+    drop_cols = ['race_avg_time', 'race_std_time', 'race_avg_last3f', 'race_std_last3f', 'race_avg_pos', 'race_std_pos']
+    df_feat = df_feat.drop(columns=[c for c in drop_cols if c in df_feat.columns])
+
     # --- 3. レースごとの平均値を計算（今回のレースのレベルを測るため） ---
     race_stats = df_feat.groupby('race_id').agg(
         race_avg_time=('time_sec_clean', 'mean'),
@@ -103,9 +107,19 @@ def main():
     ).reset_index()
     df_feat = pd.merge(df_feat, race_stats, on='race_id', how='left')
 
-    df_feat['my_time_idx'] = 50.0 + ((df_feat['race_avg_time'] - df_feat['time_sec_clean']) / df_feat['race_std_time']) * 10.0
-    df_feat['my_last3f_idx'] = 50.0 + ((df_feat['race_avg_last3f'] - df_feat['last3f_sec_clean']) / df_feat['race_std_last3f']) * 10.0
-    df_feat['my_start_idx'] = 50.0 + ((df_feat['race_avg_pos'] - df_feat['first_pos_clean']) / df_feat['race_std_pos']) * 10.0
+    # 標準偏差が0またはNaNの場合のゼロ除算対策
+    race_std_time = df_feat['race_std_time'].replace(0, np.nan)
+    race_std_last3f = df_feat['race_std_last3f'].replace(0, np.nan)
+    race_std_pos = df_feat['race_std_pos'].replace(0, np.nan)
+
+    df_feat['my_time_idx'] = 50.0 + ((df_feat['race_avg_time'] - df_feat['time_sec_clean']) / race_std_time) * 10.0
+    df_feat['my_last3f_idx'] = 50.0 + ((df_feat['race_avg_last3f'] - df_feat['last3f_sec_clean']) / race_std_last3f) * 10.0
+    df_feat['my_start_idx'] = 50.0 + ((df_feat['race_avg_pos'] - df_feat['first_pos_clean']) / race_std_pos) * 10.0
+
+    # NaNを50.0で埋める
+    df_feat['my_time_idx'] = df_feat['my_time_idx'].fillna(50.0)
+    df_feat['my_last3f_idx'] = df_feat['my_last3f_idx'].fillna(50.0)
+    df_feat['my_start_idx'] = df_feat['my_start_idx'].fillna(50.0)
 
     # --- 4. 【魔改造＆リーク防止】 過去の成績から「前走までの実績」を生成 ---
     # 必ず .shift(1) を使い、今回の結果が混ざらないようにする
@@ -151,7 +165,6 @@ def main():
     if 'condition' in df_feat.columns:
         from sklearn.preprocessing import LabelEncoder
         le_cond = LabelEncoder()
-        # "良", "稍重", "重", "不良" などの状態を数値化
         df_feat['condition_code'] = le_cond.fit_transform(df_feat['condition'].astype(str))
         joblib.dump(le_cond, "le_cond.pkl")
 
