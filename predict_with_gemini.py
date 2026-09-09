@@ -356,7 +356,9 @@ def check_paddock_time(time_str):
         return is_close, msg
     except:
         return False, ""
-    def calculate_predictions(race_id_target, df_fut, cond):
+
+
+def calculate_predictions(race_id_target, df_fut, cond):
     if df_fut.empty or model_data is None: return None, None, None, None
     race_df = df_fut[df_fut['race_id'].astype(str) == str(race_id_target)].copy()
     if race_df.empty: return None, None, None, None
