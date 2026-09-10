@@ -15,7 +15,7 @@ import catboost as cb
 from datetime import datetime, timezone, timedelta
 
 # ==========================================
-# 🎨 アプリの基本設定
+# 🎨 アプリの基本設定 & スタイル定義
 # ==========================================
 st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="🐴", layout="wide")
 
@@ -65,7 +65,7 @@ if 'selected_race_id' not in st.session_state:
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "") 
 
 FUTURE_CSV = "future_races.csv"
-ML_TARGET_CSV = "ml_target_data_v2.csv"
+CACHE_FILE = "app_cache.pkl"
 
 # 🌟 学習時と同じ「ズラし対象（前走データ）」のリストを明記
 LEAKY_COLS_TO_SHIFT = [
@@ -156,30 +156,7 @@ def load_encoders():
     return le_cond, le_surf
 
 @st.cache_data
-def load_data():
-    df_past = pd.DataFrame()
-    past_error = None
-    if os.path.exists(ML_TARGET_CSV):
-        for enc in ['utf-8-sig', 'utf-8', 'cp932']:
-            try:
-                df_past = pd.read_csv(ML_TARGET_CSV, low_memory=False, dtype={'race_id': str}, encoding=enc)
-                df_past['馬名_clean'] = df_past['馬名'].astype(str).apply(clean_horse_name)
-                df_past['date_parsed'] = pd.to_datetime(df_past['date'], errors='coerce')
-                df_past['distance_num'] = pd.to_numeric(df_past.get('distance'), errors='coerce')
-                df_past['dist_cat'] = df_past['distance_num'].apply(get_dist_cat)
-                df_past['rank_num'] = pd.to_numeric(df_past.get('着順'), errors='coerce')
-                df_past['is_win_past'] = (df_past['rank_num'] == 1).astype(int)
-                
-                place_code = df_past.get('place_code', pd.Series(['00']*len(df_past)))
-                surface = df_past.get('surface', pd.Series(['芝']*len(df_past)))
-                df_past['course_id'] = place_code.astype(str) + "_" + surface.astype(str) + "_" + df_past['distance_num'].fillna(0).astype(int).astype(str)
-                df_past['place_code_str'] = df_past.get('place_code', df_past['race_id'].astype(str).str[4:6]).astype(str)
-                df_past = df_past.sort_values(by='date_parsed')
-                past_error = None
-                break
-            except Exception as e:
-                past_error = f"'{ML_TARGET_CSV}' 読み込み失敗 ({enc}): {e}"
-
+def load_future_data():
     df_future = pd.DataFrame()
     future_error = None
     if os.path.exists(FUTURE_CSV):
@@ -200,148 +177,35 @@ def load_data():
                     break
             except Exception as e:
                 future_error = f"'{FUTURE_CSV}' 読み込み失敗 ({enc}): {e}"
+    return df_future, future_error
 
-    return df_past, df_future, past_error, future_error
+@st.cache_resource
+def load_cache():
+    if os.path.exists(CACHE_FILE):
+        try:
+            return joblib.load(CACHE_FILE), None
+        except Exception as e:
+            return None, f"キャッシュファイル '{CACHE_FILE}' 読み込みエラー: {e}"
+    return None, f"キャッシュファイル '{CACHE_FILE}' が見つかりません。"
 
 model_data, model_err = load_model()
 le_cond, le_surf = load_encoders()
-df_past, df_future, past_err, future_err = load_data()
+df_future, future_err = load_future_data()
+app_cache, cache_err = load_cache()
 
-@st.cache_data
-def build_course_map(df_p):
-    c_map = {}
-    if 'course_id' in df_p.columns:
-        for c_id, group in df_p.groupby('course_id'):
-            v = group['course_avg_last3f'].dropna() if 'course_avg_last3f' in group.columns else pd.Series(dtype=float)
-            c_map[c_id] = v.iloc[-1] if len(v) > 0 else 50.0
-    return c_map
-
-course_map = build_course_map(df_past)
-
-@st.cache_data
-def build_past_horse_dict(df_p):
-    if df_p.empty: return {}, {}, {}, {}
-    horse_dict = {}
-    
-    df_p['騎手_clean'] = df_p['騎手'].astype(str).str.strip()
-    jockey_map = df_p.dropna(subset=['rank_num']).groupby('騎手_clean')['is_win_past'].mean().to_dict()
-
-    for horse, group in df_p.groupby('馬名_clean'):
-        valid_past = group.dropna(subset=['rank_num']).copy()
-        if valid_past.empty: 
-            last_valid_row = group.iloc[-1]
-            prev2_rank = 7.0
-            prev_jockey = ""
-        else: 
-            last_valid_row = valid_past.iloc[-1]
-            if len(valid_past) >= 2:
-                prev2_rank = valid_past.iloc[-2]['rank_num']
-            else:
-                prev2_rank = 7.0
-            prev_jockey = str(last_valid_row.get('騎手_clean', "")).strip()
-        
-        def parse_pass_full(val):
-            if pd.isna(val): return np.nan, np.nan, np.nan
-            parts = str(val).split('-')
-            try: return float(parts[0]), float(parts[-1]), float(parts[0]) - float(parts[-1])
-            except: return np.nan, np.nan, np.nan
-        
-        p_1c, p_lc, p_cdiff = parse_pass_full(last_valid_row.get('通過', np.nan))
-        
-        prize_col = '賞金(万円)' if '賞金(万円)' in valid_past.columns else 'prize'
-        prizes = pd.to_numeric(valid_past.get(prize_col, pd.Series()), errors='coerce').fillna(0)
-        horse_prize_avg = prizes.ewm(span=5, min_periods=1).mean().iloc[-1] if not prizes.empty else 0.0
-        
-        cat_stats = {}
-        for cat_name in ['sprint', 'mile_middle', 'stayer']:
-            c_rows = valid_past[valid_past['dist_cat'] == cat_name]
-            cat_stats[cat_name] = {'avg_rank': c_rows['rank_num'].ewm(span=3, min_periods=1).mean().iloc[-1] if len(c_rows) > 0 else 7.0}
-            
-        place_stats = {}
-        for p_code in valid_past['place_code'].astype(str).unique():
-            p_rows = valid_past[valid_past['place_code'].astype(str) == p_code]
-            place_stats[p_code] = p_rows['rank_num'].ewm(span=3, min_periods=1).mean().iloc[-1] if len(p_rows) > 0 else 7.0 
-            
-        surface_stats = {}
-        for surf in valid_past['surface'].astype(str).unique():
-            s_rows = valid_past[valid_past['surface'].astype(str) == surf]
-            surface_stats[surf] = s_rows['rank_num'].ewm(span=3, min_periods=1).mean().iloc[-1] if len(s_rows) > 0 else 7.0
-            
-        turn_stats = {}
-        valid_past['turn_direction'] = valid_past['place_code_str'].apply(lambda x: 'left' if str(x) in ['04', '05', '07'] else 'right')
-        for turn in ['left', 'right']:
-            t_rows = valid_past[valid_past['turn_direction'] == turn]
-            turn_stats[turn] = t_rows['rank_num'].ewm(span=3, min_periods=1).mean().iloc[-1] if len(t_rows) > 0 else 7.0
-
-        condition_stats = {}
-        valid_past['is_heavy_track'] = valid_past['condition'].astype(str).apply(lambda x: 'heavy' if x in ['重', '不良', '稍重'] else 'good')
-        for cond_key in ['good', 'heavy']:
-            c_rows = valid_past[valid_past['is_heavy_track'] == cond_key]
-            condition_stats[cond_key] = c_rows['rank_num'].ewm(span=3, min_periods=1).mean().iloc[-1] if len(c_rows) > 0 else 7.0
-
-        s_vals = pd.to_numeric(valid_past.get('my_start_idx', pd.Series()), errors='coerce').dropna()
-        eff_my_start_idx = s_vals.ewm(span=3, min_periods=1).mean().iloc[-1] if not s_vals.empty else 50.0
-        eff_my_start_idx_long = s_vals.ewm(span=10, min_periods=1).mean().iloc[-1] if not s_vals.empty else 50.0
-
-        l_vals = pd.to_numeric(valid_past.get('my_last3f_idx', pd.Series()), errors='coerce').dropna()
-        eff_my_last3f_idx = l_vals.ewm(span=3, min_periods=1).mean().iloc[-1] if not l_vals.empty else 50.0
-        eff_my_last3f_idx_long = l_vals.ewm(span=10, min_periods=1).mean().iloc[-1] if not l_vals.empty else 50.0
-
-        start_idx_trend = eff_my_start_idx - eff_my_start_idx_long
-        last3f_idx_trend = eff_my_last3f_idx - eff_my_last3f_idx_long
-
-        prev_prize = pd.to_numeric(last_valid_row.get(prize_col, 0.0), errors='coerce')
-        prev_prize = prev_prize if pd.notna(prev_prize) else 0.0
-
-        horse_data = {
-            'last_date': last_valid_row.get('date_parsed', np.nan),
-            'last_kinryo': pd.to_numeric(last_valid_row.get('kinryo_num', 55.0), errors='coerce'),
-            'prev_dist': pd.to_numeric(last_valid_row.get('distance_num', np.nan), errors='coerce'), 
-            'horse_prize_avg': horse_prize_avg, 
-            'prev_prize': prev_prize,
-            'prev_1c': p_1c if not pd.isna(p_1c) else 10.0, 
-            'prev_last_corner': p_lc if not pd.isna(p_lc) else 10.0,
-            'prev_corner_diff': p_cdiff if not pd.isna(p_cdiff) else 0.0,
-            'prev_rank': last_valid_row.get('rank_num', 7.0),
-            'prev2_rank': prev2_rank,
-            'prev_jockey': prev_jockey,
-            'cat_stats': cat_stats,
-            'place_stats': place_stats,
-            'surface_stats': surface_stats,
-            'turn_stats': turn_stats,
-            'condition_stats': condition_stats,
-            'eff_my_start_idx': eff_my_start_idx,
-            'eff_my_start_idx_long': eff_my_start_idx_long,
-            'eff_my_last3f_idx': eff_my_last3f_idx,
-            'eff_my_last3f_idx_long': eff_my_last3f_idx_long,
-            'start_idx_trend': start_idx_trend,
-            'last3f_idx_trend': last3f_idx_trend,
-            'last_3f_avg_rank': eff_my_last3f_idx
-        }
-        
-        if pd.isna(horse_data['last_kinryo']):
-            horse_data['last_kinryo'] = 55.0
-
-        for col in LEAKY_COLS_TO_SHIFT:
-            horse_data[f'prev_{col}'] = last_valid_row.get(col, np.nan)
-
-        for col in last_valid_row.index:
-            if col not in horse_data:
-                horse_data[col] = last_valid_row.get(col, np.nan)
-
-        horse_dict[horse] = horse_data
-
-    trainer_map = df_p.groupby('調教師')['is_win_past'].mean().to_dict()
-    jockey_track_map = df_p.dropna(subset=['rank_num']).groupby(['騎手_clean', 'place_code_str'])['is_win_past'].mean().to_dict()
-
-    return horse_dict, trainer_map, jockey_track_map, jockey_map
-
-past_dict, trainer_map, jockey_track_map, jockey_map = build_past_horse_dict(df_past)
+if app_cache:
+    course_map = app_cache.get('course_map', {})
+    past_dict = app_cache.get('past_dict', {})
+    trainer_map = app_cache.get('trainer_map', {})
+    jockey_track_map = app_cache.get('jockey_track_map', {})
+    jockey_map = app_cache.get('jockey_map', {})
+else:
+    course_map, past_dict, trainer_map, jockey_track_map, jockey_map = {}, {}, {}, {}, {}
 
 def check_paddock_time(time_str):
     if not time_str or ':' not in str(time_str): return False, ""
     try:
-        JST = timezone(timedelta(hours=+9), 'JST')
+        JST = timezone(timedelta(hours=9))
         now = datetime.now(JST)
         
         h, m = map(int, str(time_str).split(':'))
@@ -356,8 +220,9 @@ def check_paddock_time(time_str):
         return is_close, msg
     except:
         return False, ""
-
-
+    # ==========================================
+# 🧠 AI予測計算メインロジック
+# ==========================================
 def calculate_predictions(race_id_target, df_fut, cond):
     if df_fut.empty or model_data is None: return None, None, None, None
     race_df = df_fut[df_fut['race_id'].astype(str) == str(race_id_target)].copy()
@@ -557,6 +422,9 @@ def calculate_predictions(race_id_target, df_fut, cond):
 
     return race_df, pat, rec_ticket, buy_detail
 
+# ==========================================
+# 📊 HTMLテーブル生成 & UIレンダリング
+# ==========================================
 def generate_base_table(disp_df, is_newcomer):
     html = "<div class='table-container'><table class='kachi-table'>"
     html += "<tr><th>馬番</th><th style='text-align:left;'>馬名</th><th>脚質</th><th>斤量</th><th>スコア</th><th>1着率</th><th>3着内率</th><th>オッズ</th><th>期待値</th><th>Python印</th></tr>"
