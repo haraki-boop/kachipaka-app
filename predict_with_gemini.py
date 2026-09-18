@@ -86,38 +86,50 @@ def load_future_data():
         return df_f
     return pd.DataFrame()
 
-@st.cache_resource
+# 🚨 @st.cache_data を使用し、リロードボタンで確実にクリアされる仕様に変更
+@st.cache_data
 def load_cache():
     if os.path.exists(CACHE_FILE):
-        return joblib.load(CACHE_FILE)
+        try:
+            return joblib.load(CACHE_FILE)
+        except Exception:
+            return {}
     return {}
 
 df_future = load_future_data()
-cache_data = load_cache()
 
 # ==========================================
 # 🧠 PKLからの超高速ロード & 馬場補正
 # ==========================================
 def render_race_predictions(race_id_target, cond):
-    if df_future.empty or not cache_data: return None, None, None, None
+    if df_future.empty: return None, None, None, None
+    
+    cache_data = load_cache()
+    if not cache_data:
+        st.warning("⚠️ キャッシュファイル(app_cache.pkl)が見つかりません。")
+        return None, None, None, None
     
     df = df_future[df_future['race_id'].astype(str) == str(race_id_target)].copy()
     if df.empty: return None, None, None, None
 
-    predictions = cache_data.get('predictions', {}).get(str(race_id_target), {})
+    all_preds = cache_data.get('predictions', {})
+    
+    # キーの表記型（ゼロ埋め12桁/通常文字列/数値）に対応
+    target_key = str(race_id_target).zfill(12)
+    predictions = all_preds.get(target_key) or all_preds.get(str(race_id_target))
+    
     if not predictions:
-        st.warning("⚠️ このレースの予測データがPKL内に見つかりません。predict_future.py を実行してください。")
+        st.error(f"⚠️ レースID '{target_key}' の計算済みデータが PKL 内に見つかりません。")
         return None, None, None, None
 
     horse_preds = predictions.get('horses', {})
     
-    # predict_future.py が PKL に書き込んだ完全な計算結果を引き継ぐ
     df['win_prob'] = df['馬名_clean'].map(lambda x: horse_preds.get(x, {}).get('win_prob', 0.1))
     df['ai_score'] = df['馬名_clean'].map(lambda x: horse_preds.get(x, {}).get('ai_score', 100))
     df['脚質'] = df['馬名_clean'].map(lambda x: horse_preds.get(x, {}).get('脚質', '-'))
     df['印'] = df['馬名_clean'].map(lambda x: horse_preds.get(x, {}).get('印', '消'))
 
-    # 馬場状態・コースバイアスの後乗せ掛け算
+    # 馬場状態・コースバイアス補正
     df['bias_coef'] = 1.0
     place_name = str(df['place_name'].iloc[0])
 
@@ -184,10 +196,16 @@ def generate_fusion_table(merged_df):
     html += "</table></div>"
     return html
 
+# 🔧 ボタン押下時に全データをクリア
+def clear_all_caches():
+    st.cache_data.clear()
+    if hasattr(st, 'cache_resource'):
+        st.cache_resource.clear()
+
 # ==========================================
 # 🎯 画面表示
 # ==========================================
-st.sidebar.button("🔄 画面リロード", on_click=lambda: st.cache_data.clear(), use_container_width=True)
+st.sidebar.button("🔄 画面リロード", on_click=clear_all_caches, use_container_width=True)
 st.markdown("<div class='section-header'>🎯 レース選択</div>", unsafe_allow_html=True)
 
 if df_future.empty:
@@ -242,7 +260,7 @@ if st.session_state['selected_race_id']:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # 🔥 Geminiの独立穴馬発掘機能（完全復元）
+        # 🔥 Gemini独立穴馬発掘機能
         if st.button("🧠 Geminiを独立させて、泥臭く穴馬を発掘させる", type="primary", use_container_width=True):
             if not GEMINI_API_KEY:
                 st.error("【設定エラー】APIキーが見つかりません。")
