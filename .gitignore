@@ -1,0 +1,13 @@
+# 大容量データ（Git管理から除外）
+*.csv
+keiba_database.csv
+ml_target_data.csv
+ml_target_data_v2.csv
+future_races.csv
+prediction_history.csv
+
+# Pythonの一時ファイル・キャッシュ・仮想環境
+__pycache__/
+*.pyc
+.venv/
+catboost_info/

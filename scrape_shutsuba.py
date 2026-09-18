@@ -9,7 +9,6 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 
 FUTURE_CSV = "future_races.csv"
-ML_TARGET_CSV = "ml_target_data.csv"
 
 def get_target_dates():
     today = datetime.now()
@@ -37,18 +36,13 @@ def clean_race_name(race_name):
     return s.strip()
 
 def setup_driver():
-    """Seleniumの初期設定（画面を表示しない裏側起動）"""
     options = Options()
-    options.add_argument('--headless=new')  # バックグラウンドで動かす設定
+    options.add_argument('--headless=new')
     options.add_argument('--disable-gpu')
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
-    # 一般的なChromeブラウザに偽装
     options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36')
-    
-    # ドライバーを起動（最近のSeleniumは自動でドライバーを準備してくれます）
     driver = webdriver.Chrome(options=options)
-    # 暗黙の待機時間を設定
     driver.implicitly_wait(5)
     return driver
 
@@ -62,7 +56,7 @@ def scrape_shutsuba():
     try:
         driver = setup_driver()
     except Exception as e:
-        print(f"❌ Seleniumの起動に失敗しました。Google Chromeがインストールされているか確認してください。\n詳細: {e}")
+        print(f"❌ Seleniumの起動に失敗しました。\n詳細: {e}")
         return
 
     try:
@@ -75,7 +69,7 @@ def scrape_shutsuba():
             for url in urls_to_check:
                 try:
                     driver.get(url)
-                    time.sleep(2) # 念のため描画待ち
+                    time.sleep(2)
                     html = driver.page_source
                     found_ids = re.findall(r'race_id=["\']?(\d{12})["\']?', html)
                     for rid in found_ids:
@@ -95,7 +89,7 @@ def scrape_shutsuba():
         race_data_list = []
         weekdays = ["月", "火", "水", "木", "金", "土", "日"]
         
-        # --- 2. 出馬表の取得（JavaScriptがロードされるのを待つ） ---
+        # --- 2. 出馬表の取得 ---
         for i, race_id in enumerate(all_race_ids):
             print(f"[{i+1}/{len(all_race_ids)}] 取得中: {race_id}")
             place_code = int(str(race_id)[4:6])
@@ -104,14 +98,9 @@ def scrape_shutsuba():
             
             try:
                 driver.get(shutuba_url)
+                time.sleep(3) # オッズ読み込み待ち
                 
-                # ★超重要★
-                # 出馬表のHTMLが開いた後、JavaScriptが裏でオッズを読み込んで表示させるのを3秒待つ
-                time.sleep(3) 
-                
-                # 完全に描画されたHTML（オッズ表示済み）を取得
-                html = driver.page_source
-                soup = BeautifulSoup(html, "html.parser")
+                soup = BeautifulSoup(driver.page_source, "html.parser")
                 
                 date_str = id_to_date.get(race_id, "")
                 dt_obj = datetime.strptime(date_str, '%Y%m%d') if date_str else None
@@ -139,10 +128,11 @@ def scrape_shutsuba():
                         kinryo = clean_text(tds[5].text)
                         jockey_td = tds[6]
                         jockey = clean_text(jockey_td.find("a").text) if jockey_td.find("a") else clean_text(jockey_td.text)
+                        trainer_td = tds[7]
+                        trainer = clean_text(trainer_td.find("a").text) if trainer_td.find("a") else clean_text(trainer_td.text)
                         
                         o_val, p_val = None, None
                         
-                        # SeleniumによりJavaScriptが展開済みの表から、直接オッズを探す
                         for td in tds:
                             cls_str = " ".join(td.get('class', [])).lower()
                             txt = clean_text(td.text)
@@ -155,7 +145,6 @@ def scrape_shutsuba():
                                 m = re.search(r'(\d+)', txt)
                                 if m: p_val = int(m.group(1))
 
-                        # フォールバック（インデックス決め打ち）
                         if o_val is None and len(tds) > 9:
                             m = re.search(r'(\d+\.\d+)', clean_text(tds[9].text))
                             if m: o_val = float(m.group(1))
@@ -174,16 +163,15 @@ def scrape_shutsuba():
                             "age": sex_age[1:] if len(sex_age) > 1 else "",
                             "斤量": kinryo,
                             "騎手": jockey,
+                            "調教師": trainer,
                             "オッズ": o_val,
                             "人気": p_val
                         })
                     except Exception:
                         continue
                 
-                # --- 人気の補完（オッズはあるのに人気が空欄の場合、並べ替えて自作） ---
                 has_missing_pop = any(h["オッズ"] is not None and h["人気"] is None for h in temp_horse_list)
                 if has_missing_pop:
-                    # オッズ昇順に並べて人気を付与
                     valid_odds = [h for h in temp_horse_list if h["オッズ"] is not None]
                     valid_odds.sort(key=lambda x: x["オッズ"])
                     for rank, horse in enumerate(valid_odds, 1):
@@ -196,41 +184,17 @@ def scrape_shutsuba():
                 print(f"  └ 解析エラー: {e}")
 
     finally:
-        # 処理が終わったら確実にブラウザを閉じる
         driver.quit()
 
-    # --- 3. CSVへの保存処理 ---
+    # --- 3. CSVへの純粋な保存処理（余計なマージはしない） ---
     if race_data_list:
         df_future = pd.DataFrame(race_data_list)
         df_future['オッズ'] = pd.to_numeric(df_future['オッズ'], errors='coerce')
         df_future['人気'] = pd.to_numeric(df_future['人気'], errors='coerce').astype('Int64')
-        
-        if os.path.exists(ML_TARGET_CSV):
-            try:
-                df_past = pd.read_csv(ML_TARGET_CSV, low_memory=False, encoding='utf-8-sig')
-            except Exception:
-                df_past = pd.read_csv(ML_TARGET_CSV, low_memory=False, encoding='cp932')
-            
-            if '馬名' in df_past.columns:
-                df_past['馬名_clean'] = df_past['馬名'].apply(clean_horse_name)
-                df_future['馬名_clean'] = df_future['馬名'].apply(clean_horse_name)
-                
-                if 'date' in df_past.columns:
-                    df_past = df_past.sort_values('date')
-                df_past_latest = df_past.drop_duplicates(subset='馬名_clean', keep='last')
-                
-                cols_to_drop = ['race_id', 'date', 'race_name', '枠番', '馬番', '馬名', 'sex_code', 'age', '斤量', '騎手', 'オッズ', '人気', '単勝', '着順']
-                cols_to_keep = [c for c in df_past_latest.columns if c not in cols_to_drop]
-                df_past_latest = df_past_latest[cols_to_keep]
-                
-                df_future = pd.merge(df_future, df_past_latest, on='馬名_clean', how='left')
-                df_future.drop(columns=['馬名_clean'], inplace=True)
-
         df_future.to_csv(FUTURE_CSV, index=False, encoding='utf-8-sig')
-        print(f"\n✅ {len(race_data_list)}頭のデータを保存完了！ ({FUTURE_CSV})")
+        print(f"\n✅ {len(race_data_list)}頭分の純粋な出馬表データを {FUTURE_CSV} に保存完了！")
     else:
         print("\n❌ データが1件も取得できませんでした。")
-
 
 if __name__ == "__main__":
     scrape_shutsuba()
