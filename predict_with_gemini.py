@@ -53,24 +53,19 @@ CACHE_FILE = "app_cache.pkl"
 # ==========================================
 # 📊 馬場・コースバイアス補正設定
 # ==========================================
-# AIが算出した勝率に対し、コースや馬場状態による脚質有利不利を後乗せで掛け算します。
-# ※設定値はご自身で自由に変更・微調整可能です。
 TRACK_BIAS = {
-    # 🌧️ 馬場状態によるベース補正
     "重・不良": {"逃げ": 1.20, "先行": 1.10, "差し": 0.95, "追込": 0.85},
     "稍重": {"逃げ": 1.10, "先行": 1.05, "差し": 1.00, "追込": 0.95},
-    
-    # 📍 競馬場ごとの基本特性補正
-    "中山": {"逃げ": 1.15, "先行": 1.05, "差し": 0.90, "追込": 0.80}, # 小回り・短直線で前有利
-    "函館": {"逃げ": 1.15, "先行": 1.10, "差し": 0.85, "追込": 0.80}, # 小回り洋芝で圧倒的前有利
-    "札幌": {"逃げ": 1.15, "先行": 1.10, "差し": 0.85, "追込": 0.80}, # 緩いコーナーだが前有利
-    "東京": {"逃げ": 0.90, "先行": 0.95, "差し": 1.15, "追込": 1.10}, # 直線が長く差し・追込が届く
-    "新潟": {"逃げ": 0.90, "先行": 0.95, "差し": 1.15, "追込": 1.10}, # 直線日本一、差し有利
-    "阪神": {"逃げ": 0.95, "先行": 1.00, "差し": 1.10, "追込": 1.00}, # 外回りを想定しやや差し有利
-    "京都": {"逃げ": 1.05, "先行": 1.05, "差し": 1.00, "追込": 0.90}, # 下り坂で前が止まりにくい
-    "小倉": {"逃げ": 1.10, "先行": 1.05, "差し": 0.90, "追込": 0.85}, # 平坦小回りで前有利
-    "福島": {"逃げ": 1.15, "先行": 1.05, "差し": 0.90, "追込": 0.80}, # 小回りで前有利
-    "中京": {"逃げ": 1.00, "先行": 1.05, "差し": 1.05, "追込": 0.95}, # 直線に坂がありフラット
+    "中山": {"逃げ": 1.15, "先行": 1.05, "差し": 0.90, "追込": 0.80}, 
+    "函館": {"逃げ": 1.15, "先行": 1.10, "差し": 0.85, "追込": 0.80}, 
+    "札幌": {"逃げ": 1.15, "先行": 1.10, "差し": 0.85, "追込": 0.80}, 
+    "東京": {"逃げ": 0.90, "先行": 0.95, "差し": 1.15, "追込": 1.10}, 
+    "新潟": {"逃げ": 0.90, "先行": 0.95, "差し": 1.15, "追込": 1.10}, 
+    "阪神": {"逃げ": 0.95, "先行": 1.00, "差し": 1.10, "追込": 1.00}, 
+    "京都": {"逃げ": 1.05, "先行": 1.05, "差し": 1.00, "追込": 0.90}, 
+    "小倉": {"逃げ": 1.10, "先行": 1.05, "差し": 0.90, "追込": 0.85}, 
+    "福島": {"逃げ": 1.15, "先行": 1.05, "差し": 0.90, "追込": 0.80}, 
+    "中京": {"逃げ": 1.00, "先行": 1.05, "差し": 1.05, "追込": 0.95}, 
 }
 
 def clean_name(text):
@@ -144,7 +139,7 @@ df_future, future_err = load_future_data()
 app_cache, cache_err = load_cache()
 
 # ==========================================
-# 🧠 推論ロジック & 馬場バイアス処理
+# 🧠 推論ロジック (最強結合＆動的特徴量生成)
 # ==========================================
 def calculate_predictions(race_id_target, cond):
     if df_future.empty or model_data is None or app_cache is None: return None, None, None, None
@@ -154,17 +149,73 @@ def calculate_predictions(race_id_target, cond):
     model = model_data['model']
     features = model_data['features']
 
-    # キャッシュ結合
-    horse_df = pd.DataFrame.from_dict(app_cache.get('horse_dict', {}), orient='index').reset_index()
-    horse_df = horse_df.rename(columns={'index': '馬名_clean'})
-    df = pd.merge(df, horse_df, on='馬名_clean', how='left')
+    # 🚨 全キャッシュ辞書の強制マージ
+    for key, value in app_cache.items():
+        if isinstance(value, dict) and len(value) > 0:
+            first_val = next(iter(value.values()))
+            if isinstance(first_val, dict):
+                temp_df = pd.DataFrame.from_dict(value, orient='index').reset_index()
+                temp_df = temp_df.rename(columns={'index': '馬名_clean'})
+                cols_to_use = temp_df.columns.difference(df.columns).tolist() + ['馬名_clean']
+                df = pd.merge(df, temp_df[cols_to_use], on='馬名_clean', how='left')
 
     df['騎手_win_rate'] = df['騎手_clean'].map(app_cache.get('jockey_win_map', {})).fillna(0.05)
     df['trainer_win_rate'] = df['調教師_clean'].map(app_cache.get('trainer_win_map', {})).fillna(0.05)
 
+    # 🚨 動的特徴量の計算
+    if 'last_date' in df.columns:
+        last_dates = pd.to_datetime(df['last_date'], errors='coerce', utc=True).dt.tz_convert(None)
+        curr_dates = pd.Series([pd.Timestamp.now()] * len(df), index=df.index)
+        df['interval_days'] = (curr_dates - last_dates).dt.days.fillna(30)
+    else:
+        df['interval_days'] = 30
+
+    if 'prev_1c' in df.columns:
+        df['prev_1c'] = pd.to_numeric(df['prev_1c'], errors='coerce').fillna(10.0)
+        df['race_expected_pace'] = df.groupby('race_id')['prev_1c'].transform('mean').fillna(10.0)
+        df['pace_advantage'] = df['prev_1c'] - df['race_expected_pace']
+    else:
+        df['race_expected_pace'] = 10.0
+        df['pace_advantage'] = 0.0
+
+    if '斤量' in df.columns:
+        df['kinryo_num'] = pd.to_numeric(df['斤量'], errors='coerce').fillna(55.0)
+    else:
+        df['kinryo_num'] = 55.0
+
+    for idx_type in ['pace_idx', 'last3f_idx', 'start_idx']:
+        cols = [f'prev{i}_{idx_type}' for i in range(1, 6)]
+        valid_cols = [c for c in cols if c in df.columns]
+        if valid_cols:
+            df[f'max_{idx_type}'] = df[valid_cols].astype(float).max(axis=1).fillna(0.0)
+            if f'prev1_{idx_type}' in df.columns:
+                df[f'ratio_to_max_{idx_type}'] = pd.to_numeric(df[f'prev1_{idx_type}'], errors='coerce') / df[f'max_{idx_type}'].replace(0, 1.0)
+                df[f'ratio_to_max_{idx_type}'] = df[f'ratio_to_max_{idx_type}'].fillna(0.0)
+        else:
+            df[f'max_{idx_type}'] = 0.0
+            df[f'ratio_to_max_{idx_type}'] = 0.0
+
+    base_cols = []
+    for f in features:
+        if f.endswith('_race_diff'): base_cols.append(f.replace('_race_diff', ''))
+        elif f.endswith('_race_zscore'): base_cols.append(f.replace('_race_zscore', ''))
+        elif f.endswith('_race_rank'): base_cols.append(f.replace('_race_rank', ''))
+        elif f.endswith('_race_ratio'): base_cols.append(f.replace('_race_ratio', ''))
+    
+    base_cols = list(set(base_cols))
+    for b in base_cols:
+        if b not in df.columns: df[b] = 0.0
+        else: df[b] = pd.to_numeric(df[b], errors='coerce').fillna(0.0)
+        mean_val = df.groupby('race_id')[b].transform('mean')
+        std_val = df.groupby('race_id')[b].transform('std').replace(0, 1.0)
+        df[f'{b}_race_diff'] = df[b] - mean_val
+        df[f'{b}_race_zscore'] = (df[b] - mean_val) / std_val
+        df[f'{b}_race_rank'] = df.groupby('race_id')[b].rank(ascending=False, method='min')
+        df[f'{b}_race_ratio'] = df[b] / mean_val.replace(0, 1.0)
+
     X_future = pd.DataFrame(index=df.index)
     for f in features:
-        X_future[f] = pd.to_numeric(df[f], errors='coerce') if f in df.columns else np.nan
+        X_future[f] = pd.to_numeric(df[f], errors='coerce') if f in df.columns else 0.0
 
     df['raw_score'] = model.predict(X_future)
 
@@ -178,21 +229,24 @@ def calculate_predictions(race_id_target, cond):
     else:
         df['win_prob'] = 0.10
 
-    # 脚質の判定
+    # 🐎 脚質の判定 (修正: データが存在する場合のみ正確にランク付け)
     total_horses = len(df)
     if total_horses > 0 and 'ema3_start_idx' in df.columns:
+        df['ema3_start_idx'] = pd.to_numeric(df['ema3_start_idx'], errors='coerce')
         df['start_rank'] = df['ema3_start_idx'].rank(ascending=False, method='min', na_option='bottom')
         def det_style(row):
+            if pd.isna(row.get('ema3_start_idx')) or row.get('ema3_start_idx') == 0:
+                return "-"
             pct = row['start_rank'] / total_horses
-            if pct <= 0.15: return "逃げ"
-            elif pct <= 0.40: return "先行"
+            if pct <= 0.20: return "逃げ"
+            elif pct <= 0.45: return "先行"
             elif pct <= 0.75: return "差し"
             else: return "追込"
         df['脚質'] = df.apply(det_style, axis=1)
     else:
         df['脚質'] = "-"
 
-    # 🐎 馬場・コースバイアスによる勝率補正
+    # 馬場・コースバイアス補正
     df['bias_coef'] = 1.0
     place_name = str(df['place_name'].iloc[0])
 
@@ -204,13 +258,10 @@ def calculate_predictions(race_id_target, cond):
     if place_name in TRACK_BIAS:
         df['bias_coef'] *= df['脚質'].map(TRACK_BIAS[place_name]).fillna(1.0)
 
-    # バイアスを反映して再正規化（合計1.0）
     df['win_prob'] = df['win_prob'] * df['bias_coef']
     sum_prob = df['win_prob'].sum()
-    if sum_prob > 0:
-        df['win_prob'] = df['win_prob'] / sum_prob
+    if sum_prob > 0: df['win_prob'] = df['win_prob'] / sum_prob
 
-    # AIスコアの算出（バイアス込み）
     min_p, max_p = df['win_prob'].min(), df['win_prob'].max()
     if max_p > min_p:
         df['ai_score'] = (50 + (df['win_prob'] - min_p) / (max_p - min_p) * 100).round().astype(int)
@@ -221,16 +272,17 @@ def calculate_predictions(race_id_target, cond):
     
     marks = ["◎", "◯", "▲", "△", "☆1", "☆2"]
     df['印'] = "消"
-    for i in range(min(len(df), len(marks))):
-        df.loc[i, '印'] = marks[i]
+    for i in range(min(len(df), len(marks))): df.loc[i, '印'] = marks[i]
 
     probs = df['win_prob'].values
-    p1, p2, p3 = probs[0] if len(probs)>0 else 0, probs[1] if len(probs)>1 else 0, probs[2] if len(probs)>2 else 0
+    p1 = probs[0] if len(probs)>0 else 0
+    p2 = probs[1] if len(probs)>1 else 0
+    p3 = probs[2] if len(probs)>2 else 0
     p4 = probs[3] if len(probs)>3 else 0.05
+    
     gap_1_2 = p1 - p2
     gap_1_3 = p1 - p3
 
-    # 買い目判定
     if gap_1_2 >= 0.07:
         pat = "① 1強気配 (軸圧倒)"
         rec_ticket = "3連単 1着固定 (6点)"
@@ -242,11 +294,11 @@ def calculate_predictions(race_id_target, cond):
     elif (p1 - p4) < 0.08:
         pat = "④ 波乱気配 (大混戦)"
         rec_ticket = "3連複 5頭BOX (10点)"
-        buy_detail = "BOX: " + ", ".join([f"{df.loc[k, '馬番']}" for k in range(min(5, len(df)))])
+        buy_detail = "BOX: " + ", ".join([str(df.loc[k, '馬番']) for k in range(min(5, len(df)))])
     else:
         pat = "③ 混戦気配 (標準展開)"
         rec_ticket = "3連複 ◎1頭軸流し (10点)"
-        buy_detail = f"軸: {df.loc[0, '馬番']}(◎) -> 相手: " + ", ".join([f"{df.loc[k, '馬番']}" for k in range(1, min(6, len(df)))])
+        buy_detail = f"軸: {df.loc[0, '馬番']}(◎) -> 相手: " + ", ".join([str(df.loc[k, '馬番']) for k in range(1, min(6, len(df)))])
 
     return df, pat, rec_ticket, buy_detail
 
@@ -333,7 +385,7 @@ with st.expander("👑 今日のWIN5をAIに一発予想させる（Python × Ge
                 以下のデータは、本日の各競馬場のメインレース付近のAI予測スコアです。
                 
                 【最重要ミッション：対象レースの特定】
-                まずは必ず「JRA {sel_date} WIN5 対象レース」でGoogle検索を行い、本日の【公式のWIN5対象の5レース】を正確に特定してください。（勝手に推測して選ぶのは厳禁です）
+                まずは必ず「JRA {sel_date} WIN5 対象レース」でGoogle検索を行い、本日の【公式のWIN5対象の5レース】を正確に特定してください。
                 
                 【予想ミッション】
                 1. 検索で特定した【本物の対象5レース】についてのみ、以下のダブル推奨形式で予想を展開してください。
@@ -358,7 +410,6 @@ with st.expander("👑 今日のWIN5をAIに一発予想させる（Python × Ge
                             tools=[{"googleSearch": {}}]
                         )
                     )
-                    
                     st.markdown(f"<div class='gemini-win5-box'>{response.text}</div>", unsafe_allow_html=True)
                 except Exception as e:
                     st.error(f"エラーが発生しました: {e}")
