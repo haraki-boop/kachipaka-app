@@ -29,6 +29,7 @@ def run_script(script_name, step_name):
 def step_git_push():
     print_header("☁️ 最終ステップ: GitHubへの自動コミット＆Push")
     
+    # 修正: UI表示に必要な future_races.csv をPush対象に戻しています
     files_to_add = ["future_races.csv", "keiba_ai_model.pkl", "app_cache.pkl", "prediction_history.csv"]
     existing_files = [f for f in files_to_add if os.path.exists(f)]
 
@@ -57,7 +58,7 @@ def main():
 
     steps = [
         ("scrape_results.py", "STEP 1: 確定レース結果の取得・最新日付に更新"),
-        ("create_features.py", "STEP 2: 蓄積データの更新 (ml_target_data_v2.csv 生成)"),
+        ("create_rich_features.py", "STEP 2: 蓄積データの更新 (ml_target_data_v2.csv 生成)"),
         ("train_lightgbm.py", "STEP 3: AIモデルの再学習 (脳みそ更新)"),
         ("create_cache.py", "STEP 4: 推論用辞書の作成 (app_cache.pkl 生成)"),
         ("scrape_shutsuba.py", "STEP 5: 最新出馬表データの取得 (future_races.csv 生成)"),
