@@ -13,12 +13,12 @@ FUTURE_CSV = "future_races.csv"
 def get_target_dates():
     today = datetime.now()
     dates = []
-    # 本日を起点とし、直近の土日を動的に取得する
-    for i in range(7):
+    # 土日・祝日の変則開催を取りこぼさないよう、本日から直近8日間をすべてリストアップ
+    # （レースが開催されていない日は、後続の処理で自動的にスキップされます）
+    for i in range(8):
         d = today + timedelta(days=i)
-        if d.weekday() in [5, 6]:
-            dates.append(d.strftime("%Y%m%d"))
-    return sorted(list(set(dates)))[:2]
+        dates.append(d.strftime("%Y%m%d"))
+    return sorted(list(set(dates)))
 
 def clean_text(text):
     if not text: return ""
@@ -48,7 +48,7 @@ def setup_driver():
 
 def scrape_shutsuba():
     target_dates = get_target_dates()
-    print(f"🏇 取得対象日: {target_dates}")
+    print(f"🏇 取得対象日（候補）: {target_dates}")
     all_race_ids = []
     id_to_date = {}
 
@@ -80,7 +80,7 @@ def scrape_shutsuba():
                     pass
 
         if not all_race_ids:
-            print("❌ 対象日のレースIDが見つかりませんでした。")
+            print("❌ 対象期間内にレースIDが見つかりませんでした。")
             return
 
         all_race_ids.sort()
