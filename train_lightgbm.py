@@ -25,12 +25,15 @@ class EnsembleModel:
         for col in X_num.columns:
             X_num[col] = pd.to_numeric(X_num[col], errors='coerce').fillna(0)
 
+        # LightGBM Prediction
         lgb_pred = self.lgb_model.predict(X_num)
         lgb_pred = (lgb_pred - np.mean(lgb_pred)) / (np.std(lgb_pred) + 1e-8)
 
+        # XGBoost Prediction
         xgb_pred = self.xgb_model.predict(xgb.DMatrix(X_num))
         xgb_pred = (xgb_pred - np.mean(xgb_pred)) / (np.std(xgb_pred) + 1e-8)
 
+        # CatBoost Prediction
         cat_pred = self.cat_model.predict(X_num)
         cat_pred = (cat_pred - np.mean(cat_pred)) / (np.std(cat_pred) + 1e-8)
 
@@ -39,11 +42,11 @@ class EnsembleModel:
 
 def main():
     if not os.path.exists(INPUT_CSV):
-        print(f"Error: {INPUT_CSV} not found.")
+        print(f"❌ エラー: {INPUT_CSV} が見つかりません。")
         return
 
     print(f"📊 限界突破データ ({INPUT_CSV}) をロード中...")
-    df = pd.read_csv(INPUT_CSV, low_memory=False, encoding='utf-8-sig')
+    df = pd.read_csv(INPUT_CSV, low_memory=False)
 
     df['rank_num_target'] = pd.to_numeric(df['rank_num'] if 'rank_num' in df.columns else df['着順'], errors='coerce')
     df = df.dropna(subset=['rank_num_target', 'race_id']).copy()
@@ -55,19 +58,21 @@ def main():
         return 0
     df['relevance'] = df['rank_num_target'].apply(calc_relevance)
 
-    df['date_parsed'] = pd.to_datetime(df['date'], errors='coerce')
+    df['date_parsed'] = pd.to_datetime(df['date'] if 'date' in df.columns else df.get('date_parsed'), errors='coerce')
     df = df.dropna(subset=['date_parsed']).sort_values('date_parsed').reset_index(drop=True)
     df['date_norm'] = df['date_parsed'].dt.strftime('%Y%m%d')
 
-    # 💡 二重化安全対策: 当日生データおよび管理用カラムを入力特徴量（X）から除外
+    # 💡 二重化安全対策: 当日の結果や文字データを完全排除
     exclude_cols = {
         'race_id', '馬番', '馬名', '馬名_clean', 'date', 'date_parsed', 'date_norm', '着順', 'rank_num',
         'rank_num_target', 'relevance', 'target_win', 'target_place', 'group_id', 'place_name',
         '騎手', 'trainer', '調教師', '脚質', 'surface', 'condition', 'place_code_str', 'race_id_str',
-        'time_idx', 'time_idx_m', 'start_idx', 'pace_idx', 'last3f_idx', 'prize',
-        '単勝', '人気', '馬体重', 'weight', 'weight_change', 'タイム', '着差', '通過', '上り'
+        'time_idx', 'time_idx_m', 'start_idx', 'pace_idx', 'last3f_idx', 'prize', 'dist_category',
+        '単勝', '単勝オッズ', '人気', '馬体重', 'weight', 'weight_change', 'タイム', '着差', '通過', '上り',
+        '調教タイム', '調教短評', '厩舎コメント', '調教評価'
     }
 
+    # 数値データのみを抽出
     candidate_features = [
         col for col in df.columns 
         if col not in exclude_cols and pd.api.types.is_numeric_dtype(df[col])
@@ -76,6 +81,7 @@ def main():
     print(f"🚀 学習対象の特徴量: {len(candidate_features)} 次元")
     print("⏳ 時系列分割 (Time Series Split) を準備中...")
 
+    # メモリ節約と速度向上のため、Optunaの検証は直近2回の分割のみ使用（学習は全データを使用）
     unique_dates = df['date_norm'].unique()
     tscv = TimeSeriesSplit(n_splits=3)
     
@@ -95,14 +101,16 @@ def main():
             'X_v': df_v, 'y_v': df_v['relevance'], 'g_v': df_v.groupby('race_id', sort=False).size().values
         })
     
-    print("\n🤖 Optuna: 枝刈りフル稼働 ＆ 300回ガチノック開始...")
+    print("\n🤖 Optuna: 特徴量選択＆枝刈りフル稼働 (30回ガチノック開始)...")
     
     def objective(trial):
+        # 685列から使う列をAIに選ばせる（特徴量選択）
         selected_cols = [
             col for col in candidate_features
             if trial.suggest_categorical(f"use_{col}", [True, False])
         ]
-        if len(selected_cols) == 0:
+        # 列が少なすぎたら即時打ち切り
+        if len(selected_cols) < 50:
             raise optuna.TrialPruned()
 
         params = {
@@ -110,12 +118,12 @@ def main():
             'metric': 'ndcg',
             'eval_at': [3, 5],
             'boosting_type': 'gbdt',
-            'learning_rate': 0.05,
-            'num_leaves': trial.suggest_int('num_leaves', 31, 255),
-            'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 20, 200),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
+            'num_leaves': trial.suggest_int('num_leaves', 31, 127),
+            'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 20, 100),
             'feature_fraction': trial.suggest_float('feature_fraction', 0.6, 1.0),
-            'bagging_fraction': trial.suggest_float('bagging_fraction', 0.6, 1.0),
-            'bagging_freq': trial.suggest_int('bagging_freq', 1, 5),
+            'lambda_l1': trial.suggest_float('lambda_l1', 1e-8, 10.0, log=True),
+            'lambda_l2': trial.suggest_float('lambda_l2', 1e-8, 10.0, log=True),
             'num_threads': 4,
             'verbose': -1,
             'seed': 42
@@ -124,21 +132,20 @@ def main():
         cv_ndcg3 = []
         cv_ndcg5 = []
         
-        for fold, fold_data in enumerate(folds_data):
+        # 最後の2つのFold（直近のレース）だけを使ってスコアを検証
+        for fold, fold_data in enumerate(folds_data[-2:]):
             train_data = lgb.Dataset(fold_data['X_t'][selected_cols], label=fold_data['y_t'], group=fold_data['g_t'])
             valid_data = lgb.Dataset(fold_data['X_v'][selected_cols], label=fold_data['y_v'], group=fold_data['g_v'], reference=train_data)
             
             model = lgb.train(
                 params, train_data, valid_sets=[valid_data],
-                num_boost_round=400, callbacks=[lgb.early_stopping(stopping_rounds=25, verbose=False)]
+                num_boost_round=300, callbacks=[lgb.early_stopping(stopping_rounds=20, verbose=False)]
             )
             
-            score_3 = model.best_score['valid_0']['ndcg@3']
-            score_5 = model.best_score['valid_0']['ndcg@5']
-            cv_ndcg3.append(score_3)
-            cv_ndcg5.append(score_5)
+            cv_ndcg3.append(model.best_score['valid_0']['ndcg@3'])
+            cv_ndcg5.append(model.best_score['valid_0']['ndcg@5'])
             
-            trial.report(score_5, fold)
+            trial.report(cv_ndcg5[-1], fold)
             if trial.should_prune():
                 raise optuna.TrialPruned()
 
@@ -146,32 +153,30 @@ def main():
         return np.mean(cv_ndcg5)
 
     def print_progress(study, trial):
-        total_trials = 300
+        total_trials = 30
         if trial.state == optuna.trial.TrialState.COMPLETE:
-            print(f"🥊 [ノック {trial.number + 1:3d}/{total_trials}] 完了 | NDCG@5: {trial.value:.4f} | 👑 暫定トップ: {study.best_value:.4f}")
+            print(f"🥊 [ノック {trial.number + 1:2d}/{total_trials}] 完了 | NDCG@5: {trial.value:.4f} | 👑 暫定トップ: {study.best_value:.4f}")
         elif trial.state == optuna.trial.TrialState.PRUNED:
-            print(f"✂️  [ノック {trial.number + 1:3d}/{total_trials}] 枝刈り (見込みなしでスキップ)")
+            print(f"✂️  [ノック {trial.number + 1:2d}/{total_trials}] 枝刈り (見込みなしでスキップ)")
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(direction='maximize', pruner=optuna.pruners.MedianPruner(n_warmup_steps=10))
+    study = optuna.create_study(direction='maximize', pruner=optuna.pruners.MedianPruner(n_warmup_steps=5))
     
-    study.optimize(objective, n_trials=300, callbacks=[print_progress])
+    # 💡 試行回数: メモリと相談しつつ、まずは30回でテスト。余裕があれば増やせます。
+    study.optimize(objective, n_trials=100, callbacks=[print_progress])
     
     best_trial = study.best_trial
     selected_features = [col for col in candidate_features if best_trial.params.get(f"use_{col}", True)]
     
-    best_ndcg5 = study.best_value
-    best_ndcg3 = best_trial.user_attrs.get("ndcg@3", 0.0)
-    
     print(f"\n==================================================")
-    print(f"✨ Optuna 300回ノック完了！ 最良検証スコア")
-    print(f"   🏆 NDCG@3 (3着以内予測精度) : {best_ndcg3:.4f}")
-    print(f"   🏆 NDCG@5 (5着以内予測精度) : {best_ndcg5:.4f}")
+    print(f"✨ Optuna 30回ノック完了！ 最良検証スコア")
+    print(f"   🏆 NDCG@3 (3着以内予測精度) : {best_trial.user_attrs.get('ndcg@3', 0.0):.4f}")
+    print(f"   🏆 NDCG@5 (5着以内予測精度) : {study.best_value:.4f}")
     print(f"🧠 選抜された特徴量: {len(selected_features)}/{len(candidate_features)}個")
     print(f"==================================================")
     
     best_params = {k: v for k, v in best_trial.params.items() if not k.startswith("use_")}
-    best_params.update({'objective': 'lambdarank', 'metric': 'ndcg', 'eval_at': [3, 5], 'learning_rate': 0.05, 'num_threads': 4, 'verbose': -1, 'seed': 42})
+    best_params.update({'objective': 'lambdarank', 'metric': 'ndcg', 'eval_at': [3, 5], 'num_threads': 4, 'verbose': -1, 'seed': 42})
     
     df_full = df.sort_values(['race_id', '馬番'])
     X_full_selected = df_full[selected_features].copy()
@@ -186,13 +191,13 @@ def main():
     print(" 2/3: XGBoost 本学習...")
     dtrain_xgb = xgb.DMatrix(X_full_selected, label=y_full)
     dtrain_xgb.set_group(groups_full)
-    xgb_params = {'objective': 'rank:ndcg', 'eval_metric': 'ndcg@5', 'eta': 0.05, 'max_depth': 6, 'subsample': 0.8, 'nthread': 4, 'seed': 42}
+    xgb_params = {'objective': 'rank:ndcg', 'eval_metric': 'ndcg@5', 'eta': best_params.get('learning_rate', 0.05), 'max_depth': 6, 'subsample': 0.8, 'nthread': 4, 'seed': 42}
     xgb_model = xgb.train(xgb_params, dtrain_xgb, num_boost_round=250)
     
     print(" 3/3: CatBoost 本学習...")
     df_full['group_id'] = df_full.groupby('race_id', sort=False).ngroup()
     cat_pool = Pool(X_full_selected, label=y_full, group_id=df_full['group_id'])
-    cat_params = {'loss_function': 'YetiRank', 'iterations': 300, 'learning_rate': 0.05, 'depth': 6, 'thread_count': 4, 'verbose': 0, 'random_seed': 42}
+    cat_params = {'loss_function': 'YetiRank', 'iterations': 300, 'learning_rate': best_params.get('learning_rate', 0.05), 'depth': 6, 'thread_count': 4, 'verbose': 0, 'random_seed': 42}
     cat_model = CatBoost(cat_params)
     cat_model.fit(cat_pool)
 

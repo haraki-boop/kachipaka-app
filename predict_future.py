@@ -36,6 +36,7 @@ class EnsembleModel:
         w1, w2, w3 = self.weights
         return w1 * lgb_pred + w2 * xgb_pred + w3 * cat_pred
 
+# Pickleからロードする際にEnsembleModelクラスが見つからないエラーを防ぐおまじない
 import __main__
 __main__.EnsembleModel = EnsembleModel
 
@@ -61,7 +62,7 @@ def main():
         print("❌ 対象となる未来のレースデータが存在しません。")
         return
 
-    print("⚡ 出馬表に過去の成績・指数キャッシュを高速結合中 (フルスペック201特徴量)...")
+    print(f"⚡ 出馬表に過去の成績・指数キャッシュを高速結合中 (フルスペック {len(features)} 特徴量)...")
     df = df_raw.copy()
     
     # 1. 基本データ正規化
@@ -74,13 +75,29 @@ def main():
               '06':'中山','07':'中京','08':'京都','09':'阪神','10':'小倉'}
     df['place_name'] = df['race_id'].astype(str).str[4:6].map(places).fillna('不明')
     
+    df['surface'] = df.get('surface', pd.Series(index=df.index)).fillna('不明')
     if 'distance' in df.columns:
         df['distance'] = pd.to_numeric(df['distance'], errors='coerce').fillna(1600.0)
     else:
         df['distance'] = 1600.0
+    df['dist_category'] = pd.cut(df['distance'], bins=[0, 1300, 1700, 2100, 4000], labels=['短距離', 'マイル', '中距離', '長距離']).astype(str)
         
     df['is_right_turn'] = df['place_name'].isin(['中山', '阪神', '京都', '小倉', '福島', '札幌', '函館']).astype(int)
     df['is_steep_hill'] = df['place_name'].isin(['中山', '阪神']).astype(int)
+
+    if '馬体重' in df.columns:
+        weight_extract = df['馬体重'].astype(str).str.extract(r'(\d+)\s*\(([-+]?\d+)\)')
+        df['weight'] = pd.to_numeric(weight_extract[0], errors='coerce').fillna(470.0)
+        df['weight_change'] = pd.to_numeric(weight_extract[1], errors='coerce').fillna(0.0)
+    else:
+        df['weight'], df['weight_change'] = 470.0, 0.0
+
+    if '斤量' in df.columns:
+        df['斤量'] = pd.to_numeric(df['斤量'], errors='coerce').fillna(55.0)
+    else:
+        df['斤量'] = 55.0
+        
+    df['kinryo_weight_ratio'] = (df['斤量'] / df['weight'].replace(0, np.nan)).fillna(0.0)
 
     # 2. キャッシュ全辞書の完全結合
     for key, value in cache.items():
@@ -93,55 +110,59 @@ def main():
                 cols_to_use = temp_df.columns.difference(df.columns).tolist() + ['馬名_clean']
                 df = pd.merge(df, temp_df[cols_to_use], on='馬名_clean', how='left')
 
-    # 3. 騎手・調教師エンコーディング
-    df['騎手_win_rate'] = df['騎手_clean'].map(cache.get('jockey_win_map', {})).fillna(0.05)
-    df['騎手_place_rate'] = df['騎手_clean'].map(cache.get('jockey_place_map', {})).fillna(0.15)
+    # 3. カテゴリ・ターゲットエンコーディングの復元 (フルコンボ対応)
+    df['jockey_win_rate'] = df['騎手_clean'].map(cache.get('jockey_win_map', {})).fillna(0.05)
+    df['jockey_place_rate'] = df['騎手_clean'].map(cache.get('jockey_place_map', {})).fillna(0.15)
     df['trainer_win_rate'] = df['調教師_clean'].map(cache.get('trainer_win_map', {})).fillna(0.05)
     df['trainer_place_rate'] = df['調教師_clean'].map(cache.get('trainer_place_map', {})).fillna(0.15)
 
     df['jp_key'] = df['騎手_clean'] + "_" + df['place_name']
-    jp_win_flat = {f"{k[0]}_{k[1]}": v for k, v in cache.get('jp_win_map', {}).items()}
-    jp_place_flat = {f"{k[0]}_{k[1]}": v for k, v in cache.get('jp_place_map', {}).items()}
-    df['jockey_place_win_rate'] = df['jp_key'].map(jp_win_flat).fillna(0.05)
-    df['jockey_place_place_rate'] = df['jp_key'].map(jp_place_flat).fillna(0.15)
+    df['jockey_place_win_rate'] = df['jp_key'].map({f"{k[0]}_{k[1]}": v for k, v in cache.get('jp_win_map', {}).items()}).fillna(0.05)
+    df['jockey_place_place_rate'] = df['jp_key'].map({f"{k[0]}_{k[1]}": v for k, v in cache.get('jp_place_map', {}).items()}).fillna(0.15)
 
     df['tp_key'] = df['調教師_clean'] + "_" + df['place_name']
-    tp_win_flat = {f"{k[0]}_{k[1]}": v for k, v in cache.get('tp_win_map', {}).items()}
-    df['trainer_place_win_rate'] = df['tp_key'].map(tp_win_flat).fillna(0.05)
+    df['trainer_place_win_rate'] = df['tp_key'].map({f"{k[0]}_{k[1]}": v for k, v in cache.get('tp_win_map', {}).items()}).fillna(0.05)
+
+    df['js_key'] = df['騎手_clean'] + "_" + df['surface']
+    df['jockey_surface_win_rate'] = df['js_key'].map({f"{k[0]}_{k[1]}": v for k, v in cache.get('js_win_map', {}).items()}).fillna(0.05)
+    df['jockey_surface_place_rate'] = df['js_key'].map({f"{k[0]}_{k[1]}": v for k, v in cache.get('js_place_map', {}).items()}).fillna(0.15)
+
+    df['jd_key'] = df['騎手_clean'] + "_" + df['dist_category']
+    df['jockey_dist_win_rate'] = df['jd_key'].map({f"{k[0]}_{k[1]}": v for k, v in cache.get('jd_win_map', {}).items()}).fillna(0.05)
+    
+    df['jt_key'] = df['騎手_clean'] + "_" + df['調教師_clean']
+    df['jockey_trainer_combo_win_rate'] = df['jt_key'].map({f"{k[0]}_{k[1]}": v for k, v in cache.get('jt_win_map', {}).items()}).fillna(0.05)
 
     # 4. 動的特徴量
     if 'last_date' in df.columns:
         last_dates = pd.to_datetime(df['last_date'], errors='coerce', utc=True).dt.tz_convert(None)
         curr_dates = pd.Series([pd.Timestamp.now()] * len(df), index=df.index)
         df['interval_days'] = (curr_dates - last_dates).dt.days.fillna(30)
+        df['is_long_rest'] = (df['interval_days'] > 180).astype(int)
     else:
         df['interval_days'] = 30
+        df['is_long_rest'] = 0
+        
+    if '調子偏差値' in df.columns and 'prev1_調子偏差値' in df.columns:
+        df['is_dev_up_after_rest'] = ((df['is_long_rest'] == 1) & (df['調子偏差値'] > df['prev1_調子偏差値'])).astype(int)
+    else:
+        df['is_dev_up_after_rest'] = 0
 
-    if 'prev_1c' in df.columns:
-        df['prev_1c'] = pd.to_numeric(df['prev_1c'], errors='coerce').fillna(10.0)
-        df['race_expected_pace'] = df.groupby('race_id')['prev_1c'].transform('mean').fillna(10.0)
-        df['pace_advantage'] = df['prev_1c'] - df['race_expected_pace']
+    if 'prev1_通過' in df.columns:
+        df['prev1_通過'] = pd.to_numeric(df['prev1_通過'], errors='coerce').fillna(10.0)
+        df['race_expected_pace'] = df.groupby('race_id')['prev1_通過'].transform(lambda x: x.nsmallest(3).mean()).fillna(10.0)
     else:
         df['race_expected_pace'] = 10.0
-        df['pace_advantage'] = 0.0
-
-    if '斤量' in df.columns:
-        df['kinryo_num'] = pd.to_numeric(df['斤量'], errors='coerce').fillna(55.0)
+        
+    if '脚質' in df.columns:
+        df['temp_is_nige'] = (df['脚質'] == '逃').astype(int)
+        df['race_nige_count'] = df.groupby('race_id')['temp_is_nige'].transform('sum')
+        df['pace_high_advantage'] = ((df['race_nige_count'] >= 3) & (df['脚質'].isin(['差', '追']))).astype(int)
     else:
-        df['kinryo_num'] = 55.0
+        df['race_nige_count'] = 0
+        df['pace_high_advantage'] = 0
 
-    for idx_type in ['pace_idx', 'last3f_idx', 'start_idx']:
-        cols = [f'prev{i}_{idx_type}' for i in range(1, 6)]
-        valid_cols = [c for c in cols if c in df.columns]
-        if valid_cols:
-            df[f'max_{idx_type}'] = df[valid_cols].astype(float).max(axis=1).fillna(0.0)
-            if f'prev1_{idx_type}' in df.columns:
-                df[f'ratio_to_max_{idx_type}'] = pd.to_numeric(df[f'prev1_{idx_type}'], errors='coerce') / df[f'max_{idx_type}'].replace(0, 1.0)
-                df[f'ratio_to_max_{idx_type}'] = df[f'ratio_to_max_{idx_type}'].fillna(0.0)
-        else:
-            df[f'max_{idx_type}'] = 0.0
-            df[f'ratio_to_max_{idx_type}'] = 0.0
-
+    # 4次元相対評価の復元
     base_cols = []
     for f in features:
         if f.endswith('_race_diff'): base_cols.append(f.replace('_race_diff', ''))
@@ -155,10 +176,12 @@ def main():
         else: df[b] = pd.to_numeric(df[b], errors='coerce').fillna(0.0)
         mean_val = df.groupby('race_id')[b].transform('mean')
         std_val = df.groupby('race_id')[b].transform('std').replace(0, 1.0)
+        c_max = df.groupby('race_id')[b].transform('max').replace(0, 1.0)
+        
         df[f'{b}_race_diff'] = df[b] - mean_val
         df[f'{b}_race_zscore'] = (df[b] - mean_val) / std_val
         df[f'{b}_race_rank'] = df.groupby('race_id')[b].rank(ascending=False, method='min')
-        df[f'{b}_race_ratio'] = df[b] / mean_val.replace(0, 1.0)
+        df[f'{b}_race_ratio'] = df[b] / c_max
 
     # 🔍 特徴量接続ログ
     print("\n🔍 AIモデル入力用特徴量の接続状態チェック:")
@@ -176,9 +199,7 @@ def main():
     print(f"  ・全欠損: {all_null_features} / {len(features)} 項目")
 
     if all_null_features > 0:
-        print("❌ 全欠損している特徴量が存在します。確認してください。")
-    else:
-        print("🎉【特徴量結合完了】全欠損ゼロで完璧にデータが接続されました！")
+        print(f"⚠️️ {all_null_features}個の列が不足していますが、ゼロ埋めで推論を強行します。")
 
     # 5. モデル推論
     X_future = pd.DataFrame(index=df.index)
@@ -188,7 +209,7 @@ def main():
     print("\n🤖 勝ちパカくんの最強頭脳が未来のレースを推論中...")
     df['raw_score'] = model.predict(X_future)
 
-    # 6. 一括計算 & 構造化（安全な1回ループ設計）
+    # 6. 一括計算 & 構造化
     pred_dict = {}
     history_records = []
 
@@ -215,12 +236,12 @@ def main():
         # 脚質判定
         temp_val = None
         ascending = True
-        if 'prev_1c' in group.columns and pd.to_numeric(group['prev_1c'], errors='coerce').nunique() > 1:
-            temp_val = pd.to_numeric(group['prev_1c'], errors='coerce')
+        if 'prev1_通過' in group.columns and pd.to_numeric(group['prev1_通過'], errors='coerce').nunique() > 1:
+            temp_val = pd.to_numeric(group['prev1_通過'], errors='coerce')
             ascending = True
-        elif 'ema5_start_idx' in group.columns and pd.to_numeric(group['ema5_start_idx'], errors='coerce').nunique() > 1:
-            temp_val = pd.to_numeric(group['ema5_start_idx'], errors='coerce')
-            ascending = False
+        elif 'ema5_通過' in group.columns and pd.to_numeric(group['ema5_通過'], errors='coerce').nunique() > 1:
+            temp_val = pd.to_numeric(group['ema5_通過'], errors='coerce')
+            ascending = True
 
         if temp_val is not None:
             rank = temp_val.rank(ascending=ascending, method='min')
@@ -235,7 +256,7 @@ def main():
             elif pct <= 0.50: styles.append("先行")
             elif pct <= 0.75: styles.append("差し")
             else: styles.append("追込")
-        group['脚質'] = styles
+        group['推測脚質'] = styles
 
         # ソートして印を割り当て
         group = group.sort_values(by=['win_prob'], ascending=False).reset_index(drop=True)
@@ -275,7 +296,7 @@ def main():
                 '馬番': row.get('馬番'),
                 'win_prob': row.get('win_prob'),
                 'ai_score': row.get('ai_score'),
-                '脚質': row.get('脚質'),
+                '推測脚質': row.get('推測脚質'),
                 '印': row.get('印')
             }
 
