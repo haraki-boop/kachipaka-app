@@ -71,6 +71,14 @@ def main():
     df['騎手_clean'] = df['騎手'].astype(str).apply(clean_name)
     df['調教師_clean'] = df['調教師'].astype(str).str.replace(r'\[.*?\]\n', '', regex=True).apply(clean_name)
     
+    # ここに1行追加して、馬番を文字列型に強制変換します
+    df['馬番'] = df['馬番'].astype(str)
+    
+    # 💡 木曜日対策: 馬番がNaNの場合、一時的に仮の馬番（90番台）を割り当てる
+    for i, row in df.iterrows():
+        if pd.isna(row['馬番']) or str(row['馬番']).strip() in ["", "nan", "NaN"]:
+            df.at[i, '馬番'] = str(90 + i)
+            
     places = {'01':'札幌','02':'函館','03':'福島','04':'新潟','05':'東京',
               '06':'中山','07':'中京','08':'京都','09':'阪神','10':'小倉'}
     df['place_name'] = df['race_id'].astype(str).str[4:6].map(places).fillna('不明')
@@ -99,6 +107,12 @@ def main():
         
     df['kinryo_weight_ratio'] = (df['斤量'] / df['weight'].replace(0, np.nan)).fillna(0.0)
 
+    # 💡 取得できないテキスト系特徴量はゼロ（ニュートラル）で安全に埋める
+    nlp_cols = ['comment_pos', 'comment_neg', 'comment_score', 'train_eval_num']
+    for c in nlp_cols:
+        if c not in df.columns:
+            df[c] = 0.0
+
     # 2. キャッシュ全辞書の完全結合
     for key, value in cache.items():
         if key == 'predictions': continue
@@ -110,7 +124,7 @@ def main():
                 cols_to_use = temp_df.columns.difference(df.columns).tolist() + ['馬名_clean']
                 df = pd.merge(df, temp_df[cols_to_use], on='馬名_clean', how='left')
 
-    # 3. カテゴリ・ターゲットエンコーディングの復元 (フルコンボ対応)
+    # 3. カテゴリ・ターゲットエンコーディングの復元
     df['jockey_win_rate'] = df['騎手_clean'].map(cache.get('jockey_win_map', {})).fillna(0.05)
     df['jockey_place_rate'] = df['騎手_clean'].map(cache.get('jockey_place_map', {})).fillna(0.15)
     df['trainer_win_rate'] = df['調教師_clean'].map(cache.get('trainer_win_map', {})).fillna(0.05)
@@ -183,24 +197,6 @@ def main():
         df[f'{b}_race_rank'] = df.groupby('race_id')[b].rank(ascending=False, method='min')
         df[f'{b}_race_ratio'] = df[b] / c_max
 
-    # 🔍 特徴量接続ログ
-    print("\n🔍 AIモデル入力用特徴量の接続状態チェック:")
-    for f in features:
-        if f not in df.columns: df[f] = np.nan
-        else: df[f] = pd.to_numeric(df[f], errors='coerce')
-
-    null_counts = df[features].isnull().sum()
-    complete_features = sum(null_counts == 0)
-    partial_null_features = sum((null_counts > 0) & (null_counts < len(df)))
-    all_null_features = sum(null_counts == len(df))
-
-    print(f"  ・完全に入力可能: {complete_features} / {len(features)} 項目")
-    print(f"  ・一部欠損（初出走馬等）: {partial_null_features} / {len(features)} 項目")
-    print(f"  ・全欠損: {all_null_features} / {len(features)} 項目")
-
-    if all_null_features > 0:
-        print(f"⚠️️ {all_null_features}個の列が不足していますが、ゼロ埋めで推論を強行します。")
-
     # 5. モデル推論
     X_future = pd.DataFrame(index=df.index)
     for f in features:
@@ -216,6 +212,12 @@ def main():
     print("\n" + "="*85)
     print("🏇 【勝ちパカくん】本気配察知・適応買い目 予想レポート (🔥強気モード)")
     print("="*85)
+
+    def get_disp_name(row):
+        m_num = str(row['馬番'])
+        if m_num.startswith("90") or int(float(m_num)) >= 90:
+            return f"未定({row['馬名']})"
+        return f"{int(float(m_num)):02d}({row['馬名']})"
 
     for race_id, group in df.groupby('race_id'):
         group = group.copy()
@@ -233,7 +235,6 @@ def main():
         else:
             group['ai_score'] = 100
 
-        # 脚質判定
         temp_val = None
         ascending = True
         if 'prev1_通過' in group.columns and pd.to_numeric(group['prev1_通過'], errors='coerce').nunique() > 1:
@@ -258,7 +259,6 @@ def main():
             else: styles.append("追込")
         group['推測脚質'] = styles
 
-        # ソートして印を割り当て
         group = group.sort_values(by=['win_prob'], ascending=False).reset_index(drop=True)
         marks = ["◎", "◯", "▲", "△", "☆1", "☆2"]
         group['印'] = "消"
@@ -272,24 +272,24 @@ def main():
         p4 = probs[3] if len(probs)>3 else 0.05
         gap_1_2, gap_1_3 = p1 - p2, p1 - p3
 
+        # 💡 木曜日の馬番未確定対応の表示ロジック
         if gap_1_2 >= 0.07:
             pat = "① 1強気配 (軸圧倒) 🔥勝負!"
             rec_ticket = "3連単 1着固定 (6点)"
-            buy_detail = f"1着: {group.loc[0, '馬番']}(◎) -> 2・3着: {group.loc[1, '馬番']}(◯), {group.loc[2, '馬番']}(▲), {group.loc[3, '馬番']}(△)"
+            buy_detail = f"1着: {get_disp_name(group.loc[0])}(◎) -> 2・3着: {get_disp_name(group.loc[1])}(◯), {get_disp_name(group.loc[2])}(▲), {get_disp_name(group.loc[3])}(△)"
         elif gap_1_2 < 0.035 and gap_1_3 >= 0.06:
             pat = "② 2強気配 (頭分け対抗) 🔥勝負!"
             rec_ticket = "3連単 ダブル軸 (12点)"
-            buy_detail = f"1着: {group.loc[0, '馬番']}(◎), {group.loc[1, '馬番']}(◯) -> 2着: ◎, ◯, {group.loc[2, '馬番']}(▲) -> 3着: ◎, ◯, ▲, {group.loc[3, '馬番']}(△)"
+            buy_detail = f"1着: {get_disp_name(group.loc[0])}(◎), {get_disp_name(group.loc[1])}(◯) -> 2着: ◎, ◯, {get_disp_name(group.loc[2])}(▲) -> 3着: ◎, ◯, ▲, {get_disp_name(group.loc[3])}(△)"
         elif (p1 - p4) < 0.08:
             pat = "④ 波乱気配 (大混戦)"
             rec_ticket = "3連複 5頭BOX (10点)"
-            buy_detail = "BOX: " + ", ".join([f"{group.loc[k, '馬番']}({group.loc[k, '印']})" for k in range(min(5, len(group)))])
+            buy_detail = "BOX: " + ", ".join([f"{get_disp_name(group.loc[k])}({group.loc[k, '印']})" for k in range(min(5, len(group)))])
         else:
             pat = "③ 混戦気配 (標準展開)"
             rec_ticket = "3連複 ◎1頭軸流し (10点)"
-            buy_detail = f"軸: {group.loc[0, '馬番']}(◎) -> 相手: " + ", ".join([f"{group.loc[k, '馬番']}({group.loc[k, '印']})" for k in range(1, min(6, len(group)))])
+            buy_detail = f"軸: {get_disp_name(group.loc[0])}(◎) -> 相手: " + ", ".join([f"{get_disp_name(group.loc[k])}({group.loc[k, '印']})" for k in range(1, min(6, len(group)))])
 
-        # PKL用の辞書構造を作成
         horses_info = {}
         for _, row in group.iterrows():
             horses_info[row['馬名_clean']] = {
@@ -307,15 +307,14 @@ def main():
             'horses': horses_info
         }
 
-        # ターミナル表示
         r_name = group['race_name'].iloc[0] if 'race_name' in group.columns and pd.notna(group['race_name'].iloc[0]) else f"Race {race_id}"
         date_str = group['date'].iloc[0] if 'date' in group.columns and pd.notna(group['date'].iloc[0]) else ""
 
         print(f"\n📍 レースID: {race_id} | {date_str} {r_name}")
         print(f"  ├ 🧠 勝負気配  : {pat}")
-        print(f"  ├ 🎟️ 推奨買い目: {rec_ticket}")
+        print(f"  ├ 🎟️️ 推奨買い目: {rec_ticket}")
         print(f"  ├ 📝 買目詳細  : {buy_detail}")
-        top_str = " | ".join([f"{group.iloc[k]['印']}:{group.iloc[k]['馬名']}({group.iloc[k]['馬番']})" for k in range(min(4, len(group)))])
+        top_str = " | ".join([f"{group.iloc[k]['印']}:{group.iloc[k]['馬名']}({get_disp_name(group.iloc[k])})" for k in range(min(4, len(group)))])
         print(f"  └ 🐴 上位評価  : {top_str}")
 
         history_records.append({
@@ -323,10 +322,10 @@ def main():
             'pattern': pat, 'ticket': rec_ticket, 'buy_detail': buy_detail
         })
 
-    # 7. app_cache.pkl の predictions キーを安全に上書き
+    # 7. app_cache.pkl の predictions キーを安全に上書き（💡 圧縮オプションを追加）
     cache['predictions'] = pred_dict
-    joblib.dump(cache, CACHE_FILE)
-    print(f"\n✅ 予想結果・脚質・買い目を '{CACHE_FILE}' (app_cache.pkl) 内に無事保存完了！")
+    joblib.dump(cache, CACHE_FILE, compress=3)
+    print(f"\n✅ 予想結果・脚質・買い目を '{CACHE_FILE}' (app_cache.pkl) 内に圧縮保存完了！")
 
     if history_records:
         pd.DataFrame(history_records).to_csv("prediction_history.csv", index=False, encoding='utf-8-sig')
