@@ -57,7 +57,7 @@ def main():
     print(f"{Fore.MAGENTA}=========================================={Style.RESET_ALL}\n")
 
     steps = [
-        ("scrape_results.py", "STEP 1: 確定レース結果の取得・最新日付に更新"),
+        ("scrape_rich_results.py", "STEP 1: 確定レース結果の取得・最新日付に更新"),
         ("create_rich_features.py", "STEP 2: 蓄積データの更新 (ml_target_data_v2.csv 生成)"),
         ("train_lightgbm.py", "STEP 3: AIモデルの再学習 (脳みそ更新)"),
         ("create_cache.py", "STEP 4: 推論用辞書の作成 (app_cache.pkl 生成)"),
