@@ -9,6 +9,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
 
 SAVE_CSV = "keiba_database2.csv"
 
@@ -20,9 +21,12 @@ def setup_driver():
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--disable-extensions')
     options.add_argument('--blink-settings=imagesEnabled=false')
+    options.page_load_strategy = 'eager' # 💡 DOM読み込み完了で次へ（画像等を待たずに爆速化）
     options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
     driver = webdriver.Chrome(options=options)
-    driver.implicitly_wait(5)
+    # 💡 フリーズ防止: ロードタイムアウトを15秒、要素検索を2秒に制限
+    driver.set_page_load_timeout(15)
+    driver.implicitly_wait(2)
     return driver
 
 def login_netkeiba(driver):
@@ -38,24 +42,30 @@ def login_netkeiba(driver):
         pw_elem = driver.find_element(By.NAME, "pswd")
         pw_elem.send_keys(password)
         driver.execute_script("arguments[0].form.submit();", pw_elem)
-        time.sleep(3)
+        time.sleep(2)
         print("🔓 ログイン成功！")
     except Exception as e:
-        print(f"⚠️ ログイン失敗。詳細: {e}")
+        print(f"⚠️ ログインエラー（無視して続行します）。詳細: {e}")
 
 def get_race_ids_for_date(driver, date_str):
     url = f"https://db.netkeiba.com/race/list/{date_str}/"
-    driver.get(url)
-    time.sleep(1.5)
-    html = driver.page_source
-    found_ids = re.findall(r'/race/(\d{12})/?', html)
-    
-    jra_ids = []
-    for rid in set(found_ids):
-        place_code = int(str(rid)[4:6])
-        if place_code <= 10:
-            jra_ids.append(rid)
-    return jra_ids
+    try:
+        driver.get(url)
+        time.sleep(1)
+        html = driver.page_source
+        found_ids = re.findall(r'/race/(\d{12})/?', html)
+        
+        jra_ids = []
+        for rid in set(found_ids):
+            place_code = int(str(rid)[4:6])
+            if place_code <= 10:
+                jra_ids.append(rid)
+        return jra_ids
+    except TimeoutException:
+        print(f"⚠️ {date_str} のレース一覧取得でタイムアウトしました。スキップします。")
+        return []
+    except Exception:
+        return []
 
 def get_premium_details(driver, race_id):
     premium_data = {}
@@ -68,10 +78,9 @@ def get_premium_details(driver, race_id):
                 "同条件_馬場指数": "", "同距離_馬場指数": "", "他距離_馬場指数": ""
             }
 
-    # 📌 1. 馬柱(5走)ページ (脚質)
+    # 各ページで TimeoutException が出た場合はフリーズせずにそのままpassする設計
     try:
         driver.get(f"https://race.netkeiba.com/race/shutuba_past.html?race_id={race_id}")
-        time.sleep(1.5)
         soup = BeautifulSoup(driver.page_source, "html.parser")
         for tr in soup.find_all("tr", class_=re.compile("HorseList")):
             tds = tr.find_all("td")
@@ -83,15 +92,11 @@ def get_premium_details(driver, race_id):
             kyaku_span = tr.find("span", class_="kyakusitu")
             if kyaku_span:
                 txt = kyaku_span.text.strip()
-                if txt in ["逃", "先", "差", "追"]:
-                    premium_data[umaban]["脚質"] = txt
-    except Exception:
-        pass
+                if txt in ["逃", "先", "差", "追"]: premium_data[umaban]["脚質"] = txt
+    except Exception: pass
 
-    # 📌 2. コメントページ
     try:
         driver.get(f"https://race.netkeiba.com/race/comment.html?race_id={race_id}")
-        time.sleep(1.5)
         soup = BeautifulSoup(driver.page_source, "html.parser")
         for item in soup.find_all(class_=re.compile("HorseList")):
             umaban_elem = item.find(class_=re.compile("Umaban"))
@@ -102,13 +107,10 @@ def get_premium_details(driver, race_id):
                 if comment_elem:
                     init_horse(umaban)
                     premium_data[umaban]["厩舎コメント"] = comment_elem.text.strip().replace('\n', ' ')
-    except Exception:
-        pass
+    except Exception: pass
 
-    # 📌 3. 調教ページ
     try:
         driver.get(f"https://race.netkeiba.com/race/oikiri.html?race_id={race_id}")
-        time.sleep(1.5)
         soup = BeautifulSoup(driver.page_source, "html.parser")
         for tr in soup.find_all("tr", class_=re.compile("HorseList")):
             umaban_elem = tr.find("td", class_=re.compile("Umaban"))
@@ -129,13 +131,10 @@ def get_premium_details(driver, race_id):
                 else:
                     premium_data[umaban]["調教短評"] = raw_time
                 premium_data[umaban]["調教評価"] = eval_elem.text.strip().replace('\n', ' ') if eval_elem else ""
-    except Exception:
-        pass
+    except Exception: pass
         
-    # 📌 4. 調子偏差値
     try:
         driver.get(f"https://race.sp.netkeiba.com/barometer/score.html?race_id={race_id}")
-        time.sleep(1.5)
         soup = BeautifulSoup(driver.page_source, "html.parser")
         for tr in soup.find_all("tr", class_=re.compile("HorseList")):
             umaban = ""
@@ -150,16 +149,11 @@ def get_premium_details(driver, race_id):
             if umaban:
                 init_horse(umaban)
                 val_span = tr.find("span", class_="Value_Num")
-                if val_span:
-                    premium_data[umaban]["調子偏差値"] = val_span.text.strip()
-    except Exception:
-        pass
+                if val_span: premium_data[umaban]["調子偏差値"] = val_span.text.strip()
+    except Exception: pass
 
-    # 📌 5. 持ちタイムページ (同条件だけでも確保し、取れれば他距離も拾う)
     try:
         driver.get(f"https://race.netkeiba.com/race/holding_time.html?race_id={race_id}")
-        time.sleep(1.5)
-        
         tabs = driver.find_elements(By.CSS_SELECTOR, "ul[class*='Tab_'] li")
         num_tabs = len(tabs)
         
@@ -169,16 +163,13 @@ def get_premium_details(driver, race_id):
                 if i >= len(current_tabs): break
                 tab = current_tabs[i]
                 
-                if "NoData" in tab.get_attribute("class"):
-                    continue
+                if "NoData" in tab.get_attribute("class"): continue
                     
                 span_elem = tab.find_element(By.TAG_NAME, "span")
-                try:
-                    span_elem.click()
-                except:
-                    driver.execute_script("arguments[0].click();", span_elem)
+                try: span_elem.click()
+                except: driver.execute_script("arguments[0].click();", span_elem)
                 
-                time.sleep(1.5)
+                time.sleep(0.5)
                 soup = BeautifulSoup(driver.page_source, "html.parser")
                 
                 for tr in soup.find_all("tr", class_=re.compile("HorseList")):
@@ -193,16 +184,11 @@ def get_premium_details(driver, race_id):
                     if index_td:
                         val = index_td.text.strip()
                         if val:
-                            if i == 0:
-                                premium_data[umaban]["同条件_馬場指数"] = val
-                            elif i == 1:
-                                premium_data[umaban]["同距離_馬場指数"] = val
-                            elif i >= 2:
-                                premium_data[umaban]["他距離_馬場指数"] = val
-            except Exception:
-                continue
-    except Exception:
-        pass
+                            if i == 0: premium_data[umaban]["同条件_馬場指数"] = val
+                            elif i == 1: premium_data[umaban]["同距離_馬場指数"] = val
+                            elif i >= 2: premium_data[umaban]["他距離_馬場指数"] = val
+            except Exception: continue
+    except Exception: pass
         
     return premium_data
 
@@ -211,7 +197,7 @@ def parse_race_result(driver, race_id, date_str):
     
     url = f"https://db.netkeiba.com/race/{race_id}/"
     driver.get(url)
-    time.sleep(2)
+    time.sleep(1)
     
     soup = BeautifulSoup(driver.page_source, "html.parser")
     
@@ -299,33 +285,44 @@ def parse_race_result(driver, race_id, date_str):
                 "調教評価": p_data["調教評価"],
                 "厩舎コメント": p_data["厩舎コメント"]
             })
-        except Exception:
-            pass
+        except Exception: pass
             
     return horse_list
 
 def scrape_historical_data():
-    start_date = datetime(2023, 1, 1)
-    end_date = datetime.now() # 現在の日付まで
+    end_date = datetime.now()
     
-    print(f"📅 【本番スクレイピング】取得期間: {start_date.strftime('%Y/%m/%d')} 〜 現在")
-    
-    # 📌 既存CSVがあれば読み込み、取得済みレースをスキップ（レジューム機能）
+    # 💡 爆速化: 既存CSVを読み込み、一番最後の日付を基準に「数日前」からだけループさせる
     existing_race_ids = set()
+    start_date = datetime(2023, 1, 1) # デフォルト
+    
     if os.path.exists(SAVE_CSV):
         try:
             df_existing = pd.read_csv(SAVE_CSV, encoding='utf-8-sig', dtype={'race_id': str})
             if 'race_id' in df_existing.columns:
-                existing_race_ids = set(df_existing['race_id'].astype(str).tolist())
-                print(f"📂 既存のCSVから {len(existing_race_ids)} 件の取得済みレースを読み込みました。スキップして続きから開始します。")
+                # 💡 スキップ完璧化: `.0` 等のノイズを除去して厳密に照合
+                df_existing['race_id'] = df_existing['race_id'].astype(str).str.replace('.0', '', regex=False).str.strip()
+                existing_race_ids = set(df_existing['race_id'].tolist())
+            
+            if 'date' in df_existing.columns:
+                date_clean = df_existing['date'].astype(str).str.replace('年', '-').str.replace('月', '-').str.replace('日', '').str.replace('/', '-')
+                latest_date = pd.to_datetime(date_clean, errors='coerce').max()
+                if pd.notna(latest_date):
+                    # 最新日の3日前から再開する（抜け漏れ防止）
+                    start_date = latest_date - timedelta(days=3)
+            
+            print(f"📂 既存DB読込完了: {len(existing_race_ids)} 件取得済み。再開日付: {start_date.strftime('%Y/%m/%d')}")
         except Exception as e:
             print(f"⚠️ 既存CSVの読み込みに失敗しました: {e}")
+
+    print(f"📅 取得期間: {start_date.strftime('%Y/%m/%d')} 〜 {end_date.strftime('%Y/%m/%d')}")
 
     driver = setup_driver()
     login_netkeiba(driver)
     
     temp_date = start_date
     week_race_data = []
+    has_new_data = False
     
     try:
         while temp_date <= end_date:
@@ -333,11 +330,14 @@ def scrape_historical_data():
                 date_str = temp_date.strftime("%Y%m%d")
                 race_ids = get_race_ids_for_date(driver, date_str)
                 if race_ids:
+                    # スキップ処理
                     new_race_ids = [rid for rid in race_ids if str(rid) not in existing_race_ids]
                     if new_race_ids:
-                        print(f"  🏇 {date_str}: 新規 {len(new_race_ids)}レース取得中...")
+                        has_new_data = True
+                        print(f"\n  🏇 {date_str}: 新規 {len(new_race_ids)}レース取得中...")
                         for i, rid in enumerate(new_race_ids):
                             
+                            # 💡 メモリ圧迫によるフリーズ防止
                             if i > 0 and i % 30 == 0:
                                 print("  🔄 メモリ解放のためブラウザを再起動します...")
                                 try: driver.quit()
@@ -352,32 +352,41 @@ def scrape_historical_data():
                             while not success and retry_count < 3:
                                 try:
                                     data = parse_race_result(driver, rid, date_str)
-                                    week_race_data.extend(data)
-                                    existing_race_ids.add(str(rid))
+                                    if data:
+                                        week_race_data.extend(data)
+                                        existing_race_ids.add(str(rid))
                                     success = True
-                                except Exception as e:
+                                except TimeoutException:
                                     retry_count += 1
-                                    print(f"    ⚠️ エラー検知(ID:{rid})。ブラウザを再起動してリトライします({retry_count}/3)...")
+                                    print(f"    ⚠️ タイムアウト(ID:{rid})。リトライします({retry_count}/3)...")
                                     try: driver.quit()
                                     except: pass
                                     driver = setup_driver()
                                     login_netkeiba(driver)
+                                except Exception as e:
+                                    retry_count += 1
+                                    print(f"    ⚠️ エラー検知(ID:{rid})。リトライします({retry_count}/3)...")
+                    else:
+                        print(f"  ⏭️ {date_str}: 全てのレースが取得済みのためスキップします。")
             
-            # 📌 日曜日が終わったタイミング（または最終日）でCSVに追記保存（オートセーブ）
+            # 日曜日が終わったタイミング（または最終日）でCSVに追記保存
             if temp_date.weekday() == 6 or temp_date.date() == end_date.date():
                 if week_race_data:
                     df_week = pd.DataFrame(week_race_data)
-                    write_header = not os.path.exists(SAVE_CSV) # ファイルがなければヘッダーを付ける
+                    write_header = not os.path.exists(SAVE_CSV)
                     df_week.to_csv(SAVE_CSV, index=False, encoding='utf-8-sig', mode='a', header=write_header)
                     print(f"💾 {temp_date.strftime('%Y/%m/%d')} までのデータを {SAVE_CSV} に追記保存しました！(今週 {len(week_race_data)} 頭分)")
-                    week_race_data = [] # 次の週のためにリストを空にする
+                    week_race_data = []
                     
             temp_date += timedelta(days=1)
             
     finally:
-        print("🛑 処理を終了します。ブラウザを閉じます。")
+        print("\n🛑 処理を終了します。ブラウザを閉じます。")
         try: driver.quit()
         except: pass
+
+    if not has_new_data:
+        print("🎉 不足している対象レースはありません。マスターデータは最新状態です。")
 
 if __name__ == "__main__":
     scrape_historical_data()
