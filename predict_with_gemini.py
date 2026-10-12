@@ -255,7 +255,6 @@ if st.session_state['selected_race_id']:
     r_info = t_rows.iloc[0]
     st.markdown("---")
     
-    # UIとプロンプト用にレース名や条件を整備
     display_race_name = r_info.get('race_name', '')
     if pd.isna(display_race_name) or display_race_name == 'nan': display_race_name = ''
     surface_info = r_info.get('surface', '不明')
@@ -290,6 +289,22 @@ if st.session_state['selected_race_id']:
                 st.error("【設定エラー】APIキーが見つかりません。")
                 st.stop()
 
+            # レース種別の判定ロジック
+            race_class = "条件戦"
+            if re.search(r'新馬|メイクデビュー', display_race_name):
+                race_class = "新馬戦"
+            elif re.search(r'G1|G2|G3|OP|オープン|リステッド|L', display_race_name, re.IGNORECASE):
+                race_class = "重賞・OP"
+            elif re.search(r'未勝利|1勝|2勝|3勝', display_race_name):
+                race_class = "条件戦"
+
+            if race_class == "新馬戦":
+                search_instruction = "【新馬戦の特別指示】調教タイムが不足しがちなため、Google検索で『馬名 新馬 評判』『馬名 血統 評価』『馬名 追い切り 動き』を調べ、関係者の絶賛コメントや血統の早期完成度、併せ馬での動きといった定性情報を重視して評価してください。"
+            elif race_class == "重賞・OP":
+                search_instruction = "【重賞・OPの特別指示】調教タイムが不足する馬がいるため、Google検索で『対象レース名 過去10年 傾向』や『対象レース名 枠順 脚質 穴馬』を調べ、そのレース特有の好走パターン（内枠有利、特定のローテなど）との合致度を最優先で評価してください。"
+            else:
+                search_instruction = "【条件戦の特別指示】提供された調教タイム・調教評価の数値をフル活用しつつ、Google検索で『開催場 芝/ダート 距離 傾向』（例：東京 芝 1600m 傾向）を調べ、コース特有の有利不利（枠順や脚質バイアス）と掛け合わせて評価してください。"
+
             table_summary = []
             for _, r in res_df.iterrows():
                 w_val = r.get('枠番', '-')
@@ -305,23 +320,20 @@ if st.session_state['selected_race_id']:
                         f"調教タイム:{r.get('調教タイム','-')} | 短評:{r.get('調教短評','-')} | 厩舎コメント:{r.get('厩舎コメント','-')}")
                 table_summary.append(info)
 
-            # 💡 Geminiがコース・レースの過去傾向を調べる指示を追加
             system_instruction = f"""
 あなたはプロ競馬予想家（トラックマン）です。
 【あなたのワークフロー】
 1. 提供された「出走馬リスト」の枠順・馬番、騎手、オッズ、および【プレミアム定性データ（調教評価、タイム、短評、厩舎コメント）】を熟読してください。
-2. 対象レースについて、必ずGoogle検索ツールを使用して過去のデータやコースバイアスを調べてください。
-   - 重賞・OP特別など名前のあるレースの場合：『対象レース名 過去10年 傾向』や『対象レース名 枠順 脚質 穴馬』で検索し、レース固有の有利不利を把握する。
-   - 平場・条件戦の場合：『開催場 芝/ダート 距離 傾向』（例: 東京 芝 1600m 傾向）で検索し、コース固有のセオリー（内枠有利、逃げ有利など）を把握する。
-3. 検索で得た「過去の傾向・コースバイアス」と、提供された「プレミアムデータ（調教・コメント）」が合致する人気薄の馬がいれば、積極的に☆（穴馬）として評価してください。
-4. 枠順の並びによる展開（外から被される懸念、同型馬の隣枠など）やオッズのギャップも考慮し、Python（確率計算AI）とは異なる「人間の専門家としての視点（勝負気配、展開面、調子）」で最終評価を下してください。
+2. {search_instruction}
+3. 枠順の並びによる展開の有利不利（内枠有利、外から被される懸念、同型馬の隣枠など）や、オッズに対する評価のギャップ（過小評価されている実力馬・好調馬）も考慮してください。
+4. 検索で得た「過去の傾向・コースバイアス・評判」と、提供された「プレミアムデータ（調教・コメント）」が合致する人気薄の馬がいれば、積極的に☆（穴馬）として評価してください。
+5. Python（確率計算AI）とは異なる「人間の専門家としての視点（勝負気配、展開面、調子）」で最終評価を下してください。
 
 【印の打ち方】
 ◎(1頭), ◯(1頭), ▲(1頭), △(1頭), ☆(1〜2頭), 消(それ以外)
 ※必ず以下のJSONのみ出力すること。（馬名で紐付けます）
 {{ "evaluations": [ {{"馬名": "イクイノックス", "Gemini印": "◎", "短評": "〇〇のため好走必至"}}, ... ] }}
 """
-            # 💡 検索キーワードにできるように、レース名やコース・距離情報をプロンプトに明記
             prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R {display_race_name} ({surface_info}{distance_info}m)\n【想定馬場】: {cond}\n【出走馬リスト】:\n{chr(10).join(table_summary)}"
 
             with st.spinner("🧠 Geminiがレースの過去傾向・枠順・プレミアムデータを検索＆分析中..."):
