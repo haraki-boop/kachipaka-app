@@ -76,7 +76,6 @@ def get_badge_class(mark):
 @st.cache_data
 def load_future_data():
     if os.path.exists(FUTURE_CSV):
-        # 💡枠番を文字列として読み込む設定を追加
         df_f = pd.read_csv(FUTURE_CSV, dtype={'race_id': str, '枠番': str, '馬番': str}, encoding='utf-8-sig')
         df_f['race_id'] = df_f['race_id'].astype(str).str.zfill(12)
         df_f['place_name'] = df_f['race_id'].str[4:6].map({"01":"札幌","02":"函館","03":"福島","04":"新潟","05":"東京","06":"中山","07":"中京","08":"京都","09":"阪神","10":"小倉"}).fillna("開催場")
@@ -84,7 +83,6 @@ def load_future_data():
         df_f['day_label'] = df_f['date'].astype(str).str.strip() if 'date' in df_f.columns else "当日"
         df_f['馬名_clean'] = df_f['馬名'].astype(str).apply(clean_name)
         
-        # 木曜日対策: 馬番がNaNの場合、インデックスから仮の馬番（90番台）を割り当てる
         for i, row in df_f.iterrows():
             if pd.isna(row['馬番']) or str(row['馬番']).strip() in ["", "nan", "NaN"]:
                 df_f.at[i, '馬番'] = str(90 + i)
@@ -166,11 +164,9 @@ def generate_base_table(disp_df):
     html = "<div class='table-container'><table class='kachi-table'>"
     html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>推測脚質</th><th>斤量</th><th>騎手</th><th>スコア</th><th>1着率</th><th>補正係数</th><th>Python印</th></tr>"
     for _, r in disp_df.iterrows():
-        # 枠番の処理
         w_num = str(r.get('枠番', ''))
         display_waku = w_num if w_num and w_num != 'nan' and not w_num.startswith("90") else "-"
         
-        # 馬番の処理
         m_num = str(r['馬番'])
         display_umaban = "未定" if m_num.startswith("90") or int(float(m_num)) >= 90 else f"{int(float(m_num)):02d}"
         
@@ -195,7 +191,7 @@ def generate_base_table(disp_df):
 
 def generate_fusion_table(merged_df):
     html = "<div class='table-container'><table class='kachi-table'>"
-    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>AIｽｺア</th><th>1着率</th><th>Python印</th><th>Gemini印</th><th style='text-align:left;'>Gemini短評</th></tr>"
+    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>調教</th><th style='text-align:left;'>調教タイム</th><th>AIｽｺア</th><th>Python印</th><th>Gemini印</th><th style='text-align:left;'>Gemini短評</th></tr>"
     for _, r in merged_df.iterrows():
         w_num = str(r.get('枠番', ''))
         display_waku = w_num if w_num and w_num != 'nan' and not w_num.startswith("90") else "-"
@@ -203,11 +199,12 @@ def generate_fusion_table(merged_df):
         m_num = str(r.get('馬番', ''))
         display_umaban = "未定" if m_num.startswith("90") or int(float(m_num)) >= 90 else f"{int(float(m_num)):02d}"
         
-        win_val = float(r.get('win_prob', 0))
-        win_str = f"<span style='color:#e74c3c; font-weight:bold;'>{win_val*100:.1f}%</span>" if win_val >= 0.25 else f"{win_val*100:.1f}%"
+        eval_mark = str(r.get('調教評価', '-')).strip()
+        eval_time = str(r.get('調教タイム', '-')).strip()
         
         html += f"<tr><td><b>{display_waku}</b></td><td><b>{display_umaban}</b></td><td style='text-align:left; font-weight:bold;'>{r.get('馬名', '-')}</td>"
-        html += f"<td><b>{int(r.get('ai_score', 100))}</b></td><td>{win_str}</td>"
+        html += f"<td><b>{eval_mark}</b></td><td style='text-align:left; font-size:14px; color:#555;'>{eval_time}</td>"
+        html += f"<td><b>{int(r.get('ai_score', 100))}</b></td>"
         html += f"<td><span class='badge-mark {get_badge_class(r.get('印', '消'))}'>{r.get('印', '消')}</span></td>"
         html += f"<td><span class='badge-mark {get_badge_class(r.get('Gemini印', '消'))}'>{r.get('Gemini印', '消')}</span></td>"
         html += f"<td style='text-align:left; font-size:15px; color:#444;'>{r.get('短評', '-')}</td></tr>"
@@ -257,7 +254,14 @@ if st.session_state['selected_race_id']:
 
     r_info = t_rows.iloc[0]
     st.markdown("---")
-    st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{r_info.get('race_name', '')}】</h2>", unsafe_allow_html=True)
+    
+    # UIとプロンプト用にレース名や条件を整備
+    display_race_name = r_info.get('race_name', '')
+    if pd.isna(display_race_name) or display_race_name == 'nan': display_race_name = ''
+    surface_info = r_info.get('surface', '不明')
+    distance_info = r_info.get('distance', '')
+    
+    st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{display_race_name}】</h2>", unsafe_allow_html=True)
     
     cond = st.radio("想定馬場 (AIのコースバイアス補正に反映されます)", ["良", "稍重", "重", "不良"], horizontal=True)
     
@@ -281,8 +285,7 @@ if st.session_state['selected_race_id']:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # 🔥 Gemini独立穴馬発掘機能 (枠番・騎手・調教師・オッズを含むフル情報版)
-        if st.button("🧠 Geminiに全データを渡し、定性評価を実行", type="primary", use_container_width=True):
+        if st.button("🧠 Geminiに全データを渡し、過去傾向を加味した定性評価を実行", type="primary", use_container_width=True):
             if not GEMINI_API_KEY:
                 st.error("【設定エラー】APIキーが見つかりません。")
                 st.stop()
@@ -302,21 +305,26 @@ if st.session_state['selected_race_id']:
                         f"調教タイム:{r.get('調教タイム','-')} | 短評:{r.get('調教短評','-')} | 厩舎コメント:{r.get('厩舎コメント','-')}")
                 table_summary.append(info)
 
+            # 💡 Geminiがコース・レースの過去傾向を調べる指示を追加
             system_instruction = f"""
 あなたはプロ競馬予想家（トラックマン）です。
 【あなたのワークフロー】
 1. 提供された「出走馬リスト」の枠順・馬番、騎手、オッズ、および【プレミアム定性データ（調教評価、タイム、短評、厩舎コメント）】を熟読してください。
-2. 枠順の並びによる展開の有利不利（内枠有利、外から被される懸念、同型馬の隣枠など）や、オッズに対する評価のギャップ（過小評価されている実力馬・好調馬）も考慮してください。
-3. 必要に応じてGoogle検索ツールで補強し、Python（確率計算AI）とは異なる「人間の専門家としての視点（勝負気配、展開面、調子の良し悪し）」で最終評価を下してください。
+2. 対象レースについて、必ずGoogle検索ツールを使用して過去のデータやコースバイアスを調べてください。
+   - 重賞・OP特別など名前のあるレースの場合：『対象レース名 過去10年 傾向』や『対象レース名 枠順 脚質 穴馬』で検索し、レース固有の有利不利を把握する。
+   - 平場・条件戦の場合：『開催場 芝/ダート 距離 傾向』（例: 東京 芝 1600m 傾向）で検索し、コース固有のセオリー（内枠有利、逃げ有利など）を把握する。
+3. 検索で得た「過去の傾向・コースバイアス」と、提供された「プレミアムデータ（調教・コメント）」が合致する人気薄の馬がいれば、積極的に☆（穴馬）として評価してください。
+4. 枠順の並びによる展開（外から被される懸念、同型馬の隣枠など）やオッズのギャップも考慮し、Python（確率計算AI）とは異なる「人間の専門家としての視点（勝負気配、展開面、調子）」で最終評価を下してください。
 
 【印の打ち方】
 ◎(1頭), ◯(1頭), ▲(1頭), △(1頭), ☆(1〜2頭), 消(それ以外)
 ※必ず以下のJSONのみ出力すること。（馬名で紐付けます）
 {{ "evaluations": [ {{"馬名": "イクイノックス", "Gemini印": "◎", "短評": "〇〇のため好走必至"}}, ... ] }}
 """
-            prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R\n【想定馬場】: {cond}\n【出走馬リスト】:\n{chr(10).join(table_summary)}"
+            # 💡 検索キーワードにできるように、レース名やコース・距離情報をプロンプトに明記
+            prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R {display_race_name} ({surface_info}{distance_info}m)\n【想定馬場】: {cond}\n【出走馬リスト】:\n{chr(10).join(table_summary)}"
 
-            with st.spinner("🧠 Geminiが枠順・騎手・プレミアムデータを読み解き、独自の定性評価中..."):
+            with st.spinner("🧠 Geminiがレースの過去傾向・枠順・プレミアムデータを検索＆分析中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 gemini_data = None
                 try:
