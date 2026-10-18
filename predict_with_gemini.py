@@ -86,7 +86,6 @@ def load_cache():
             return {}
     return {}
 
-# 💡 修正点1: キャッシュ機能を意図的に外し、保存されるたびに必ず最新のCSVを読み込むように変更
 def load_course_bias():
     if os.path.exists(BIAS_CSV):
         return pd.read_csv(BIAS_CSV, dtype={'距離': str}, encoding='utf-8-sig')
@@ -101,7 +100,7 @@ df_future = load_future_data()
 df_course_bias = load_course_bias()
 
 # ==========================================
-# 📊 【新】完全カスタム × 動的ミックスバイアス計算ロジック
+# 📊 完全カスタム × 動的ミックスバイアス計算ロジック
 # ==========================================
 def calculate_mixed_bias(row, place_name, surface, distance, cond, race_day, df_bias):
     coef = 1.0
@@ -112,14 +111,11 @@ def calculate_mixed_bias(row, place_name, surface, distance, cond, race_day, df_
     is_uchi = 1 <= waku_num <= 3
     is_soto = 6 <= waku_num <= 8
     
-    # 💡 修正点2: 距離データから「m」などを排除し、純粋な数字文字列に統一
     dist_str = re.sub(r'\D', '', str(distance))
     if not dist_str: dist_str = "1600"
     
-    # 💡 修正点3: 出馬表の「ダ」表記を「ダート」に強制変換してCSVと一致させる
     search_surface = 'ダート' if 'ダ' in str(surface) else '芝'
 
-    # --- 1層目: CSVからのベース補正 (競馬場 × 芝/ダ × 距離) ---
     if not df_bias.empty:
         match = df_bias[(df_bias['競馬場'] == place_name) & 
                         (df_bias['芝ダート'] == search_surface) & 
@@ -135,7 +131,6 @@ def calculate_mixed_bias(row, place_name, surface, distance, cond, race_day, df_
             elif kyaku == '差し' and pd.notna(b.get('差し')): coef *= float(b['差し'])
             elif kyaku == '追込' and pd.notna(b.get('追込')): coef *= float(b['追込'])
 
-    # --- 2層目: 当日の天候・馬場状態スパイス ---
     if search_surface == '芝':
         if cond in ['重', '不良']:
             if kyaku in ['逃げ', '先行']: coef *= 1.05
@@ -145,7 +140,6 @@ def calculate_mixed_bias(row, place_name, surface, distance, cond, race_day, df_
             if kyaku in ['逃げ', '先行']: coef *= 1.08 
             elif kyaku in ['追込']: coef *= 0.90
 
-    # --- 3層目: 開催日数（芝の傷み具合）スパイス ---
     if waku_num > 0 and search_surface == '芝':
         if race_day <= 4:
             if is_uchi: coef *= 1.05
@@ -393,6 +387,18 @@ if st.session_state['selected_race_id']:
 
 【印の打ち方】
 ◎(1頭), ◯(1頭), ▲(1頭), △(1頭), ☆(1〜2頭), 消(それ以外)
+
+※必ず以下のJSON形式のみで出力してください。
+{{
+  "race_view": "展開予想のテキスト",
+  "evaluations": [ 
+    {{
+      "馬名": "ウメヒナタ", 
+      "Gemini印": "☆", 
+      "短評": "坂路54.8秒の動きは絶好..."
+    }}
+  ] 
+}}
 """
             prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R {display_race_name} ({surface_info}{distance_info}m{turn_display} 開催{race_day}日目)\n【想定馬場】: {cond}\n【出走馬リスト】:\n{chr(10).join(table_summary)}"
 
@@ -400,22 +406,24 @@ if st.session_state['selected_race_id']:
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 gemini_data = None
                 try:
+                    # 💡 修正点: Google検索ツールを使うため、response_mime_type設定を削除
                     response = client.models.generate_content(
                         model='gemini-2.5-flash', 
                         contents=prompt, 
                         config=types.GenerateContentConfig(
                             system_instruction=system_instruction, 
                             temperature=0.7, 
-                            tools=[{"googleSearch": {}}],
-                            response_mime_type="application/json"
+                            tools=[{"googleSearch": {}}]
                         )
                     )
                     
                     res_text = response.text if response.text else ""
+                    # バッククォートの除去などの安全処理
                     res_text = re.sub(r'^```(?:json)?\n', '', res_text)
                     res_text = re.sub(r'\n```$', '', res_text)
                     res_text = res_text.strip()
                     
+                    # 確実にJSON部分だけを抜き取る
                     match = re.search(r'\{.*\}', res_text, re.DOTALL)
                     if match:
                         res_text = match.group(0)
