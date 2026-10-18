@@ -41,24 +41,6 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 FUTURE_CSV = "future_races.csv"
 CACHE_FILE = "app_cache.pkl"
 
-# ==========================================
-# 📊 馬場・コースバイアス補正設定
-# ==========================================
-TRACK_BIAS = {
-    "重・不良": {"逃げ": 1.20, "先行": 1.10, "差し": 0.95, "追込": 0.85},
-    "稍重": {"逃げ": 1.10, "先行": 1.05, "差し": 1.00, "追込": 0.95},
-    "中山": {"逃げ": 1.15, "先行": 1.05, "差し": 0.90, "追込": 0.80}, 
-    "函館": {"逃げ": 1.15, "先行": 1.10, "差し": 0.85, "追込": 0.80}, 
-    "札幌": {"逃げ": 1.15, "先行": 1.10, "差し": 0.85, "追込": 0.80}, 
-    "東京": {"逃げ": 0.90, "先行": 0.95, "差し": 1.15, "追込": 1.10}, 
-    "新潟": {"逃げ": 0.90, "先行": 0.95, "差し": 1.15, "追込": 1.10}, 
-    "阪神": {"逃げ": 0.95, "先行": 1.00, "差し": 1.10, "追込": 1.00}, 
-    "京都": {"逃げ": 1.05, "先行": 1.05, "差し": 1.00, "追込": 0.90}, 
-    "小倉": {"逃げ": 1.10, "先行": 1.05, "差し": 0.90, "追込": 0.85}, 
-    "福島": {"逃げ": 1.15, "先行": 1.05, "差し": 0.90, "追込": 0.80}, 
-    "中京": {"逃げ": 1.00, "先行": 1.05, "差し": 1.05, "追込": 0.95}, 
-}
-
 def clean_name(text):
     if pd.isna(text): return ""
     s = unicodedata.normalize('NFKC', str(text))
@@ -102,7 +84,53 @@ def load_cache():
 df_future = load_future_data()
 
 # ==========================================
-# 🧠 PKLからの超高速ロード & 馬場補正
+# 📊 動的コース・馬場・枠順バイアス計算ロジック
+# ==========================================
+def calculate_dynamic_bias(row, place_name, surface, distance, cond, race_day):
+    coef = 1.0
+    kyaku = str(row.get('推測脚質', '-')).strip()
+    waku_str = str(row.get('枠番', ''))
+    
+    waku_num = int(waku_str) if waku_str.isdigit() else 0
+    is_uchi = 1 <= waku_num <= 3
+    is_soto = 6 <= waku_num <= 8
+    
+    dist_val = float(distance) if pd.notna(distance) and str(distance).isdigit() else 1600.0
+
+    if surface == '芝':
+        if cond in ['重', '不良']:
+            if kyaku in ['逃げ', '先行']: coef *= 1.05
+            elif kyaku in ['差し', '追込']: coef *= 0.95
+    elif surface == 'ダート':
+        if cond in ['稍重', '重', '不良']:
+            if kyaku in ['逃げ', '先行']: coef *= 1.08 
+            elif kyaku in ['追込']: coef *= 0.90
+
+    right_turn = ['中山', '阪神', '京都', '札幌', '函館', '福島', '小倉']
+    left_turn = ['東京', '新潟', '中京']
+    
+    if place_name in right_turn:
+        if kyaku in ['逃げ', '先行']: coef *= 1.03
+    elif place_name in left_turn:
+        if kyaku in ['差し', '追込']: coef *= 1.03
+
+    if waku_num > 0:
+        if race_day <= 4:
+            if is_uchi: coef *= 1.05
+            if kyaku in ['逃げ', '先行']: coef *= 1.02
+        else:
+            if is_soto: coef *= 1.05
+            if kyaku in ['差し', '追込']: coef *= 1.03
+
+    if dist_val <= 1400:
+        if kyaku in ['逃げ', '先行']: coef *= 1.04
+    elif dist_val >= 2400:
+        if is_uchi and waku_num > 0: coef *= 1.04
+
+    return round(max(0.8, min(coef, 1.25)), 2)
+
+# ==========================================
+# 🧠 PKLからの超高速ロード & 馬場補正適用
 # ==========================================
 def render_race_predictions(race_id_target, cond):
     if df_future.empty: return None, None, None, None
@@ -130,16 +158,16 @@ def render_race_predictions(race_id_target, cond):
     df['推測脚質'] = df['馬名_clean'].map(lambda x: horse_preds.get(x, {}).get('推測脚質', '-'))
     df['印'] = df['馬名_clean'].map(lambda x: horse_preds.get(x, {}).get('印', '消'))
 
-    df['bias_coef'] = 1.0
     place_name = str(df['place_name'].iloc[0])
-
-    if cond in ['重', '不良']:
-        df['bias_coef'] *= df['推測脚質'].map(TRACK_BIAS["重・不良"]).fillna(1.0)
-    elif cond == '稍重':
-        df['bias_coef'] *= df['推測脚質'].map(TRACK_BIAS["稍重"]).fillna(1.0)
+    surface = str(df['surface'].iloc[0])
+    distance = str(df['distance'].iloc[0])
     
-    if place_name in TRACK_BIAS:
-        df['bias_coef'] *= df['推測脚質'].map(TRACK_BIAS[place_name]).fillna(1.0)
+    try:
+        race_day = int(target_key[8:10])
+    except:
+        race_day = 1
+
+    df['bias_coef'] = df.apply(lambda row: calculate_dynamic_bias(row, place_name, surface, distance, cond, race_day), axis=1)
 
     df['win_prob'] = df['win_prob'] * df['bias_coef']
     sum_p = df['win_prob'].sum()
@@ -155,7 +183,7 @@ def render_race_predictions(race_id_target, cond):
     rec_ticket = predictions.get('ticket', '3連複')
     buy_detail = predictions.get('buy_detail', '')
 
-    return df, pat, rec_ticket, buy_detail
+    return df, pat, rec_ticket, buy_detail, race_day
 
 # ==========================================
 # 📊 UIテーブル生成部
@@ -260,11 +288,28 @@ if st.session_state['selected_race_id']:
     surface_info = r_info.get('surface', '不明')
     distance_info = r_info.get('distance', '')
     
-    st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{display_race_name}】</h2>", unsafe_allow_html=True)
+    # 💡 左右回り・直線の判定ロジックを追加
+    place_name_str = r_info.get('place_name', '')
+    dist_str = str(distance_info)
+    turn_info = ""
     
-    cond = st.radio("想定馬場 (AIのコースバイアス補正に反映されます)", ["良", "稍重", "重", "不良"], horizontal=True)
+    if place_name_str == "新潟" and dist_str == "1000":
+        turn_info = "直線"
+    elif place_name_str in ['中山', '阪神', '京都', '札幌', '函館', '福島', '小倉']:
+        turn_info = "右回り"
+    elif place_name_str in ['東京', '新潟', '中京']:
+        turn_info = "左回り"
     
-    res_df, pat, rec_ticket, buy_detail = render_race_predictions(t_id, cond)
+    turn_display = f" / {turn_info}" if turn_info else ""
+    
+    res_df, pat, rec_ticket, buy_detail, race_day = render_race_predictions(t_id, "良")
+    
+    # 💡 画面のタイトルに「左右回り」と「開催○日目」を反映
+    st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{display_race_name}】 <span style='font-size:18px; color:#7f8c8d;'>({surface_info}{distance_info}m{turn_display} / 開催{race_day}日目)</span></h2>", unsafe_allow_html=True)
+    
+    cond = st.radio("想定馬場 (AIのコース・馬場バイアス補正に反映されます)", ["良", "稍重", "重", "不良"], horizontal=True)
+    
+    res_df, pat, rec_ticket, buy_detail, _ = render_race_predictions(t_id, cond)
     
     if res_df is not None:
         is_mokuyou = any(res_df['馬番'].astype(str).str.startswith('90'))
@@ -279,7 +324,7 @@ if st.session_state['selected_race_id']:
         </div>
         """, unsafe_allow_html=True)
 
-        st.markdown("<div class='section-header'>📊 Pythonベース予想データ (馬場・コース補正済み)</div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-header'>📊 Pythonベース予想データ (全要素バイアス補正済み)</div>", unsafe_allow_html=True)
         st.markdown(generate_base_table(res_df), unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
@@ -289,7 +334,6 @@ if st.session_state['selected_race_id']:
                 st.error("【設定エラー】APIキーが見つかりません。")
                 st.stop()
 
-            # レース種別の判定ロジック
             race_class = "条件戦"
             if re.search(r'新馬|メイクデビュー', display_race_name):
                 race_class = "新馬戦"
@@ -334,7 +378,7 @@ if st.session_state['selected_race_id']:
 ※必ず以下のJSONのみ出力すること。（馬名で紐付けます）
 {{ "evaluations": [ {{"馬名": "イクイノックス", "Gemini印": "◎", "短評": "〇〇のため好走必至"}}, ... ] }}
 """
-            prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R {display_race_name} ({surface_info}{distance_info}m)\n【想定馬場】: {cond}\n【出走馬リスト】:\n{chr(10).join(table_summary)}"
+            prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R {display_race_name} ({surface_info}{distance_info}m{turn_display})\n【想定馬場】: {cond}\n【出走馬リスト】:\n{chr(10).join(table_summary)}"
 
             with st.spinner("🧠 Geminiがレースの過去傾向・枠順・プレミアムデータを検索＆分析中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
