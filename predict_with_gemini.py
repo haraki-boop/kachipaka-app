@@ -29,6 +29,11 @@ st.markdown("""
     .sense-card { background-color: #ffffff; border-left: 6px solid #8e44ad; padding: 16px 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
     .sense-title { font-size: 1.2rem; font-weight: bold; color: #8e44ad; }
     .ticket-badge { font-size: 1.1rem; font-weight: bold; color: #d35400; background: #fef5e7; padding: 4px 10px; border-radius: 4px; display: inline-block; }
+    
+    /* 💡 Gemini展開予想用のカードデザイン */
+    .gemini-view-card { background-color: #f0f8ff; border-left: 5px solid #3498db; padding: 16px 20px; border-radius: 5px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+    .gemini-view-title { color: #2980b9; font-size: 1.2rem; font-weight: bold; margin-bottom: 8px; }
+    .gemini-view-text { font-size: 16px; color: #333; line-height: 1.6; margin: 0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -219,7 +224,7 @@ def generate_base_table(disp_df):
 
 def generate_fusion_table(merged_df):
     html = "<div class='table-container'><table class='kachi-table'>"
-    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>調教</th><th style='text-align:left;'>調教タイム</th><th>AIｽｺア</th><th>Python印</th><th>Gemini印</th><th style='text-align:left;'>Gemini短評</th></tr>"
+    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>AIｽｺア</th><th>Python印</th><th>Gemini印</th><th style='text-align:left; min-width: 400px;'>Gemini短評 (AI評価＆展開状態)</th></tr>"
     for _, r in merged_df.iterrows():
         w_num = str(r.get('枠番', ''))
         display_waku = w_num if w_num and w_num != 'nan' and not w_num.startswith("90") else "-"
@@ -227,15 +232,12 @@ def generate_fusion_table(merged_df):
         m_num = str(r.get('馬番', ''))
         display_umaban = "未定" if m_num.startswith("90") or int(float(m_num)) >= 90 else f"{int(float(m_num)):02d}"
         
-        eval_mark = str(r.get('調教評価', '-')).strip()
-        eval_time = str(r.get('調教タイム', '-')).strip()
-        
+        # 💡 短評が長文になるため、white-space: normal で自動折り返し設定
         html += f"<tr><td><b>{display_waku}</b></td><td><b>{display_umaban}</b></td><td style='text-align:left; font-weight:bold;'>{r.get('馬名', '-')}</td>"
-        html += f"<td><b>{eval_mark}</b></td><td style='text-align:left; font-size:14px; color:#555;'>{eval_time}</td>"
         html += f"<td><b>{int(r.get('ai_score', 100))}</b></td>"
         html += f"<td><span class='badge-mark {get_badge_class(r.get('印', '消'))}'>{r.get('印', '消')}</span></td>"
         html += f"<td><span class='badge-mark {get_badge_class(r.get('Gemini印', '消'))}'>{r.get('Gemini印', '消')}</span></td>"
-        html += f"<td style='text-align:left; font-size:15px; color:#444;'>{r.get('短評', '-')}</td></tr>"
+        html += f"<td style='text-align:left; font-size:15px; color:#444; white-space:normal; line-height:1.5; padding: 12px;'>{r.get('短評', '-')}</td></tr>"
     html += "</table></div>"
     return html
 
@@ -288,7 +290,6 @@ if st.session_state['selected_race_id']:
     surface_info = r_info.get('surface', '不明')
     distance_info = r_info.get('distance', '')
     
-    # 💡 左右回り・直線の判定ロジックを追加
     place_name_str = r_info.get('place_name', '')
     dist_str = str(distance_info)
     turn_info = ""
@@ -304,7 +305,6 @@ if st.session_state['selected_race_id']:
     
     res_df, pat, rec_ticket, buy_detail, race_day = render_race_predictions(t_id, "良")
     
-    # 💡 画面のタイトルに「左右回り」と「開催○日目」を反映
     st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{display_race_name}】 <span style='font-size:18px; color:#7f8c8d;'>({surface_info}{distance_info}m{turn_display} / 開催{race_day}日目)</span></h2>", unsafe_allow_html=True)
     
     cond = st.radio("想定馬場 (AIのコース・馬場バイアス補正に反映されます)", ["良", "稍重", "重", "不良"], horizontal=True)
@@ -329,7 +329,7 @@ if st.session_state['selected_race_id']:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        if st.button("🧠 Geminiに全データを渡し、過去傾向を加味した定性評価を実行", type="primary", use_container_width=True):
+        if st.button("🧠 Geminiに全データを渡し、展開予想と定性評価を実行", type="primary", use_container_width=True):
             if not GEMINI_API_KEY:
                 st.error("【設定エラー】APIキーが見つかりません。")
                 st.stop()
@@ -343,12 +343,13 @@ if st.session_state['selected_race_id']:
                 race_class = "条件戦"
 
             if race_class == "新馬戦":
-                search_instruction = "【新馬戦の特別指示】調教タイムが不足しがちなため、Google検索で『馬名 新馬 評判』『馬名 血統 評価』『馬名 追い切り 動き』を調べ、関係者の絶賛コメントや血統の早期完成度、併せ馬での動きといった定性情報を重視して評価してください。"
+                search_instruction = "【新馬戦の特別指示】調教タイムが不足しがちなため、Google検索で『馬名 新馬 評判』『馬名 血統 評価』『馬名 追い切り 動き』を調べ、関係者の絶賛コメントや血統の早期完成度、併せ馬での動きといった定性情報を重視してください。"
             elif race_class == "重賞・OP":
                 search_instruction = "【重賞・OPの特別指示】調教タイムが不足する馬がいるため、Google検索で『対象レース名 過去10年 傾向』や『対象レース名 枠順 脚質 穴馬』を調べ、そのレース特有の好走パターン（内枠有利、特定のローテなど）との合致度を最優先で評価してください。"
             else:
                 search_instruction = "【条件戦の特別指示】提供された調教タイム・調教評価の数値をフル活用しつつ、Google検索で『開催場 芝/ダート 距離 傾向』（例：東京 芝 1600m 傾向）を調べ、コース特有の有利不利（枠順や脚質バイアス）と掛け合わせて評価してください。"
 
+            # 💡 テーブルデータにAIの「勝率」と「印」を混ぜ込んでGeminiにカンニングさせる
             table_summary = []
             for _, r in res_df.iterrows():
                 w_val = r.get('枠番', '-')
@@ -358,29 +359,44 @@ if st.session_state['selected_race_id']:
                 m_str = m_val if pd.notna(m_val) and str(m_val) != 'nan' and not str(m_val).startswith('90') else "未定"
                 
                 odds_val = f"{r.get('オッズ')}倍({r.get('人気')}人気)" if pd.notna(r.get('オッズ')) else "オッズ未確定"
+                
+                win_rate = f"{r.get('win_prob', 0) * 100:.1f}%"
+                ai_mark = r.get('印', '消')
 
-                info = (f"枠:{w_str} | 馬番:{m_str} | 馬名:{r.get('馬名','')} | 騎手:{r.get('騎手','')} | 調教師:{r.get('調教師','')} | "
-                        f"オッズ:{odds_val} | 脚質:{r.get('推測脚質','')} | 調教評価:{r.get('調教評価','-')} | "
-                        f"調教タイム:{r.get('調教タイム','-')} | 短評:{r.get('調教短評','-')} | 厩舎コメント:{r.get('厩舎コメント','-')}")
+                info = (f"枠:{w_str} | 馬番:{m_str} | 馬名:{r.get('馬名','')} | 騎手:{r.get('騎手','')} | "
+                        f"オッズ:{odds_val} | 脚質:{r.get('推測脚質','')} | "
+                        f"【Python AI評価: 1着率 {win_rate} / 印 {ai_mark}】 | "
+                        f"調教評価:{r.get('調教評価','-')} | 調教タイム:{r.get('調教タイム','-')} | 短評:{r.get('調教短評','-')} | 厩舎コメント:{r.get('厩舎コメント','-')}")
                 table_summary.append(info)
 
+            # 💡 最強のプロンプト（レース見解作成＋AIカンニング＋短評の具体化縛り）
             system_instruction = f"""
 あなたはプロ競馬予想家（トラックマン）です。
 【あなたのワークフロー】
-1. 提供された「出走馬リスト」の枠順・馬番、騎手、オッズ、および【プレミアム定性データ（調教評価、タイム、短評、厩舎コメント）】を熟読してください。
+1. 提供された「出走馬リスト」には、枠順、オッズ、調教データに加え、【Python(確率AI)が算出した1着率と印】が含まれています。これを熟読してください。
 2. {search_instruction}
-3. 枠順の並びによる展開の有利不利（内枠有利、外から被される懸念、同型馬の隣枠など）や、オッズに対する評価のギャップ（過小評価されている実力馬・好調馬）も考慮してください。
-4. 検索で得た「過去の傾向・コースバイアス・評判」と、提供された「プレミアムデータ（調教・コメント）」が合致する人気薄の馬がいれば、積極的に☆（穴馬）として評価してください。
-5. Python（確率計算AI）とは異なる「人間の専門家としての視点（勝負気配、展開面、調子）」で最終評価を下してください。
+3. まず、全体のペースや展開、馬場バイアス、過去の傾向を考慮した「レース全体の見解（展開予想）」を作成してください。
+4. 各馬の評価では、Python(AI)の評価に対して「過剰人気」「妥当」「過小評価」のいずれかをジャッジし、AIの死角（調教の良化、展開の利、血統バイアスなど）を突く人間らしい鋭い評価を下してください。
+5. 短評では「調教が良い」「実績上位」などの抽象的な言葉は絶対に使用禁止。必ず「坂路54.8秒」「スワンSで有利な内枠」「AIは無印だが〜」といった具体的な数値や事実、AIとの評価の乖離理由を記述してください。
 
 【印の打ち方】
 ◎(1頭), ◯(1頭), ▲(1頭), △(1頭), ☆(1〜2頭), 消(それ以外)
-※必ず以下のJSONのみ出力すること。（馬名で紐付けます）
-{{ "evaluations": [ {{"馬名": "イクイノックス", "Gemini印": "◎", "短評": "〇〇のため好走必至"}}, ... ] }}
-"""
-            prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R {display_race_name} ({surface_info}{distance_info}m{turn_display})\n【想定馬場】: {cond}\n【出走馬リスト】:\n{chr(10).join(table_summary)}"
 
-            with st.spinner("🧠 Geminiがレースの過去傾向・枠順・プレミアムデータを検索＆分析中..."):
+※必ず以下のJSON形式のみで出力してください。
+{{
+  "race_view": "逃げ馬が3頭揃ったためハイペース必至。新潟1600mの傾向通り、外枠の差し馬が台頭する展開になる。",
+  "evaluations": [ 
+    {{
+      "馬名": "ウメヒナタ", 
+      "Gemini印": "☆", 
+      "短評": "AIは勝率3%で消し評価だが、坂路54.8秒の動きは絶好。右回りの内枠有利な傾向に合致し、逆転の目あり。"
+    }}
+  ] 
+}}
+"""
+            prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R {display_race_name} ({surface_info}{distance_info}m{turn_display} 開催{race_day}日目)\n【想定馬場】: {cond}\n【出走馬リスト】:\n{chr(10).join(table_summary)}"
+
+            with st.spinner("🧠 Geminiがレース展開予想を作成し、AIの死角を突く定性評価を実行中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 gemini_data = None
                 try:
@@ -398,6 +414,16 @@ if st.session_state['selected_race_id']:
                     st.error(f"❌ APIエラー: {e}")
                     
                 if gemini_data:
+                    # 💡 レース見解（展開予想）のUI表示
+                    gemini_view = gemini_data.get("race_view", "")
+                    if gemini_view:
+                        st.markdown(f"""
+                        <div class='gemini-view-card'>
+                            <div class='gemini-view-title'>📝 トラックマンGeminiの展開予想・レース見解</div>
+                            <p class='gemini-view-text'>{gemini_view}</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
                     evals = gemini_data.get("evaluations", [])
                     eval_df = pd.DataFrame(evals)
                     if not eval_df.empty and '馬名' in eval_df.columns:
