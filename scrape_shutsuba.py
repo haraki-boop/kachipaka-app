@@ -70,10 +70,10 @@ def get_premium_details(driver, race_id):
     def init_horse(name):
         if name not in premium_data:
             premium_data[name] = {
-                "厩舎コメント": "", "調教タイム": "", "調教短評": "", "調教評価": "", "調子偏差値": ""
+                "厩舎コメント": "", "調教タイム": "", "調教短評": "", "調教評価": "", "調子偏差値": "", "推測脚質": ""
             }
 
-    # 📌 2. コメントページ（馬名で取得）
+    # 📌 2. コメントページ
     try:
         driver.get(f"https://race.netkeiba.com/race/comment.html?race_id={race_id}")
         time.sleep(1.5)
@@ -89,7 +89,7 @@ def get_premium_details(driver, race_id):
     except Exception:
         pass
 
-    # 📌 3. 調教ページ（馬名で取得）
+    # 📌 3. 調教ページ
     try:
         driver.get(f"https://race.netkeiba.com/race/oikiri.html?race_id={race_id}")
         time.sleep(1.5)
@@ -115,7 +115,7 @@ def get_premium_details(driver, race_id):
     except Exception:
         pass
         
-    # 📌 4. 調子偏差値（馬名で取得）
+    # 📌 4. 調子偏差値
     try:
         driver.get(f"https://race.sp.netkeiba.com/barometer/score.html?race_id={race_id}")
         time.sleep(1.5)
@@ -129,6 +129,25 @@ def get_premium_details(driver, race_id):
             val_span = tr.find("span", class_="Value_Num")
             if val_span:
                 premium_data[h_name]["調子偏差値"] = val_span.text.strip()
+    except Exception:
+        pass
+
+    # 📌 5. 脚質データ（馬柱ページ） 💡ここが今回の追加箇所！
+    try:
+        place_code = int(str(race_id)[4:6])
+        domain = "race.netkeiba.com" if place_code <= 10 else "nar.netkeiba.com"
+        driver.get(f"https://{domain}/race/shutuba_past.html?race_id={race_id}")
+        time.sleep(1.5)
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        for tr in soup.find_all("tr", class_=re.compile("HorseList")):
+            a_tag = tr.find("a", href=re.compile(r"/horse/"))
+            if not a_tag: continue
+            h_name = clean_horse_name(a_tag.text)
+            init_horse(h_name)
+            
+            kyakusitu_elem = tr.find("span", class_="kyakusitu")
+            if kyakusitu_elem:
+                premium_data[h_name]["推測脚質"] = clean_text(kyakusitu_elem.text)
     except Exception:
         pass
 
@@ -222,7 +241,6 @@ def scrape_shutsuba():
                             if kw in h: return i_h
                     return -1
 
-                # 💡 列の並びが特別登録時と確定時で変わっても柔軟に対応する設計
                 idx_waku = get_idx(["枠"])
                 idx_umaban = get_idx(["馬番"])
                 idx_name = get_idx(["馬名"])
@@ -265,7 +283,7 @@ def scrape_shutsuba():
                                 if m: p_val = int(m.group(1))
 
                         p_data = p_data_dict.get(horse_name, {
-                            "厩舎コメント": "", "調教タイム": "", "調教短評": "", "調教評価": "", "調子偏差値": ""
+                            "厩舎コメント": "", "調教タイム": "", "調教短評": "", "調教評価": "", "調子偏差値": "", "推測脚質": ""
                         })
 
                         temp_horse_list.append({
@@ -285,6 +303,7 @@ def scrape_shutsuba():
                             "馬体重": weight_str,
                             "オッズ": o_val,
                             "人気": p_val,
+                            "推測脚質": p_data["推測脚質"], # 💡 馬柱から引っ張ってきたデータを結合！
                             "調子偏差値": p_data["調子偏差値"],
                             "調教タイム": p_data["調教タイム"],
                             "調教短評": p_data["調教短評"],
