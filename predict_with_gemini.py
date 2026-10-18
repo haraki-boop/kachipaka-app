@@ -45,7 +45,6 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 FUTURE_CSV = "future_races.csv"
 CACHE_FILE = "app_cache.pkl"
 BIAS_CSV = "course_bias.csv"
-# 💡 Gemini用の過去10年データCSV
 WAKU_CSV = "all_races_waku_stats.csv"
 
 def clean_name(text):
@@ -88,17 +87,17 @@ def load_cache():
             return {}
     return {}
 
+# 💡 キャッシュを外し、常に最新を読み込む
 def load_course_bias():
     if os.path.exists(BIAS_CSV):
         return pd.read_csv(BIAS_CSV, dtype={'距離': str}, encoding='utf-8-sig')
     else:
         df = pd.DataFrame(columns=['競馬場', '芝ダート', '距離', '内枠', '外枠', '逃げ', '先行', '差し', '追込'])
         df.loc[0] = ['東京', '芝', '1600', 1.05, 0.95, 0.90, 0.95, 1.10, 1.05]
-        df.loc[1] = ['東京', 'ダート', '1400', 0.95, 1.10, 1.15, 1.10, 0.90, 0.85]
         df.to_csv(BIAS_CSV, index=False, encoding='utf-8-sig')
         return df
 
-@st.cache_data
+# 💡 キャッシュを外し、常に最新の枠CSVを読み込む
 def load_waku_stats():
     if os.path.exists(WAKU_CSV):
         return pd.read_csv(WAKU_CSV, dtype={'距離': str}, encoding='utf-8-sig')
@@ -377,9 +376,8 @@ if st.session_state['selected_race_id']:
             df_waku = load_waku_stats()
             search_surface = 'ダート' if 'ダ' in str(surface_info) else '芝'
             
+            waku_extracted_name = ""
             if not df_waku.empty:
-                # 1. まず「レース名」でピンポイント検索 (有馬記念など)
-                # DataFrameのレース名が、現在のレース名に含まれているかチェック
                 match = pd.DataFrame()
                 for idx, row in df_waku.iterrows():
                     csv_race_name = str(row['レース名_クラス']).strip()
@@ -387,7 +385,6 @@ if st.session_state['selected_race_id']:
                         match = df_waku.iloc[[idx]]
                         break
                 
-                # 2. レース名で見つからなければ「クラス × 条件」で検索
                 if match.empty:
                     match = df_waku[(df_waku['レース名_クラス'] == race_class) & 
                                     (df_waku['競馬場'] == place_name_str) & 
@@ -396,11 +393,18 @@ if st.session_state['selected_race_id']:
                 
                 if not match.empty:
                     w_data = match.iloc[0]
+                    waku_extracted_name = w_data['レース名_クラス']
                     waku_info_text = f"\n【㊙️トラックマン極秘データ：過去10年の同条件({w_data['レース名_クラス']}) 枠順別成績】\n"
                     for i in range(1, 9):
                         win = w_data.get(f'{i}枠_勝率', '-')
                         pl = w_data.get(f'{i}枠_複勝率', '-')
                         waku_info_text += f"・{i}枠：勝率 {win}% / 複勝率 {pl}%\n"
+
+            # 💡 UI上で「Geminiにカンペを渡せたか」を可視化する
+            if waku_info_text:
+                st.success(f"✅ Geminiにカンペを渡しました: 『過去10年の {waku_extracted_name} 枠順別成績』を参考にして考察します。")
+            else:
+                st.warning("⚠️ 該当する過去10年の枠順データがCSVに見つかりませんでした。データなしでフラットに考察します。")
 
             if race_class == "新馬":
                 search_instruction = "【新馬戦の特別指示】調教タイムが不足しがちなため、Google検索で『馬名 新馬 評判』を調べ、関係者の絶賛コメントや血統の早期完成度を重視してください。"
@@ -422,7 +426,6 @@ if st.session_state['selected_race_id']:
                         f"調教タイム:{r.get('調教タイム','-')} | 短評:{r.get('調教短評','-')} | 厩舎コメント:{r.get('厩舎コメント','-')}")
                 table_summary.append(info)
 
-            # 💡 抽出した枠順データをGeminiの指示に追加！
             system_instruction = f"""
 あなたはプロ競馬予想家（トラックマン）です。
 【あなたのワークフロー】
