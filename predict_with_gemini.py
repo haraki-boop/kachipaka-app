@@ -45,6 +45,8 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 FUTURE_CSV = "future_races.csv"
 CACHE_FILE = "app_cache.pkl"
 BIAS_CSV = "course_bias.csv"
+# 💡 Gemini用の過去10年データCSV
+WAKU_CSV = "all_races_waku_stats.csv"
 
 def clean_name(text):
     if pd.isna(text): return ""
@@ -96,11 +98,17 @@ def load_course_bias():
         df.to_csv(BIAS_CSV, index=False, encoding='utf-8-sig')
         return df
 
+@st.cache_data
+def load_waku_stats():
+    if os.path.exists(WAKU_CSV):
+        return pd.read_csv(WAKU_CSV, dtype={'距離': str}, encoding='utf-8-sig')
+    return pd.DataFrame()
+
 df_future = load_future_data()
 df_course_bias = load_course_bias()
 
 # ==========================================
-# 📊 完全カスタム × 動的ミックスバイアス計算ロジック
+# 📊 【Python専用】完全カスタム × 動的ミックスバイアス計算ロジック
 # ==========================================
 def calculate_mixed_bias(row, place_name, surface, distance, cond, race_day, df_bias):
     coef = 1.0
@@ -306,9 +314,10 @@ if st.session_state['selected_race_id']:
     
     place_name_str = r_info.get('place_name', '')
     dist_str = str(distance_info)
+    dist_num_str = re.sub(r'\D', '', dist_str)
     turn_info = ""
     
-    if place_name_str == "新潟" and dist_str == "1000":
+    if place_name_str == "新潟" and dist_num_str == "1000":
         turn_info = "直線"
     elif place_name_str in ['中山', '阪神', '京都', '札幌', '函館', '福島', '小倉']:
         turn_info = "右回り"
@@ -348,20 +357,57 @@ if st.session_state['selected_race_id']:
                 st.error("【設定エラー】APIキーが見つかりません。")
                 st.stop()
 
+            # 💡 クラス判定ロジック
             race_class = "条件戦"
             if re.search(r'新馬|メイクデビュー', display_race_name):
-                race_class = "新馬戦"
+                race_class = "新馬"
+            elif re.search(r'未勝利', display_race_name):
+                race_class = "未勝利"
+            elif re.search(r'1勝|500万', display_race_name):
+                race_class = "1勝クラス"
+            elif re.search(r'2勝|1000万', display_race_name):
+                race_class = "2勝クラス"
+            elif re.search(r'3勝|1600万', display_race_name):
+                race_class = "3勝クラス"
             elif re.search(r'G1|G2|G3|OP|オープン|リステッド|L', display_race_name, re.IGNORECASE):
-                race_class = "重賞・OP"
-            elif re.search(r'未勝利|1勝|2勝|3勝', display_race_name):
-                race_class = "条件戦"
+                race_class = "OP"
+                
+            # 💡 Geminiにだけ渡す「過去10年のデータ」の抽出
+            waku_info_text = ""
+            df_waku = load_waku_stats()
+            search_surface = 'ダート' if 'ダ' in str(surface_info) else '芝'
+            
+            if not df_waku.empty:
+                # 1. まず「レース名」でピンポイント検索 (有馬記念など)
+                # DataFrameのレース名が、現在のレース名に含まれているかチェック
+                match = pd.DataFrame()
+                for idx, row in df_waku.iterrows():
+                    csv_race_name = str(row['レース名_クラス']).strip()
+                    if csv_race_name in display_race_name and csv_race_name not in ['OP', '3勝クラス', '2勝クラス', '1勝クラス', '未勝利', '新馬']:
+                        match = df_waku.iloc[[idx]]
+                        break
+                
+                # 2. レース名で見つからなければ「クラス × 条件」で検索
+                if match.empty:
+                    match = df_waku[(df_waku['レース名_クラス'] == race_class) & 
+                                    (df_waku['競馬場'] == place_name_str) & 
+                                    (df_waku['芝ダート'] == search_surface) & 
+                                    (df_waku['距離'] == dist_num_str)]
+                
+                if not match.empty:
+                    w_data = match.iloc[0]
+                    waku_info_text = f"\n【㊙️トラックマン極秘データ：過去10年の同条件({w_data['レース名_クラス']}) 枠順別成績】\n"
+                    for i in range(1, 9):
+                        win = w_data.get(f'{i}枠_勝率', '-')
+                        pl = w_data.get(f'{i}枠_複勝率', '-')
+                        waku_info_text += f"・{i}枠：勝率 {win}% / 複勝率 {pl}%\n"
 
-            if race_class == "新馬戦":
-                search_instruction = "【新馬戦の特別指示】調教タイムが不足しがちなため、Google検索で『馬名 新馬 評判』『馬名 血統 評価』『馬名 追い切り 動き』を調べ、関係者の絶賛コメントや血統の早期完成度、併せ馬での動きといった定性情報を重視してください。"
-            elif race_class == "重賞・OP":
-                search_instruction = "【重賞・OPの特別指示】調教タイムが不足する馬がいるため、Google検索で『対象レース名 過去10年 傾向』や『対象レース名 枠順 脚質 穴馬』を調べ、そのレース特有の好走パターン（内枠有利、特定のローテなど）との合致度を最優先で評価してください。"
+            if race_class == "新馬":
+                search_instruction = "【新馬戦の特別指示】調教タイムが不足しがちなため、Google検索で『馬名 新馬 評判』を調べ、関係者の絶賛コメントや血統の早期完成度を重視してください。"
+            elif race_class == "OP" or re.search(r'G1|G2|G3', display_race_name, re.IGNORECASE):
+                search_instruction = "【重賞・OPの特別指示】Google検索で『対象レース名 過去10年 傾向』を調べ、そのレース特有の好走パターン（特定のローテなど）との合致度を最優先で評価してください。"
             else:
-                search_instruction = "【条件戦の特別指示】提供された調教タイム・調教評価の数値をフル活用しつつ、Google検索で『開催場 芝/ダート 距離 傾向』（例：東京 芝 1600m 傾向）を調べ、コース特有の有利不利（枠順や脚質バイアス）と掛け合わせて評価してください。"
+                search_instruction = "【条件戦の特別指示】提供された調教タイム・調教評価の数値をフル活用しつつ、該当コースの定性的な有利不利を考慮してください。"
 
             table_summary = []
             for _, r in res_df.iterrows():
@@ -376,37 +422,37 @@ if st.session_state['selected_race_id']:
                         f"調教タイム:{r.get('調教タイム','-')} | 短評:{r.get('調教短評','-')} | 厩舎コメント:{r.get('厩舎コメント','-')}")
                 table_summary.append(info)
 
+            # 💡 抽出した枠順データをGeminiの指示に追加！
             system_instruction = f"""
 あなたはプロ競馬予想家（トラックマン）です。
 【あなたのワークフロー】
-1. 提供された「出走馬リスト」には、枠順、馬番、騎手、脚質、および【プレミアム定性データ（調教評価、タイム、短評、厩舎コメント）】が含まれています。これを熟読してください。※世間のオッズや人気は意図的に伏せています。
+1. 提供された「出走馬リスト」と【㊙️トラックマン極秘データ（過去10年の枠順成績）】を熟読してください。※世間のオッズや人気、他者の予想印は意図的に伏せています。
 2. {search_instruction}
-3. まず、全体のペースや展開、馬場バイアス、過去の傾向を考慮した「レース全体の見解（展開予想）」を作成してください。
-4. オッズや人気の先入観を持たず、純粋な調教データ、陣営コメント、コース傾向との合致度から「激走の可能性が高い馬（実力馬・穴馬）」をフラットに評価してください。
-5. 各馬の短評では「調教が良い」「実績上位」などの抽象的な言葉は絶対に使用禁止。必ず「坂路54.8秒」「スワンSで有利な内枠」「厩舎の勝負コメント」といった具体的な数値や事実を記述してください。
+3. まず、提供した極秘の枠順データ、全体のペースや展開、馬場バイアスを考慮した「レース全体の見解（展開予想）」を作成してください。枠順データから読み取れる有利不利には必ず言及すること。
+4. オッズや人気の先入観を持たず、純粋な調教データ、陣営コメント、過去データの合致度から「激走の可能性が高い馬（実力馬・穴馬）」をフラットに評価してください。
+5. 短評には必ず「坂路54.8秒」「過去10年データで勝率◯%の有利な枠」「厩舎の勝負コメント」といった具体的な数値や事実を記述してください。
 
 【印の打ち方】
 ◎(1頭), ◯(1頭), ▲(1頭), △(1頭), ☆(1〜2頭), 消(それ以外)
 
 ※必ず以下のJSON形式のみで出力してください。
 {{
-  "race_view": "展開予想のテキスト",
+  "race_view": "過去10年のデータを見ると1枠の勝率が突出しており...展開予想テキスト...",
   "evaluations": [ 
     {{
       "馬名": "ウメヒナタ", 
       "Gemini印": "☆", 
-      "短評": "坂路54.8秒の動きは絶好..."
+      "短評": "過去10年で最も複勝率が高い8枠を引き当て..."
     }}
   ] 
 }}
 """
-            prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R {display_race_name} ({surface_info}{distance_info}m{turn_display} 開催{race_day}日目)\n【想定馬場】: {cond}\n【出走馬リスト】:\n{chr(10).join(table_summary)}"
+            prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R {display_race_name} ({surface_info}{distance_info}m{turn_display} 開催{race_day}日目)\n【想定馬場】: {cond}\n{waku_info_text}\n【出走馬リスト】:\n{chr(10).join(table_summary)}"
 
-            with st.spinner("🧠 Geminiがレース展開予想を作成し、オッズ度外視の定性評価を実行中..."):
+            with st.spinner("🧠 Geminiが極秘データと定性情報を分析し、レース見解を作成中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 gemini_data = None
                 try:
-                    # 💡 修正点: Google検索ツールを使うため、response_mime_type設定を削除
                     response = client.models.generate_content(
                         model='gemini-2.5-flash', 
                         contents=prompt, 
@@ -418,12 +464,10 @@ if st.session_state['selected_race_id']:
                     )
                     
                     res_text = response.text if response.text else ""
-                    # バッククォートの除去などの安全処理
                     res_text = re.sub(r'^```(?:json)?\n', '', res_text)
                     res_text = re.sub(r'\n```$', '', res_text)
                     res_text = res_text.strip()
                     
-                    # 確実にJSON部分だけを抜き取る
                     match = re.search(r'\{.*\}', res_text, re.DOTALL)
                     if match:
                         res_text = match.group(0)
