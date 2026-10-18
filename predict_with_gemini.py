@@ -86,15 +86,12 @@ def load_cache():
             return {}
     return {}
 
-# 💡 外部バイアスCSVの読み込み（なければ自動生成）
-@st.cache_data
+# 💡 修正点1: キャッシュ機能を意図的に外し、保存されるたびに必ず最新のCSVを読み込むように変更
 def load_course_bias():
     if os.path.exists(BIAS_CSV):
         return pd.read_csv(BIAS_CSV, dtype={'距離': str}, encoding='utf-8-sig')
     else:
-        # テンプレートを作成して保存
         df = pd.DataFrame(columns=['競馬場', '芝ダート', '距離', '内枠', '外枠', '逃げ', '先行', '差し', '追込'])
-        # サンプル行を追加
         df.loc[0] = ['東京', '芝', '1600', 1.05, 0.95, 0.90, 0.95, 1.10, 1.05]
         df.loc[1] = ['東京', 'ダート', '1400', 0.95, 1.10, 1.15, 1.10, 0.90, 0.85]
         df.to_csv(BIAS_CSV, index=False, encoding='utf-8-sig')
@@ -115,13 +112,17 @@ def calculate_mixed_bias(row, place_name, surface, distance, cond, race_day, df_
     is_uchi = 1 <= waku_num <= 3
     is_soto = 6 <= waku_num <= 8
     
-    dist_str = str(int(float(distance))) if pd.notna(distance) and str(distance).replace('.','').isdigit() else "1600"
+    # 💡 修正点2: 距離データから「m」などを排除し、純粋な数字文字列に統一
+    dist_str = re.sub(r'\D', '', str(distance))
+    if not dist_str: dist_str = "1600"
+    
+    # 💡 修正点3: 出馬表の「ダ」表記を「ダート」に強制変換してCSVと一致させる
+    search_surface = 'ダート' if 'ダ' in str(surface) else '芝'
 
     # --- 1層目: CSVからのベース補正 (競馬場 × 芝/ダ × 距離) ---
     if not df_bias.empty:
-        # 完全一致するコース設定を探す
         match = df_bias[(df_bias['競馬場'] == place_name) & 
-                        (df_bias['芝ダート'] == surface) & 
+                        (df_bias['芝ダート'] == search_surface) & 
                         (df_bias['距離'] == dist_str)]
         
         if not match.empty:
@@ -135,23 +136,22 @@ def calculate_mixed_bias(row, place_name, surface, distance, cond, race_day, df_
             elif kyaku == '追込' and pd.notna(b.get('追込')): coef *= float(b['追込'])
 
     # --- 2層目: 当日の天候・馬場状態スパイス ---
-    if surface == '芝':
+    if search_surface == '芝':
         if cond in ['重', '不良']:
             if kyaku in ['逃げ', '先行']: coef *= 1.05
             elif kyaku in ['差し', '追込']: coef *= 0.95
-    elif surface == 'ダート':
-        if cond in ['稍重', '重', '不良']: # 湿ったダートは前残り
+    elif search_surface == 'ダート':
+        if cond in ['稍重', '重', '不良']:
             if kyaku in ['逃げ', '先行']: coef *= 1.08 
             elif kyaku in ['追込']: coef *= 0.90
 
     # --- 3層目: 開催日数（芝の傷み具合）スパイス ---
-    if waku_num > 0 and surface == '芝':
-        if race_day <= 4: # 開幕週などインが綺麗
+    if waku_num > 0 and search_surface == '芝':
+        if race_day <= 4:
             if is_uchi: coef *= 1.05
-        elif race_day >= 9: # 開催終盤でインが荒れる
+        elif race_day >= 9:
             if is_soto: coef *= 1.05
 
-    # 過剰補正を防ぐため、最終倍率を 0.70倍 〜 1.50倍 に丸める
     return round(max(0.70, min(coef, 1.50)), 2)
 
 
@@ -193,7 +193,6 @@ def render_race_predictions(race_id_target, cond):
     except:
         race_day = 1
 
-    # 💡 新しいミックス計算式に置き換え
     df['bias_coef'] = df.apply(lambda row: calculate_mixed_bias(row, place_name, surface, distance, cond, race_day, df_course_bias), axis=1)
 
     df['win_prob'] = df['win_prob'] * df['bias_coef']
