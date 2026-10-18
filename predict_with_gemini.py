@@ -30,7 +30,6 @@ st.markdown("""
     .sense-title { font-size: 1.2rem; font-weight: bold; color: #8e44ad; }
     .ticket-badge { font-size: 1.1rem; font-weight: bold; color: #d35400; background: #fef5e7; padding: 4px 10px; border-radius: 4px; display: inline-block; }
     
-    /* 💡 Gemini展開予想用のカードデザイン */
     .gemini-view-card { background-color: #f0f8ff; border-left: 5px solid #3498db; padding: 16px 20px; border-radius: 5px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
     .gemini-view-title { color: #2980b9; font-size: 1.2rem; font-weight: bold; margin-bottom: 8px; }
     .gemini-view-text { font-size: 16px; color: #333; line-height: 1.6; margin: 0; }
@@ -45,6 +44,7 @@ if 'selected_race_id' not in st.session_state:
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 FUTURE_CSV = "future_races.csv"
 CACHE_FILE = "app_cache.pkl"
+BIAS_CSV = "course_bias.csv"
 
 def clean_name(text):
     if pd.isna(text): return ""
@@ -86,12 +86,27 @@ def load_cache():
             return {}
     return {}
 
+# 💡 外部バイアスCSVの読み込み（なければ自動生成）
+@st.cache_data
+def load_course_bias():
+    if os.path.exists(BIAS_CSV):
+        return pd.read_csv(BIAS_CSV, dtype={'距離': str}, encoding='utf-8-sig')
+    else:
+        # テンプレートを作成して保存
+        df = pd.DataFrame(columns=['競馬場', '芝ダート', '距離', '内枠', '外枠', '逃げ', '先行', '差し', '追込'])
+        # サンプル行を追加
+        df.loc[0] = ['東京', '芝', '1600', 1.05, 0.95, 0.90, 0.95, 1.10, 1.05]
+        df.loc[1] = ['東京', 'ダート', '1400', 0.95, 1.10, 1.15, 1.10, 0.90, 0.85]
+        df.to_csv(BIAS_CSV, index=False, encoding='utf-8-sig')
+        return df
+
 df_future = load_future_data()
+df_course_bias = load_course_bias()
 
 # ==========================================
-# 📊 動的コース・馬場・枠順バイアス計算ロジック
+# 📊 【新】完全カスタム × 動的ミックスバイアス計算ロジック
 # ==========================================
-def calculate_dynamic_bias(row, place_name, surface, distance, cond, race_day):
+def calculate_mixed_bias(row, place_name, surface, distance, cond, race_day, df_bias):
     coef = 1.0
     kyaku = str(row.get('推測脚質', '-')).strip()
     waku_str = str(row.get('枠番', ''))
@@ -100,39 +115,45 @@ def calculate_dynamic_bias(row, place_name, surface, distance, cond, race_day):
     is_uchi = 1 <= waku_num <= 3
     is_soto = 6 <= waku_num <= 8
     
-    dist_val = float(distance) if pd.notna(distance) and str(distance).isdigit() else 1600.0
+    dist_str = str(int(float(distance))) if pd.notna(distance) and str(distance).replace('.','').isdigit() else "1600"
 
+    # --- 1層目: CSVからのベース補正 (競馬場 × 芝/ダ × 距離) ---
+    if not df_bias.empty:
+        # 完全一致するコース設定を探す
+        match = df_bias[(df_bias['競馬場'] == place_name) & 
+                        (df_bias['芝ダート'] == surface) & 
+                        (df_bias['距離'] == dist_str)]
+        
+        if not match.empty:
+            b = match.iloc[0]
+            if is_uchi and pd.notna(b.get('内枠')): coef *= float(b['内枠'])
+            if is_soto and pd.notna(b.get('外枠')): coef *= float(b['外枠'])
+            
+            if kyaku == '逃げ' and pd.notna(b.get('逃げ')): coef *= float(b['逃げ'])
+            elif kyaku == '先行' and pd.notna(b.get('先行')): coef *= float(b['先行'])
+            elif kyaku == '差し' and pd.notna(b.get('差し')): coef *= float(b['差し'])
+            elif kyaku == '追込' and pd.notna(b.get('追込')): coef *= float(b['追込'])
+
+    # --- 2層目: 当日の天候・馬場状態スパイス ---
     if surface == '芝':
         if cond in ['重', '不良']:
             if kyaku in ['逃げ', '先行']: coef *= 1.05
             elif kyaku in ['差し', '追込']: coef *= 0.95
     elif surface == 'ダート':
-        if cond in ['稍重', '重', '不良']:
+        if cond in ['稍重', '重', '不良']: # 湿ったダートは前残り
             if kyaku in ['逃げ', '先行']: coef *= 1.08 
             elif kyaku in ['追込']: coef *= 0.90
 
-    right_turn = ['中山', '阪神', '京都', '札幌', '函館', '福島', '小倉']
-    left_turn = ['東京', '新潟', '中京']
-    
-    if place_name in right_turn:
-        if kyaku in ['逃げ', '先行']: coef *= 1.03
-    elif place_name in left_turn:
-        if kyaku in ['差し', '追込']: coef *= 1.03
-
-    if waku_num > 0:
-        if race_day <= 4:
+    # --- 3層目: 開催日数（芝の傷み具合）スパイス ---
+    if waku_num > 0 and surface == '芝':
+        if race_day <= 4: # 開幕週などインが綺麗
             if is_uchi: coef *= 1.05
-            if kyaku in ['逃げ', '先行']: coef *= 1.02
-        else:
+        elif race_day >= 9: # 開催終盤でインが荒れる
             if is_soto: coef *= 1.05
-            if kyaku in ['差し', '追込']: coef *= 1.03
 
-    if dist_val <= 1400:
-        if kyaku in ['逃げ', '先行']: coef *= 1.04
-    elif dist_val >= 2400:
-        if is_uchi and waku_num > 0: coef *= 1.04
+    # 過剰補正を防ぐため、最終倍率を 0.70倍 〜 1.50倍 に丸める
+    return round(max(0.70, min(coef, 1.50)), 2)
 
-    return round(max(0.8, min(coef, 1.25)), 2)
 
 # ==========================================
 # 🧠 PKLからの超高速ロード & 馬場補正適用
@@ -172,7 +193,8 @@ def render_race_predictions(race_id_target, cond):
     except:
         race_day = 1
 
-    df['bias_coef'] = df.apply(lambda row: calculate_dynamic_bias(row, place_name, surface, distance, cond, race_day), axis=1)
+    # 💡 新しいミックス計算式に置き換え
+    df['bias_coef'] = df.apply(lambda row: calculate_mixed_bias(row, place_name, surface, distance, cond, race_day, df_course_bias), axis=1)
 
     df['win_prob'] = df['win_prob'] * df['bias_coef']
     sum_p = df['win_prob'].sum()
@@ -379,7 +401,6 @@ if st.session_state['selected_race_id']:
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 gemini_data = None
                 try:
-                    # 💡 response_mime_type でJSON出力を強制する
                     response = client.models.generate_content(
                         model='gemini-2.5-flash', 
                         contents=prompt, 
@@ -391,7 +412,6 @@ if st.session_state['selected_race_id']:
                         )
                     )
                     
-                    # 💡 堅牢なJSONパース処理（マークダウン除去等）
                     res_text = response.text if response.text else ""
                     res_text = re.sub(r'^```(?:json)?\n', '', res_text)
                     res_text = re.sub(r'\n```$', '', res_text)
