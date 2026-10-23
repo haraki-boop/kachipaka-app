@@ -4,7 +4,7 @@ import time
 import pandas as pd
 import unicodedata
 from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta  # 👈 ここに timedelta を追加
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -73,49 +73,87 @@ def get_premium_details(driver, race_id):
                 "厩舎コメント": "", "調教タイム": "", "調教短評": "", "調教評価": "", "調子偏差値": "", "推測脚質": ""
             }
 
-    # 📌 2. コメントページ
+    # 📌 1. コメントページ
     try:
         driver.get(f"https://race.netkeiba.com/race/comment.html?race_id={race_id}")
         time.sleep(1.5)
         soup = BeautifulSoup(driver.page_source, "html.parser")
-        for item in soup.find_all(class_=re.compile("HorseList")):
+        
+        current_horse = ""
+        for item in soup.find_all(re.compile("tr|div|li"), class_=re.compile("HorseList|CommentItem")):
             a_tag = item.find("a", href=re.compile(r"/horse/"))
-            if not a_tag: continue
-            h_name = clean_horse_name(a_tag.text)
+            if a_tag:
+                current_horse = clean_horse_name(a_tag.text)
+                
+            if not current_horse: continue
+            init_horse(current_horse)
+            
             comment_elem = item.find(class_=re.compile("Comment"))
             if comment_elem:
-                init_horse(h_name)
-                premium_data[h_name]["厩舎コメント"] = comment_elem.text.strip().replace('\n', ' ')
+                c_text = comment_elem.text.strip().replace('\n', ' ')
+                if c_text and c_text != '-':
+                    premium_data[current_horse]["厩舎コメント"] = c_text
     except Exception:
         pass
 
-    # 📌 3. 調教ページ
+    # 📌 2. 調教ページ (併せ馬リンクによる乗っ取り防止・完全紐付け版)
     try:
         driver.get(f"https://race.netkeiba.com/race/oikiri.html?race_id={race_id}")
-        time.sleep(1.5)
+        time.sleep(2)
         soup = BeautifulSoup(driver.page_source, "html.parser")
-        for tr in soup.find_all("tr", class_=re.compile("HorseList")):
-            a_tag = tr.find("a", href=re.compile(r"/horse/"))
-            if not a_tag: continue
-            h_name = clean_horse_name(a_tag.text)
-            init_horse(h_name)
-            
-            time_elem = tr.find("td", class_=re.compile("Time"))
-            eval_elem = tr.find("td", class_=re.compile("Hyoka")) or tr.find("td", class_=re.compile("Eval"))
-            
-            raw_time = time_elem.get_text(separator=' ').strip() if time_elem else ""
-            raw_time = re.sub(r'\s+', ' ', raw_time)
-            m = re.match(r'^([^\d\-\.]*)([\d\.\(\)\-\s]+)(.*)', raw_time)
-            if m:
-                premium_data[h_name]["調教タイム"] = f"{m.group(1).strip()} {m.group(2).strip()}".strip()
-                premium_data[h_name]["調教短評"] = m.group(3).strip()
-            else:
-                premium_data[h_name]["調教短評"] = raw_time
-            premium_data[h_name]["調教評価"] = eval_elem.text.strip().replace('\n', ' ') if eval_elem else ""
-    except Exception:
-        pass
         
-    # 📌 4. 調子偏差値
+        current_horse = ""
+        
+        for tr in soup.find_all("tr"):
+            # 🚨【重要修正】併せ馬のリンクを拾わないよう、本命の馬名が入る専用セル（Horse_Info等）だけを探す
+            name_td = tr.find(class_=re.compile("Horse_Info|Horse_Name|HorseList_Item"))
+            if name_td:
+                a_tag = name_td.find("a", href=re.compile(r"/horse/"))
+                if a_tag:
+                    h_name = clean_horse_name(a_tag.text)
+                    if h_name:
+                        current_horse = h_name
+                        init_horse(current_horse)
+
+            if not current_horse:
+                continue
+
+            # 💡 調教タイムの取得
+            time_td = tr.find("td", class_=re.compile("TrainingTimeData"))
+            if time_td:
+                # 併せ馬のテキスト領域を一時的に削除し、純粋なタイムの数字だけを抽出
+                time_td_clone = BeautifulSoup(str(time_td), "html.parser")
+                for comment_div in time_td_clone.find_all(class_=re.compile("Comment_Cell")):
+                    comment_div.decompose()
+                
+                raw_time_text = time_td_clone.get_text(" ", strip=True)
+                lap_times = re.findall(r'\b\d{1,3}\.\d\s*\(\d{1,3}\.\d\)|\b\d{1,3}\.\d\b', raw_time_text)
+                
+                if lap_times:
+                    if not premium_data[current_horse]["調教タイム"]:
+                        premium_data[current_horse]["調教タイム"] = " ".join(lap_times)
+
+            # 💡 調教短評の取得
+            critic_elem = tr.find(class_=re.compile("TrainingCritic|TrainingComment|OikiriComment|TrainingReview_Cell"))
+            if critic_elem:
+                c_text = critic_elem.get_text(strip=True)
+                if c_text and c_text != '-' and len(c_text) > 2 and not any(kw in c_text for kw in ['先着', '遅れ', '併入', '同入']):
+                    if not premium_data[current_horse]["調教短評"]:
+                        premium_data[current_horse]["調教短評"] = c_text
+            
+            # 💡 調教評価の取得
+            eval_elem = tr.find(class_=re.compile("Rank_")) or tr.find("td", class_=re.compile("Hyoka|Eval"))
+            if eval_elem:
+                e_text = eval_elem.get_text(strip=True).replace('\n', ' ')
+                e_text_clean = re.sub(r'[^A-ZS]', '', e_text)
+                if e_text_clean:
+                    if not premium_data[current_horse]["調教評価"]:
+                        premium_data[current_horse]["調教評価"] = e_text_clean
+
+    except Exception as e:
+        print(f"調教ページ解析エラー: {e}")
+        
+    # 📌 3. 調子偏差値
     try:
         driver.get(f"https://race.sp.netkeiba.com/barometer/score.html?race_id={race_id}")
         time.sleep(1.5)
@@ -132,7 +170,7 @@ def get_premium_details(driver, race_id):
     except Exception:
         pass
 
-    # 📌 5. 脚質データ（馬柱ページ） 💡ここが今回の追加箇所！
+    # 📌 4. 脚質データ
     try:
         place_code = int(str(race_id)[4:6])
         domain = "race.netkeiba.com" if place_code <= 10 else "nar.netkeiba.com"
@@ -303,7 +341,7 @@ def scrape_shutsuba():
                             "馬体重": weight_str,
                             "オッズ": o_val,
                             "人気": p_val,
-                            "推測脚質": p_data["推測脚質"], # 💡 馬柱から引っ張ってきたデータを結合！
+                            "推測脚質": p_data["推測脚質"],
                             "調子偏差値": p_data["調子偏差値"],
                             "調教タイム": p_data["調教タイム"],
                             "調教短評": p_data["調教短評"],
@@ -333,8 +371,11 @@ def scrape_shutsuba():
         df_future = pd.DataFrame(race_data_list)
         df_future['オッズ'] = pd.to_numeric(df_future['オッズ'], errors='coerce')
         df_future['人気'] = pd.to_numeric(df_future['人気'], errors='coerce').astype('Int64')
-        df_future.to_csv(FUTURE_CSV, index=False, encoding='utf-8-sig')
-        print(f"\n✅ {len(race_data_list)}頭分のプレミアム出馬表データを {FUTURE_CSV} に保存完了！")
+        try:
+            df_future.to_csv(FUTURE_CSV, index=False, encoding='utf-8-sig')
+            print(f"\n✅ {len(race_data_list)}頭分のプレミアム出馬表データを {FUTURE_CSV} に保存完了！")
+        except PermissionError:
+            print(f"\n❌ 【エラー】ファイル {FUTURE_CSV} を開いたままです。エクセル等を閉じて再実行してください。")
     else:
         print("\n❌ データが1件も取得できませんでした。")
 
