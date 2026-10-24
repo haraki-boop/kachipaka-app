@@ -16,51 +16,40 @@ st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="logo.png
 
 st.markdown("""
 <style>
-    /* 🎯 背景グラデーション */
+    /* 🎯 背景をロゴに合わせたライトブルー＆ホワイトのグラデーションに変更 */
     .stApp {
         background: linear-gradient(135deg, #e0f7fa 0%, #ffffff 100%);
     }
     
-    /* 🎯 上部の見切れを防ぎつつ、フルワイドのまま余白を最小化 */
-    .block-container { 
-        padding-top: 3.5rem; 
-        padding-bottom: 1.5rem; 
-        padding-left: 2rem;
-        padding-right: 2rem;
-    }
+    /* 🎯 画面幅を広々と使いつつ、上部の見切れを防ぐ */
+    .block-container { padding-top: 3.5rem; padding-bottom: 2rem; }
     
-    /* 🎯 全体的にPCダッシュボードサイズ（高密度）に縮小 */
-    .section-header { font-size: 1.1rem; font-weight: bold; color: #2c3e50; margin: 0.8rem 0 0.5rem 0; border-bottom: 2px solid #ecf0f1; padding-bottom: 4px; }
-    
-    /* 表の文字サイズ・余白を「一般人サイズ」にキュッと縮小 */
-    .kachi-table { width: 100%; border-collapse: collapse; background-color: #ffffff; white-space: nowrap; font-size: 13px; }
-    .kachi-table th { padding: 6px 8px; text-align: center; background: #f8f9fa; border-bottom: 2px solid #dee2e6; font-size: 13px; font-weight: bold; }
-    .kachi-table td { padding: 6px 8px; text-align: center; border-bottom: 1px solid #f1f3f5; font-size: 13px; }
-    
-    /* バッジも小さく */
-    .badge-mark { color: #fff; padding: 3px 6px; border-radius: 4px; font-weight: bold; display: inline-block; min-width: 40px; font-size: 12px; }
+    .section-header { font-size: 1.5rem; font-weight: bold; color: #2c3e50; margin: 1.2rem 0; border-bottom: 2px solid #ecf0f1; padding-bottom: 6px; }
+    .kachi-table { width: 100%; border-collapse: collapse; background-color: #ffffff; white-space: nowrap; font-size: 17px; }
+    .kachi-table th { padding: 12px 10px; text-align: center; background: #f8f9fa; border-bottom: 2px solid #dee2e6; font-size: 17px; font-weight: bold; }
+    .kachi-table td { padding: 12px 10px; text-align: center; border-bottom: 1px solid #f1f3f5; font-size: 17px; }
+    .badge-mark { color: #fff; padding: 6px 12px; border-radius: 6px; font-weight: bold; display: inline-block; min-width: 60px; font-size: 16px; }
     .badge-honmei { background: #e74c3c; } .badge-taikou { background: #3498db; }
     .badge-tana { background: #2ecc71; } .badge-renka { background: #f39c12; }
     .badge-ana { background: #9b59b6; } .badge-keshi { background: #e0e0e0; color: #7f8c8d; }
     
-    /* カード類も余白を削ってシャープに */
-    .sense-card { background-color: #ffffff; border-left: 5px solid #8e44ad; padding: 10px 14px; border-radius: 4px; margin-bottom: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.05); }
-    .sense-title { font-size: 1rem; font-weight: bold; color: #8e44ad; }
-    .ticket-badge { font-size: 0.95rem; font-weight: bold; color: #d35400; background: #fef5e7; padding: 2px 6px; border-radius: 3px; display: inline-block; }
+    .sense-card { background-color: #ffffff; border-left: 6px solid #8e44ad; padding: 16px 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+    .sense-title { font-size: 1.2rem; font-weight: bold; color: #8e44ad; }
+    .ticket-badge { font-size: 1.1rem; font-weight: bold; color: #d35400; background: #fef5e7; padding: 4px 10px; border-radius: 4px; display: inline-block; }
     
-    .gemini-view-card { background-color: #f0f8ff; border-left: 4px solid #3498db; padding: 10px 14px; border-radius: 4px; margin-bottom: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.05); }
-    .gemini-view-title { color: #2980b9; font-size: 1rem; font-weight: bold; margin-bottom: 4px; }
-    .gemini-view-text { font-size: 13px; color: #333; line-height: 1.4; margin: 0; }
+    .gemini-view-card { background-color: #f0f8ff; border-left: 5px solid #3498db; padding: 16px 20px; border-radius: 5px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+    .gemini-view-title { color: #2980b9; font-size: 1.2rem; font-weight: bold; margin-bottom: 8px; }
+    .gemini-view-text { font-size: 16px; color: #333; line-height: 1.6; margin: 0; }
 </style>
 """, unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
-# 🎨 ヘッダーロゴの配置（右端へ配置）
+# 🎨 ヘッダーロゴの配置（左端へ配置）
 # ------------------------------------------------------------------
-col_empty, col_logo = st.columns([4, 1])  # 左4 : 右1 の割合で画面を分割
-with col_logo:                            # 一番右の枠（col_logo）の中に画像を入れる
+col_logo, col_empty = st.columns([1, 4])  # 左1 : 右4 の割合で分割し、左端に寄せる
+with col_logo:
     if os.path.exists("logo.png"):
-        st.image("logo.png", width=320)
+        st.image("logo.png", width=250)
     else:
         st.title("🐴 AI予想 勝ちぱかくん")
 
@@ -283,7 +272,7 @@ def generate_base_table(disp_df):
 
 def generate_fusion_table(merged_df):
     html = "<div class='table-container'><table class='kachi-table'>"
-    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>AIｽｺア</th><th>Python印</th><th>Gemini印</th><th style='text-align:left; min-width: 300px;'>Gemini短評 (展開・定性評価)</th></tr>"
+    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>AIｽｺア</th><th>Python印</th><th>Gemini印</th><th style='text-align:left; min-width: 400px;'>Gemini短評 (展開・定性評価)</th></tr>"
     for _, r in merged_df.iterrows():
         w_num = str(r.get('枠番', ''))
         display_waku = w_num if w_num and w_num != 'nan' and not w_num.startswith("90") else "-"
@@ -295,7 +284,7 @@ def generate_fusion_table(merged_df):
         html += f"<td><b>{int(r.get('ai_score', 100))}</b></td>"
         html += f"<td><span class='badge-mark {get_badge_class(r.get('印', '消'))}'>{r.get('印', '消')}</span></td>"
         html += f"<td><span class='badge-mark {get_badge_class(r.get('Gemini印', '消'))}'>{r.get('Gemini印', '消')}</span></td>"
-        html += f"<td style='text-align:left; font-size:12px; color:#444; white-space:normal; line-height:1.4; padding: 6px 8px;'>{r.get('短評', '-')}</td></tr>"
+        html += f"<td style='text-align:left; font-size:15px; color:#444; white-space:normal; line-height:1.5; padding: 12px;'>{r.get('短評', '-')}</td></tr>"
     html += "</table></div>"
     return html
 
@@ -364,7 +353,7 @@ if st.session_state['selected_race_id']:
     
     res_df, pat, rec_ticket, buy_detail, race_day = render_race_predictions(t_id, "良")
     
-    st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{display_race_name}】 <span style='font-size:15px; color:#7f8c8d;'>({surface_info}{distance_info}m{turn_display} / 開催{race_day}日目)</span></h2>", unsafe_allow_html=True)
+    st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{display_race_name}】 <span style='font-size:18px; color:#7f8c8d;'>({surface_info}{distance_info}m{turn_display} / 開催{race_day}日目)</span></h2>", unsafe_allow_html=True)
     
     cond = st.radio("想定馬場 (AIのコース・馬場バイアス補正に反映されます)", ["良", "稍重", "重", "不良"], horizontal=True)
     
@@ -378,8 +367,8 @@ if st.session_state['selected_race_id']:
         st.markdown(f"""
         <div class='sense-card'>
             <div class='sense-title'>🧠 AI勝負気配判定: {pat}</div>
-            <div style='margin-top: 4px;'><b>🎟 推奨買い目:</b> <span class='ticket-badge'>{rec_ticket}</span></div>
-            <div style='margin-top: 2px; font-size: 13px; color: #555;'><b>📝 買い目詳細:</b> {buy_detail}</div>
+            <div style='margin-top: 8px;'><b>🎟 推奨買い目:</b> <span class='ticket-badge'>{rec_ticket}</span></div>
+            <div style='margin-top: 6px; font-size: 15px; color: #555;'><b>📝 買い目詳細:</b> {buy_detail}</div>
         </div>
         """, unsafe_allow_html=True)
 
