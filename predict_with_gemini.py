@@ -42,7 +42,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # 🐴テキストタイトルの代わりにロゴ画像を配置
-st.image("image_98247e.jpg", width=400)
+st.image("logo.png", width=400)
 
 if 'selected_race_id' not in st.session_state:
     st.session_state['selected_race_id'] = None
