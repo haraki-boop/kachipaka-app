@@ -12,37 +12,53 @@ from google.genai import types
 # ==========================================
 # 🎨 アプリの基本設定 & スタイル定義
 # ==========================================
-st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="image_98247e.jpg", layout="wide")
+st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="logo.png", layout="wide")
 
 st.markdown("""
 <style>
-    /* 🎯 背景をロゴに合わせたライトブルー＆ホワイトのグラデーションに変更 */
+    /* 🎯 背景グラデーション */
     .stApp {
         background: linear-gradient(135deg, #e0f7fa 0%, #ffffff 100%);
     }
     
-    .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
-    .section-header { font-size: 1.5rem; font-weight: bold; color: #2c3e50; margin: 1.2rem 0; border-bottom: 2px solid #ecf0f1; padding-bottom: 6px; }
-    .kachi-table { width: 100%; border-collapse: collapse; background-color: #ffffff; white-space: nowrap; font-size: 17px; }
-    .kachi-table th { padding: 12px 10px; text-align: center; background: #f8f9fa; border-bottom: 2px solid #dee2e6; font-size: 17px; font-weight: bold; }
-    .kachi-table td { padding: 12px 10px; text-align: center; border-bottom: 1px solid #f1f3f5; font-size: 17px; }
-    .badge-mark { color: #fff; padding: 6px 12px; border-radius: 6px; font-weight: bold; display: inline-block; min-width: 60px; font-size: 16px; }
+    /* 🎯 全体をキュッと引き締める（最大幅制限と上部余白調整） */
+    .block-container { 
+        max-width: 1150px; 
+        padding-top: 3.5rem; 
+        padding-bottom: 2rem; 
+        margin: 0 auto;
+    }
+    
+    /* 🎯 フォントと余白をコンパクトに最適化 */
+    .section-header { font-size: 1.25rem; font-weight: bold; color: #2c3e50; margin: 1rem 0; border-bottom: 2px solid #ecf0f1; padding-bottom: 4px; }
+    .kachi-table { width: 100%; border-collapse: collapse; background-color: #ffffff; white-space: nowrap; font-size: 14px; }
+    .kachi-table th { padding: 8px 6px; text-align: center; background: #f8f9fa; border-bottom: 2px solid #dee2e6; font-size: 14px; font-weight: bold; }
+    .kachi-table td { padding: 8px 6px; text-align: center; border-bottom: 1px solid #f1f3f5; font-size: 14px; }
+    
+    .badge-mark { color: #fff; padding: 4px 8px; border-radius: 4px; font-weight: bold; display: inline-block; min-width: 50px; font-size: 13px; }
     .badge-honmei { background: #e74c3c; } .badge-taikou { background: #3498db; }
     .badge-tana { background: #2ecc71; } .badge-renka { background: #f39c12; }
     .badge-ana { background: #9b59b6; } .badge-keshi { background: #e0e0e0; color: #7f8c8d; }
     
-    .sense-card { background-color: #ffffff; border-left: 6px solid #8e44ad; padding: 16px 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
-    .sense-title { font-size: 1.2rem; font-weight: bold; color: #8e44ad; }
-    .ticket-badge { font-size: 1.1rem; font-weight: bold; color: #d35400; background: #fef5e7; padding: 4px 10px; border-radius: 4px; display: inline-block; }
+    .sense-card { background-color: #ffffff; border-left: 6px solid #8e44ad; padding: 12px 16px; border-radius: 6px; margin-bottom: 16px; box-shadow: 0 2px 6px rgba(0,0,0,0.04); }
+    .sense-title { font-size: 1.1rem; font-weight: bold; color: #8e44ad; }
+    .ticket-badge { font-size: 1rem; font-weight: bold; color: #d35400; background: #fef5e7; padding: 2px 8px; border-radius: 4px; display: inline-block; }
     
-    .gemini-view-card { background-color: #f0f8ff; border-left: 5px solid #3498db; padding: 16px 20px; border-radius: 5px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
-    .gemini-view-title { color: #2980b9; font-size: 1.2rem; font-weight: bold; margin-bottom: 8px; }
-    .gemini-view-text { font-size: 16px; color: #333; line-height: 1.6; margin: 0; }
+    .gemini-view-card { background-color: #f0f8ff; border-left: 5px solid #3498db; padding: 12px 16px; border-radius: 5px; margin-bottom: 16px; box-shadow: 0 2px 5px rgba(0,0,0,0.04); }
+    .gemini-view-title { color: #2980b9; font-size: 1.1rem; font-weight: bold; margin-bottom: 6px; }
+    .gemini-view-text { font-size: 14px; color: #333; line-height: 1.5; margin: 0; }
 </style>
 """, unsafe_allow_html=True)
 
-# 🐴テキストタイトルの代わりにロゴ画像を配置
-st.image("logo.png", width=400)
+# ------------------------------------------------------------------
+# 🎨 ヘッダーロゴの配置（比率を変更してコンパクトに）
+# ------------------------------------------------------------------
+header_left, header_center, header_right = st.columns([1.5, 2, 1.5])
+with header_center:
+    if os.path.exists("logo.png"):
+        st.image("logo.png", use_container_width=True)
+    else:
+        st.title("🐴 AI予想 勝ちぱかくん")
 
 if 'selected_race_id' not in st.session_state:
     st.session_state['selected_race_id'] = None
@@ -263,7 +279,7 @@ def generate_base_table(disp_df):
 
 def generate_fusion_table(merged_df):
     html = "<div class='table-container'><table class='kachi-table'>"
-    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>AIｽｺア</th><th>Python印</th><th>Gemini印</th><th style='text-align:left; min-width: 400px;'>Gemini短評 (展開・定性評価)</th></tr>"
+    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>AIｽｺア</th><th>Python印</th><th>Gemini印</th><th style='text-align:left; min-width: 300px;'>Gemini短評 (展開・定性評価)</th></tr>"
     for _, r in merged_df.iterrows():
         w_num = str(r.get('枠番', ''))
         display_waku = w_num if w_num and w_num != 'nan' and not w_num.startswith("90") else "-"
@@ -275,7 +291,7 @@ def generate_fusion_table(merged_df):
         html += f"<td><b>{int(r.get('ai_score', 100))}</b></td>"
         html += f"<td><span class='badge-mark {get_badge_class(r.get('印', '消'))}'>{r.get('印', '消')}</span></td>"
         html += f"<td><span class='badge-mark {get_badge_class(r.get('Gemini印', '消'))}'>{r.get('Gemini印', '消')}</span></td>"
-        html += f"<td style='text-align:left; font-size:15px; color:#444; white-space:normal; line-height:1.5; padding: 12px;'>{r.get('短評', '-')}</td></tr>"
+        html += f"<td style='text-align:left; font-size:13px; color:#444; white-space:normal; line-height:1.4; padding: 8px;'>{r.get('短評', '-')}</td></tr>"
     html += "</table></div>"
     return html
 
@@ -344,7 +360,7 @@ if st.session_state['selected_race_id']:
     
     res_df, pat, rec_ticket, buy_detail, race_day = render_race_predictions(t_id, "良")
     
-    st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{display_race_name}】 <span style='font-size:18px; color:#7f8c8d;'>({surface_info}{distance_info}m{turn_display} / 開催{race_day}日目)</span></h2>", unsafe_allow_html=True)
+    st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{display_race_name}】 <span style='font-size:16px; color:#7f8c8d;'>({surface_info}{distance_info}m{turn_display} / 開催{race_day}日目)</span></h2>", unsafe_allow_html=True)
     
     cond = st.radio("想定馬場 (AIのコース・馬場バイアス補正に反映されます)", ["良", "稍重", "重", "不良"], horizontal=True)
     
@@ -358,8 +374,8 @@ if st.session_state['selected_race_id']:
         st.markdown(f"""
         <div class='sense-card'>
             <div class='sense-title'>🧠 AI勝負気配判定: {pat}</div>
-            <div style='margin-top: 8px;'><b>🎟 推奨買い目:</b> <span class='ticket-badge'>{rec_ticket}</span></div>
-            <div style='margin-top: 6px; font-size: 15px; color: #555;'><b>📝 買い目詳細:</b> {buy_detail}</div>
+            <div style='margin-top: 6px;'><b>🎟 推奨買い目:</b> <span class='ticket-badge'>{rec_ticket}</span></div>
+            <div style='margin-top: 4px; font-size: 14px; color: #555;'><b>📝 買い目詳細:</b> {buy_detail}</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -456,7 +472,7 @@ if st.session_state['selected_race_id']:
                         f"調教評価:{r.get('調教評価','-')} | 調教タイム:{r.get('調教タイム','-')} | 短評:{r.get('調教短評','-')} | 厩舎コメント:{r.get('厩舎コメント','-')}")
                 table_summary.append(info)
 
-            # 🚨 修正版 system_instruction を適用（血統・前走・騎手・厩舎の評価軸を追加し、Chain of Thought を強制）
+            # 🚨 修正版 system_instruction を適用
             system_instruction = f"""
 あなたは競馬のトラックバイアス（馬場傾向）、展開、定性情報分析、および血統分析を専門とする一流のプロ競馬予想家（トラックマン）です。
 
