@@ -16,12 +16,11 @@ st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="logo.png
 
 st.markdown("""
 <style>
-    /* 🎯 背景をロゴに合わせたライトブルー＆ホワイトのグラデーションに変更 */
+    /* 🎯 背景グラデーション */
     .stApp {
         background: linear-gradient(135deg, #e0f7fa 0%, #ffffff 100%);
     }
     
-    /* 🎯 画面幅を広々と使いつつ、上部の見切れを防ぐ */
     .block-container { padding-top: 3.5rem; padding-bottom: 2rem; }
     
     .section-header { font-size: 1.5rem; font-weight: bold; color: #2c3e50; margin: 1.2rem 0; border-bottom: 2px solid #ecf0f1; padding-bottom: 6px; }
@@ -42,16 +41,6 @@ st.markdown("""
     .gemini-view-text { font-size: 16px; color: #333; line-height: 1.6; margin: 0; }
 </style>
 """, unsafe_allow_html=True)
-
-# ------------------------------------------------------------------
-# 🎨 ヘッダーロゴの配置（左端へ配置）
-# ------------------------------------------------------------------
-col_logo, col_empty = st.columns([1, 4])  # 左1 : 右4 の割合で分割し、左端に寄せる
-with col_logo:
-    if os.path.exists("logo.png"):
-        st.image("logo.png", width=250)
-    else:
-        st.title("🐴 AI予想 勝ちぱかくん")
 
 if 'selected_race_id' not in st.session_state:
     st.session_state['selected_race_id'] = None
@@ -272,7 +261,7 @@ def generate_base_table(disp_df):
 
 def generate_fusion_table(merged_df):
     html = "<div class='table-container'><table class='kachi-table'>"
-    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>AIｽｺア</th><th>Python印</th><th>Gemini印</th><th style='text-align:left; min-width: 400px;'>Gemini短評 (展開・定性評価)</th></tr>"
+    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>AIｽｺア</th><th>Python印</th><th>Gemini印</th><th style='text-align:left; min-width: 300px;'>Gemini短評 (展開・定性評価)</th></tr>"
     for _, r in merged_df.iterrows():
         w_num = str(r.get('枠番', ''))
         display_waku = w_num if w_num and w_num != 'nan' and not w_num.startswith("90") else "-"
@@ -297,32 +286,43 @@ def clear_all_caches():
 # 🎯 画面表示
 # ==========================================
 st.sidebar.button("🔄 画面リロード", on_click=clear_all_caches, use_container_width=True)
-st.markdown("<div class='section-header'>🎯 レース選択</div>", unsafe_allow_html=True)
 
-if df_future.empty:
-    st.warning("出馬表データがありません。scrape_shutsuba.py を実行してください。")
-    st.stop()
+# ------------------------------------------------------------------
+# 🎨 左側にロゴ、右側にレース選択UIを配置
+# ------------------------------------------------------------------
+col_logo, col_main = st.columns([1, 4])
 
-dates = sorted(df_future['day_label'].unique())
-sel_date = st.radio("開催日", dates, horizontal=True, label_visibility="collapsed")
-day_df = df_future[df_future['day_label'] == sel_date]
+with col_logo:
+    if os.path.exists("logo.png"):
+        st.image("logo.png", use_container_width=True)
 
-places = day_df['place_name'].unique()
-place_tabs = st.tabs([f"📍 {p}" for p in places])
-for i, place in enumerate(places):
-    with place_tabs[i]:
-        place_df = day_df[day_df['place_name'] == place]
-        races = sorted(place_df['r_num'].unique())
-        for j in range(0, len(races), 6):
-            cols = st.columns(6)
-            for k in range(6):
-                if j + k < len(races):
-                    r = races[j + k]
-                    r_df = place_df[place_df['r_num'] == r]
-                    r_id = r_df['race_id'].iloc[0]
-                    r_name = str(r_df.get('race_name', pd.Series([''])).iloc[0]).strip()
-                    if cols[k].button(f"{r}R {r_name}" if r_name and r_name!='nan' else f"{r}R", key=f"btn_{r_id}", use_container_width=True):
-                        st.session_state['selected_race_id'] = r_id
+with col_main:
+    st.markdown("<div class='section-header' style='margin-top: 0;'>🎯 レース選択</div>", unsafe_allow_html=True)
+
+    if df_future.empty:
+        st.warning("出馬表データがありません。scrape_shutsuba.py を実行してください。")
+        st.stop()
+
+    dates = sorted(df_future['day_label'].unique())
+    sel_date = st.radio("開催日", dates, horizontal=True, label_visibility="collapsed")
+    day_df = df_future[df_future['day_label'] == sel_date]
+
+    places = day_df['place_name'].unique()
+    place_tabs = st.tabs([f"📍 {p}" for p in places])
+    for i, place in enumerate(places):
+        with place_tabs[i]:
+            place_df = day_df[day_df['place_name'] == place]
+            races = sorted(place_df['r_num'].unique())
+            for j in range(0, len(races), 6):
+                cols = st.columns(6)
+                for k in range(6):
+                    if j + k < len(races):
+                        r = races[j + k]
+                        r_df = place_df[place_df['r_num'] == r]
+                        r_id = r_df['race_id'].iloc[0]
+                        r_name = str(r_df.get('race_name', pd.Series([''])).iloc[0]).strip()
+                        if cols[k].button(f"{r}R {r_name}" if r_name and r_name!='nan' else f"{r}R", key=f"btn_{r_id}", use_container_width=True):
+                            st.session_state['selected_race_id'] = r_id
 
 if st.session_state['selected_race_id']:
     t_id = str(st.session_state['selected_race_id'])
