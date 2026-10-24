@@ -61,11 +61,10 @@ def get_badge_class(mark):
     elif "☆" in mark: return "badge-ana"
     return "badge-keshi"
 
-# 💡 脚質の表記ゆれ（大、先、差など）をAIが理解できる標準フォーマットに変換
 def normalize_kyakushitsu(k_str):
     k = str(k_str).strip()
     if pd.isna(k_str) or k in ['nan', 'NaN', 'None', '', '-']:
-        return "不明" # 新馬戦など
+        return "不明"
     if "大" in k or "逃" in k: return "逃げ"
     if "先" in k: return "先行"
     if "差" in k: return "差し"
@@ -83,7 +82,6 @@ def load_future_data():
         df_f['day_label'] = df_f['date'].astype(str).str.strip() if 'date' in df_f.columns else "当日"
         df_f['馬名_clean'] = df_f['馬名'].astype(str).apply(clean_name)
         
-        # 💡 CSVから読み込んだ脚質をクレンジング
         if '推測脚質' in df_f.columns:
             df_f['推測脚質'] = df_f['推測脚質'].apply(normalize_kyakushitsu)
         else:
@@ -122,9 +120,6 @@ def load_waku_stats():
 df_future = load_future_data()
 df_course_bias = load_course_bias()
 
-# ==========================================
-# 📊 【Python専用】完全カスタム × 動的ミックスバイアス計算ロジック
-# ==========================================
 def calculate_mixed_bias(row, place_name, surface, distance, cond, race_day, df_bias):
     coef = 1.0
     kyaku = str(row.get('推測脚質', '不明')).strip()
@@ -149,7 +144,6 @@ def calculate_mixed_bias(row, place_name, surface, distance, cond, race_day, df_
             if is_uchi and pd.notna(b.get('内枠')): coef *= float(b['内枠'])
             if is_soto and pd.notna(b.get('外枠')): coef *= float(b['外枠'])
             
-            # 💡 脚質「不明」の場合は補正をかけずフラット(1.0)とする
             if kyaku == '逃げ' and pd.notna(b.get('逃げ')): coef *= float(b['逃げ'])
             elif kyaku == '先行' and pd.notna(b.get('先行')): coef *= float(b['先行'])
             elif kyaku == '差し' and pd.notna(b.get('差し')): coef *= float(b['差し'])
@@ -172,20 +166,16 @@ def calculate_mixed_bias(row, place_name, surface, distance, cond, race_day, df_
 
     return round(max(0.70, min(coef, 1.50)), 2)
 
-
-# ==========================================
-# 🧠 PKLからの超高速ロード & 馬場補正適用
-# ==========================================
 def render_race_predictions(race_id_target, cond):
-    if df_future.empty: return None, None, None, None
+    if df_future.empty: return None, None, None, None, None
     
     cache_data = load_cache()
     if not cache_data:
         st.warning("⚠️ キャッシュファイル(app_cache.pkl)が見つかりません。")
-        return None, None, None, None
+        return None, None, None, None, None
     
     df = df_future[df_future['race_id'].astype(str) == str(race_id_target)].copy()
-    if df.empty: return None, None, None, None
+    if df.empty: return None, None, None, None, None
 
     all_preds = cache_data.get('predictions', {})
     target_key = str(race_id_target).zfill(12)
@@ -193,13 +183,12 @@ def render_race_predictions(race_id_target, cond):
     
     if not predictions:
         st.error(f"⚠️ レースID '{target_key}' の計算済みデータが見つかりません。推論を実行してください。")
-        return None, None, None, None
+        return None, None, None, None, None
 
     horse_preds = predictions.get('horses', {})
     
     df['win_prob'] = df['馬名_clean'].map(lambda x: horse_preds.get(x, {}).get('win_prob', 0.1))
     df['ai_score'] = df['馬名_clean'].map(lambda x: horse_preds.get(x, {}).get('ai_score', 100))
-    # PKLではなく最新のdf_future（クレンジング済み）の脚質を優先する
     df['印'] = df['馬名_clean'].map(lambda x: horse_preds.get(x, {}).get('印', '消'))
 
     place_name = str(df['place_name'].iloc[0])
@@ -229,9 +218,6 @@ def render_race_predictions(race_id_target, cond):
 
     return df, pat, rec_ticket, buy_detail, race_day
 
-# ==========================================
-# 📊 UIテーブル生成部
-# ==========================================
 def generate_base_table(disp_df):
     html = "<div class='table-container'><table class='kachi-table'>"
     html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>推測脚質</th><th>斤量</th><th>騎手</th><th>スコア</th><th>1着率</th><th>補正係数</th><th>Python印</th></tr>"
@@ -253,7 +239,6 @@ def generate_base_table(disp_df):
         
         mark = r.get('印', '消')
         
-        # 💡 表記ゆれを直し、色付けする処理
         style_raw = str(r.get('推測脚質', '不明')).strip()
         if style_raw == '不明':
             style_html = "<span style='color:#bdc3c7;'>-</span>"
@@ -382,7 +367,6 @@ if st.session_state['selected_race_id']:
                 st.error("【設定エラー】APIキーが見つかりません。")
                 st.stop()
 
-            # 💡 クラス判定ロジック
             race_class = "条件戦"
             if re.search(r'新馬|メイクデビュー', display_race_name):
                 race_class = "新馬"
@@ -397,7 +381,6 @@ if st.session_state['selected_race_id']:
             elif re.search(r'G1|G2|G3|OP|オープン|リステッド|L', display_race_name, re.IGNORECASE):
                 race_class = "OP"
                 
-            # 💡 Geminiにだけ渡す「過去10年のデータ」の抽出
             waku_info_text = ""
             df_waku = load_waku_stats()
             search_surface = 'ダート' if 'ダ' in str(surface_info) else '芝'
@@ -406,7 +389,6 @@ if st.session_state['selected_race_id']:
             w_data = None
 
             if not df_waku.empty:
-                # 【1段目】「レース名」でピンポイント検索
                 match = pd.DataFrame()
                 for idx, row in df_waku.iterrows():
                     csv_race_name = str(row['レース名_クラス']).strip()
@@ -415,7 +397,6 @@ if st.session_state['selected_race_id']:
                         waku_extracted_name = csv_race_name
                         break
                 
-                # 【2段目】「クラス × コース」で完全一致検索
                 if match.empty:
                     match = df_waku[(df_waku['レース名_クラス'] == race_class) & 
                                     (df_waku['競馬場'] == place_name_str) & 
@@ -424,7 +405,6 @@ if st.session_state['selected_race_id']:
                     if not match.empty:
                         waku_extracted_name = f"{place_name_str}{search_surface}{dist_num_str}m ({race_class})"
 
-                # 【3段目】「クラスを無視してコースのみ」で検索
                 if match.empty:
                     match = df_waku[(df_waku['競馬場'] == place_name_str) & 
                                     (df_waku['芝ダート'] == search_surface) & 
@@ -448,7 +428,6 @@ if st.session_state['selected_race_id']:
                     waku_info_text += f"・{i}枠：勝率 12.5% / 複勝率 37.5%\n"
                 st.info(f"ℹ️ {place_name_str}{search_surface}{dist_num_str}mの枠データがCSVにないため、枠の有利不利はない(フラット)という前提でGeminiに考察させます。必要ならCSVにデータを追記してください。")
 
-            # 💡 検索指示に「脚質が不明な馬の推測」を追加
             if race_class == "新馬":
                 search_instruction = "【新馬戦の特別指示】脚質データがないため、Google検索で『馬名 新馬 評判』を調べ、関係者の絶賛コメントや血統から脚質と適性を推測してください。"
             elif race_class == "OP" or re.search(r'G1|G2|G3', display_race_name, re.IGNORECASE):
@@ -469,35 +448,71 @@ if st.session_state['selected_race_id']:
                         f"調教タイム:{r.get('調教タイム','-')} | 短評:{r.get('調教短評','-')} | 厩舎コメント:{r.get('厩舎コメント','-')}")
                 table_summary.append(info)
 
+            # 🚨 修正版 system_instruction を適用
             system_instruction = f"""
-あなたはプロ競馬予想家（トラックマン）です。
+あなたは競馬のトラックバイアス（馬場傾向）、展開、定性情報分析を専門とする一流のプロ競馬予想家（トラックマン）です。
 
-【あなたのワークフロー】
-1. 提供された「出走馬リスト」と【㊙️トラックマン極秘データ（過去10年の枠順成績）】を熟読してください。※世間のオッズや人気は意図的に伏せています。
-2. {search_instruction}
-3. まず、提供した枠順データ、脚質の分布（逃げ馬の多さ等）、全体のペースや展開を考慮した「レース全体の見解（展開予想）」を作成してください。
-4. 調教データ、陣営コメント、過去の枠順バイアスの合致度から「最も爆発力・激走の可能性が高い馬」をフラットに評価してください。
-   ※【重要】過去データ上不利とされる枠であっても、調教タイムや動きがズバ抜けて素晴らしい馬であれば「枠の不利を跳ね返す」として迷わず【◎】や【◯】に抜擢してください。
-5. 短評の記述においては、馬の「脚質」に応じた調教の強みを具体的に記述してください。
-   ・**逃げ・先行馬**：全体時計の速さやバテない粘り強さを評価（例：「坂路51.2秒の好時計で押し切る態勢」）
-   ・**差し・追込馬**：ラスト1ハロンの切れ味や加速力を評価（例：「坂路53.5-11.8秒の切れ味抜群」）
+【あなたの至上命題】
+表面的なオッズや人気に惑わされず、提示された【想定馬場】と【枠順傾向】、そして各馬の【調教・コメント・脚質】を掛け合わせ、当日の馬場状態で最もパフォーマンスを発揮する「真の勝負馬」を発見することです。
+
+【思考・分析ワークフロー】
+1. **馬場状態とトラックバイアスの定意**:
+   ・提示された【想定馬場（良・稍重・重・不良）】および【開催日数】から、コースのどこが伸びるか（イン有利・外差し・前残り・スタミナ消耗戦など）を前提として定義してください。
+   ・**芝の重・不良**：内ラチ沿いの傷みやのめりやすい馬場を考慮。パワー不足の切れ味タイプや内枠で包まれる馬を割り引き、パワー型・掻き込みの強い走法・道悪歓迎馬を重視。
+   ・**ダートの稍重・重・不良**：砂が締まり時計が速くなる高速決着を想定。脚抜きが良くなり前が止まらない「逃げ・先行」圧倒的有利、キックバックを嫌う内枠馬のリスクを評価。
+
+2. **外部検索を活用した裏付け**:
+   ・{search_instruction}
+   ・稍重〜不良の場合は、検索ツールを使い「馬名 重馬場」「馬名 道悪」「種牡馬名 産駒 重馬場成績」等を確認し、道悪の巧拙を厳しくジャッジしてください。
+
+3. **レース全体の見解（展開・馬場・トラックバイアス）の構築**:
+   ・想定馬場、過去10年の枠順データ、逃げ・先行馬の頭数から、前半のペースと直線で伸びるコース取り（イン突きか外回しか）を論理的に解説してください。
+
+4. **各馬の徹底評価と印付け**:
+   ・【重要】単に調教時計が速いだけでなく、**「この馬場状態を苦にしないか」「この馬場で枠の利を活かせるか」**を最重要視してください。
+   ・良馬場のスピード自慢であっても道悪に明確な不安（陣営の『綺麗な馬場が良い』コメントや過去の道悪惨敗歴）がある人気想定馬は、迷わず評価を下げて【消】や【△】に落としてください。
+   ・逆に、重馬場歓迎の陣営コメント、パワータイプの血統、力強い掻き込み調教を見せている穴馬は積極的に【☆】や【▲】に抜擢してください。
+
+5. **短評の記述ルール**:
+   ・短評には、単なる調教タイムの羅列ではなく、**「【脚質・枠順】＋【今回の馬場状態への適性】＋【調教・コメントから見る勝負気配】」**の3要素を必ず具体的に盛り込んでください。
+   （例：「重馬場で外が伸びる馬場は歓迎。外枠からスムーズに運べれば、CWでの力強いフットワーク通りにパワー勝負で突き抜ける。」）
 
 【印の打ち方】
-◎(1頭: 最も激走を期待する本命馬), ◯(1頭), ▲(1頭), △(1頭), ☆(1〜2頭: 穴・一発爆発馬), 消(それ以外)
+◎ (1頭: 当該馬場・枠・展開で最も勝ち切る可能性が高い本命馬)
+◯ (1頭: 対抗馬)
+▲ (1頭: 単穴・本命を負かす力がある馬)
+△ (1頭: 連下の押さえ)
+☆ (1〜2頭: 馬場悪化や展開利で一発激走する穴馬)
+消 (それ以外の全頭)
 
-※必ず以下のJSON形式のみで出力してください。
+※必ず以下のJSON形式のみで出力してください。思考のプロセスやMarkdownタグは含めず、純粋なJSON文字列のみを返してください。
 {{
-  "race_view": "過去10年のデータを見ると1枠の勝率が突出しており...展開予想テキスト...",
+  "race_view": "【馬場・展開見解】想定馬場（重）により芝の内ラチ沿いは荒れ、直線は外出しが優勢のバイアス。逃げ馬が3頭競り合いペースは淀みなく流れるため、中団外目で脚を溜められるパワー型差し馬に絶好の展開...",
   "evaluations": [ 
     {{
-      "馬名": "ウメヒナタ", 
-      "Gemini印": "☆", 
-      "短評": "坂路51.5秒の全体好時計をマーク。逃げ有利な8枠から前々で粘り込み..."
+      "馬名": "馬名", 
+      "Gemini印": "◎", 
+      "短評": "重馬場適性は陣営コメント通り高く、美浦Wで力強い掻き込みを見せておりパワー十分。荒れたインを避けて外からスムーズに加速できる絶好の枠。"
     }}
   ] 
 }}
 """
-            prompt = f"対象レース: {sel_date} {r_info['place_name']} {r_info['r_num']}R {display_race_name} ({surface_info}{distance_info}m{turn_display} 開催{race_day}日目)\n【想定馬場】: {cond}\n{waku_info_text}\n【出走馬リスト】:\n{chr(10).join(table_summary)}"
+
+            # 🚨 修正版 prompt を適用
+            prompt = f"""
+【分析対象レース】
+レース名: {sel_date} {r_info['place_name']} {r_info['r_num']}R {display_race_name}
+コース: {surface_info} {distance_info}m {turn_display} (開催{race_day}日目)
+
+【⚠️最重要コンディション：想定馬場】
+現在の想定馬場: 【 {cond} 】
+※この馬場状態（良/稍重/重/不良）がもたらす走破タイム、内外の伸びどころ、脚質の有利不利、および各馬の道悪適性を最優先で考慮して分析してください。
+
+{waku_info_text}
+
+【出走馬リスト（調教・厩舎コメント・脚質）】
+{chr(10).join(table_summary)}
+"""
 
             with st.spinner("🧠 Geminiが極秘データと定性情報を分析し、レース見解を作成中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
