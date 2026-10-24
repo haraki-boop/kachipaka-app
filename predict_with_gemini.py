@@ -21,42 +21,47 @@ st.markdown("""
         background: linear-gradient(135deg, #e0f7fa 0%, #ffffff 100%);
     }
     
-    /* 🎯 全体をキュッと引き締める（最大幅制限と上部余白調整） */
+    /* 🎯 上部の見切れを防ぎつつ、フルワイドのまま余白を最小化 */
     .block-container { 
-        max-width: 1150px; 
         padding-top: 3.5rem; 
-        padding-bottom: 2rem; 
-        margin: 0 auto;
+        padding-bottom: 1.5rem; 
+        padding-left: 2rem;
+        padding-right: 2rem;
     }
     
-    /* 🎯 フォントと余白をコンパクトに最適化 */
-    .section-header { font-size: 1.25rem; font-weight: bold; color: #2c3e50; margin: 1rem 0; border-bottom: 2px solid #ecf0f1; padding-bottom: 4px; }
-    .kachi-table { width: 100%; border-collapse: collapse; background-color: #ffffff; white-space: nowrap; font-size: 14px; }
-    .kachi-table th { padding: 8px 6px; text-align: center; background: #f8f9fa; border-bottom: 2px solid #dee2e6; font-size: 14px; font-weight: bold; }
-    .kachi-table td { padding: 8px 6px; text-align: center; border-bottom: 1px solid #f1f3f5; font-size: 14px; }
+    /* 🎯 全体的にPCダッシュボードサイズ（高密度）に縮小 */
+    .section-header { font-size: 1.1rem; font-weight: bold; color: #2c3e50; margin: 0.8rem 0 0.5rem 0; border-bottom: 2px solid #ecf0f1; padding-bottom: 4px; }
     
-    .badge-mark { color: #fff; padding: 4px 8px; border-radius: 4px; font-weight: bold; display: inline-block; min-width: 50px; font-size: 13px; }
+    /* 表の文字サイズ・余白を「一般人サイズ」にキュッと縮小 */
+    .kachi-table { width: 100%; border-collapse: collapse; background-color: #ffffff; white-space: nowrap; font-size: 13px; }
+    .kachi-table th { padding: 6px 8px; text-align: center; background: #f8f9fa; border-bottom: 2px solid #dee2e6; font-size: 13px; font-weight: bold; }
+    .kachi-table td { padding: 6px 8px; text-align: center; border-bottom: 1px solid #f1f3f5; font-size: 13px; }
+    
+    /* バッジも小さく */
+    .badge-mark { color: #fff; padding: 3px 6px; border-radius: 4px; font-weight: bold; display: inline-block; min-width: 40px; font-size: 12px; }
     .badge-honmei { background: #e74c3c; } .badge-taikou { background: #3498db; }
     .badge-tana { background: #2ecc71; } .badge-renka { background: #f39c12; }
     .badge-ana { background: #9b59b6; } .badge-keshi { background: #e0e0e0; color: #7f8c8d; }
     
-    .sense-card { background-color: #ffffff; border-left: 6px solid #8e44ad; padding: 12px 16px; border-radius: 6px; margin-bottom: 16px; box-shadow: 0 2px 6px rgba(0,0,0,0.04); }
-    .sense-title { font-size: 1.1rem; font-weight: bold; color: #8e44ad; }
-    .ticket-badge { font-size: 1rem; font-weight: bold; color: #d35400; background: #fef5e7; padding: 2px 8px; border-radius: 4px; display: inline-block; }
+    /* カード類も余白を削ってシャープに */
+    .sense-card { background-color: #ffffff; border-left: 5px solid #8e44ad; padding: 10px 14px; border-radius: 4px; margin-bottom: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.05); }
+    .sense-title { font-size: 1rem; font-weight: bold; color: #8e44ad; }
+    .ticket-badge { font-size: 0.95rem; font-weight: bold; color: #d35400; background: #fef5e7; padding: 2px 6px; border-radius: 3px; display: inline-block; }
     
-    .gemini-view-card { background-color: #f0f8ff; border-left: 5px solid #3498db; padding: 12px 16px; border-radius: 5px; margin-bottom: 16px; box-shadow: 0 2px 5px rgba(0,0,0,0.04); }
-    .gemini-view-title { color: #2980b9; font-size: 1.1rem; font-weight: bold; margin-bottom: 6px; }
-    .gemini-view-text { font-size: 14px; color: #333; line-height: 1.5; margin: 0; }
+    .gemini-view-card { background-color: #f0f8ff; border-left: 4px solid #3498db; padding: 10px 14px; border-radius: 4px; margin-bottom: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.05); }
+    .gemini-view-title { color: #2980b9; font-size: 1rem; font-weight: bold; margin-bottom: 4px; }
+    .gemini-view-text { font-size: 13px; color: #333; line-height: 1.4; margin: 0; }
 </style>
 """, unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
-# 🎨 ヘッダーロゴの配置（比率を変更してコンパクトに）
+# 🎨 ヘッダーロゴの配置（右寄り＆大きくなりすぎないようにサイズ固定）
 # ------------------------------------------------------------------
-header_left, header_center, header_right = st.columns([1.5, 2, 1.5])
+header_left, header_center, header_right = st.columns([3, 2, 1])
 with header_center:
     if os.path.exists("logo.png"):
-        st.image("logo.png", use_container_width=True)
+        # use_container_widthを外し、PCでちょうどいいサイズ(320px)に固定
+        st.image("logo.png", width=320)
     else:
         st.title("🐴 AI予想 勝ちぱかくん")
 
@@ -291,7 +296,7 @@ def generate_fusion_table(merged_df):
         html += f"<td><b>{int(r.get('ai_score', 100))}</b></td>"
         html += f"<td><span class='badge-mark {get_badge_class(r.get('印', '消'))}'>{r.get('印', '消')}</span></td>"
         html += f"<td><span class='badge-mark {get_badge_class(r.get('Gemini印', '消'))}'>{r.get('Gemini印', '消')}</span></td>"
-        html += f"<td style='text-align:left; font-size:13px; color:#444; white-space:normal; line-height:1.4; padding: 8px;'>{r.get('短評', '-')}</td></tr>"
+        html += f"<td style='text-align:left; font-size:12px; color:#444; white-space:normal; line-height:1.4; padding: 6px 8px;'>{r.get('短評', '-')}</td></tr>"
     html += "</table></div>"
     return html
 
@@ -360,7 +365,7 @@ if st.session_state['selected_race_id']:
     
     res_df, pat, rec_ticket, buy_detail, race_day = render_race_predictions(t_id, "良")
     
-    st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{display_race_name}】 <span style='font-size:16px; color:#7f8c8d;'>({surface_info}{distance_info}m{turn_display} / 開催{race_day}日目)</span></h2>", unsafe_allow_html=True)
+    st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{display_race_name}】 <span style='font-size:15px; color:#7f8c8d;'>({surface_info}{distance_info}m{turn_display} / 開催{race_day}日目)</span></h2>", unsafe_allow_html=True)
     
     cond = st.radio("想定馬場 (AIのコース・馬場バイアス補正に反映されます)", ["良", "稍重", "重", "不良"], horizontal=True)
     
@@ -374,8 +379,8 @@ if st.session_state['selected_race_id']:
         st.markdown(f"""
         <div class='sense-card'>
             <div class='sense-title'>🧠 AI勝負気配判定: {pat}</div>
-            <div style='margin-top: 6px;'><b>🎟 推奨買い目:</b> <span class='ticket-badge'>{rec_ticket}</span></div>
-            <div style='margin-top: 4px; font-size: 14px; color: #555;'><b>📝 買い目詳細:</b> {buy_detail}</div>
+            <div style='margin-top: 4px;'><b>🎟 推奨買い目:</b> <span class='ticket-badge'>{rec_ticket}</span></div>
+            <div style='margin-top: 2px; font-size: 13px; color: #555;'><b>📝 買い目詳細:</b> {buy_detail}</div>
         </div>
         """, unsafe_allow_html=True)
 
