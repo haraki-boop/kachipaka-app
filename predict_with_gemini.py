@@ -55,12 +55,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
-# 🎨 ヘッダーロゴの配置（右寄り＆大きくなりすぎないようにサイズ固定）
+# 🎨 ヘッダーロゴの配置（右端へ配置）
 # ------------------------------------------------------------------
-header_left, header_center, header_right = st.columns([3, 2, 1])
-with header_center:
+col_empty, col_logo = st.columns([4, 1])  # 左4 : 右1 の割合で画面を分割
+with col_logo:                            # 一番右の枠（col_logo）の中に画像を入れる
     if os.path.exists("logo.png"):
-        # use_container_widthを外し、PCでちょうどいいサイズ(320px)に固定
         st.image("logo.png", width=320)
     else:
         st.title("🐴 AI予想 勝ちぱかくん")
