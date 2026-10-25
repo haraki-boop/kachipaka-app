@@ -275,7 +275,7 @@ def generate_base_table(disp_df):
 
 def generate_fusion_table(merged_df):
     html = "<div class='table-container'><table class='kachi-table'>"
-    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>AIｽｺア</th><th>Python印</th><th>Gemini印</th><th style='text-align:left; min-width: 300px;'>Gemini短評 (展開・定性評価)</th></tr>"
+    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>AIｽｺア</th><th>Python印</th><th>Gemini印</th><th style='text-align:left; min-width: 400px;'>Gemini短評 (展開・定性評価)</th></tr>"
     for _, r in merged_df.iterrows():
         w_num = str(r.get('枠番', ''))
         display_waku = w_num if w_num and w_num != 'nan' and not w_num.startswith("90") else "-"
@@ -283,11 +283,21 @@ def generate_fusion_table(merged_df):
         m_num = str(r.get('馬番', ''))
         display_umaban = "未定" if m_num.startswith("90") or int(float(m_num)) >= 90 else f"{int(float(m_num)):02d}"
         
+        # 🚨 隠されていた「pros_cons（分析プロセス）」と「短評」を合体させて表示
+        pros_cons = r.get('pros_cons', '')
+        tanpyo = r.get('短評', '-')
+        
+        if pd.notna(pros_cons) and str(pros_cons).strip() != '':
+            # プロセスをグレーの小文字で上に、結論を太字で下に表示
+            combined_text = f"<div style='color:#7f8c8d; font-size:13px; margin-bottom:4px;'>{pros_cons}</div><div style='font-weight:bold; color:#2c3e50;'>📝 {tanpyo}</div>"
+        else:
+            combined_text = tanpyo
+            
         html += f"<tr><td><b>{display_waku}</b></td><td><b>{display_umaban}</b></td><td style='text-align:left; font-weight:bold;'>{r.get('馬名', '-')}</td>"
         html += f"<td><b>{int(r.get('ai_score', 100))}</b></td>"
         html += f"<td><span class='badge-mark {get_badge_class(r.get('印', '消'))}'>{r.get('印', '消')}</span></td>"
         html += f"<td><span class='badge-mark {get_badge_class(r.get('Gemini印', '消'))}'>{r.get('Gemini印', '消')}</span></td>"
-        html += f"<td style='text-align:left; font-size:15px; color:#444; white-space:normal; line-height:1.5; padding: 12px;'>{r.get('短評', '-')}</td></tr>"
+        html += f"<td style='text-align:left; font-size:14px; white-space:normal; line-height:1.5; padding: 12px;'>{combined_text}</td></tr>"
     html += "</table></div>"
     return html
 
