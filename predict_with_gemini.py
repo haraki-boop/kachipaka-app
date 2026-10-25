@@ -293,7 +293,7 @@ def generate_base_table(disp_df):
 
 def generate_fusion_table(merged_df):
     html = "<div class='table-container'><table class='kachi-table'>"
-    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>AIｽｺア</th><th>調教評価</th><th style='min-width:120px;'>調教タイム</th><th>Python印</th><th>Gemini印</th><th style='text-align:left; min-width: 400px;'>Gemini短評 (展開・定性評価)</th></tr>"
+    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>AIｽｺア</th><th>調教評価</th><th>Python印</th><th>Gemini印</th><th style='text-align:left; min-width: 400px;'>Gemini短評 (展開・定性評価)</th></tr>"
     for _, r in merged_df.iterrows():
         w_num = str(r.get('枠番', ''))
         display_waku = w_num if w_num and w_num != 'nan' and not w_num.startswith("90") else "-"
@@ -310,11 +310,10 @@ def generate_fusion_table(merged_df):
             combined_text = tanpyo
             
         chokyo_eval = str(r.get('調教評価', '-'))
-        chokyo_time = str(r.get('調教タイム', '-'))
             
         html += f"<tr><td><b>{display_waku}</b></td><td><b>{display_umaban}</b></td><td style='text-align:left; font-weight:bold;'>{r.get('馬名', '-')}</td>"
         html += f"<td><b>{int(r.get('ai_score', 100))}</b></td>"
-        html += f"<td><span style='font-weight:bold; color:#d35400;'>{chokyo_eval}</span></td><td style='font-size:12px; white-space:normal; line-height:1.3; color:#555;'>{chokyo_time}</td>"
+        html += f"<td><span style='font-weight:bold; color:#d35400;'>{chokyo_eval}</span></td>"
         html += f"<td><span class='badge-mark {get_badge_class(r.get('印', '消'))}'>{r.get('印', '消')}</span></td>"
         html += f"<td><span class='badge-mark {get_badge_class(r.get('Gemini印', '消'))}'>{r.get('Gemini印', '消')}</span></td>"
         html += f"<td style='text-align:left; font-size:14px; white-space:normal; line-height:1.5; padding: 12px;'>{combined_text}</td></tr>"
@@ -509,39 +508,52 @@ if st.session_state['selected_race_id']:
                 table_summary.append(info)
 
             system_instruction = f"""
-あなたは競馬のトラックバイアス（馬場傾向）、展開、定性情報分析、調教・血統分析を専門とする一流のプロ競馬予想家（トラックマン）です。
+あなたは競馬のトラックバイアス（馬場傾向）、展開、調教タイム、血統を専門とする超一流のプロ競馬予想家（トラックマン）です。
 
 【あなたの至上命題】
-Pythonが算出した【AI勝負気配判定】と【客観的スコア・1着率】をレース全体の土台・前提として厳格に受け入れた上で、当日の【想定馬場】【枠順傾向】【血統】【調教タイム】を総合し、最終的なジャッジを下すことです。
+あらかじめ用意されたテンプレートに当てはめるのではなく、出走メンバーの顔ぶれから自然な展開ストーリーを組み立て、各種データ（馬場・枠・調教生時計）を掛け合わせた結果、「Pythonの基本評価以上にパフォーマンスを跳ね上げる真の好走馬」を導き出すことです。
 
-【戦況に応じた思考スタンス】
-1. **Pythonの判定が「混戦気配」の場合**:
-   ・各馬の1着率が拮抗しており実力差が小さいため、調教タイムの良し悪しや当日の馬場バイアス（内有利/外差し等）を最大の決め手として順位を整理してください。
-   ・上位馬に致命的な不安（重馬場不適性や調教悪化）があれば【消し】や【△】に落とし、逆に調教抜群・血統利のある人気薄（中穴・大穴）がいれば積極的に【▲】や【☆】に抜擢してください。
-2. **Pythonの判定が「本命・鉄板気配」の場合**:
-   ・1位の馬の能力が抜けているため、無理な逆張りは厳禁です。素直に【◎】に据え、相手関係（ヒモ）の精査に注力してください。
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【思考プロセスの4手順（厳守）】
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-【穴馬（☆・▲）抜擢のルール】
-・単に人気がない馬を適当に選ぶのは禁止です。「自己ベストを叩き出した絶好の調教時計」「道悪で一変する血統」「単騎逃げ濃厚の展開利」など、激走の明確なアリバイ・根拠がある場合のみ印を打ってください。
+◆ Step 1：出走馬の脚質構成とコース条件から「リアルな展開ストーリー」を描く
+まず出走馬リストの脚質を数え、コース特性と掛け合わせてストーリーを構築してください。
+1. 逃げ馬は何頭いるか？（単騎逃げでマイペースか、複数頭でハナを争うか）
+2. 先行勢は多いか？ 差し・追込ばかりか？
+3. 競馬場・距離（直線の長短・坂など）と想定馬場（良・稍重・重・不良）、そして提供された枠順傾向（内外の有利不利）を加味。
+➔ 「このメンバーとコース条件なら、道中のペースはこうなり、直線ではここを通る馬に最も展開が向く」という必然的な展開ストーリーを言語化してください。
 
-【印の打ち方ルール】
-◎ (1頭: 当該レースの条件で最も信頼できる本命馬)
-◯ (1頭: 本命に匹敵する対抗馬)
-▲ (1頭: 単穴・上位馬を脅かす展開・血統利を持つ馬)
-△ (1頭: 連下の押さえ)
-☆ (1〜2頭: 激走の根拠が揃った特注の穴馬。無理に打たなくてもよい)
-消 (それ以外の全頭)
+◆ Step 2：「脚質×調教生時計」による仕上がりジャッジ
+提供された「調教評価（A, B, C等）」は他人の主観なので完全に無視してください。
+必ず【調教タイム】の生データそのものを見ること：
+・逃げ・先行馬：テンの行き脚を示す「4F・5Fの全体時計」の速さを重視。
+・差し・追込馬：終いのキレ味を示す「ラスト1F・2Fの加速ラップ（11秒台〜12秒前半）」を重視。
+ストーリーに合致していても、時計が鈍い馬は割り引いてください。
 
-※必ず以下のJSON形式のみで出力してください。recommended_ticket には買い目提案（例: 3連複1頭軸流し、馬連BOX、ワイド流し等）も含めてください。
+◆ Step 3：Python評価とのギャップ分析（評価の上昇・下降）
+提供されたPythonスコア（過去データや持ち時計のベース能力）と比較してください。
+・【評価上昇】：Pythonスコアは控えめでも、今回のストーリー・枠利・馬場バイアス・調教生時計がドンピシャでハマり、激走する根拠が揃っている馬。
+・【評価下降】：Pythonスコアは高いが、今回のストーリー展開や馬場・枠バイアスと完全に逆行している危険な人気馬。
+
+◆ Step 4：配役（印の決定）
+Step 3で導き出した「評価上昇馬」を中心に印を打ってください。
+・【◎】（1頭）：ストーリー・条件バイアス・調教時計が最も噛み合い、Python評価以上に勝つ見込みが高い馬。
+・【◯】（1頭）：ストーリーに合致し、本命に匹敵する対抗馬。
+・【▲】（1頭）：単穴。展開や馬場がハマれば頭まで突き抜ける魅力馬。
+・【△】（1頭）：連下の押さえ。
+・【☆】（1〜2頭）：特注穴馬。Python下位（人気薄）であっても、ストーリーや道悪血統、生時計に明確な裏付けがある穴馬をピンポイントで抜擢。
+・【消】：Python上位であっても、ストーリーに合致せず危険と判断した馬は理由を明記して切る。
+
+※必ず以下のJSON形式のみで出力してください。Markdownタグは含めず、純粋なJSON文字列のみを返してください。
 {{
-  "race_view": "【展開・馬場総括】Pythonの判定通り混戦気配。上位陣の差は僅かで...",
-  "recommended_ticket": "3連複 ◎1頭軸流し (相手: ◯, ▲, △, ☆)",
+  "race_view": "【展開・馬場総括】今回の出走構成は逃げ馬が不在で、先行勢も手薄。必然的にペースは緩み、前走で好位を取れている馬に絶対的有利な展開となる。さらに枠データを見ても内枠が優勢。差し馬には厳しい流れと見て...",
   "evaluations": [ 
     {{
       "馬名": "馬名", 
-      "pros_cons": "【好材料】栗東坂路でラスト12.1秒の自己ベスト。【懸念点】内枠で包まれるリスク。",
+      "pros_cons": "【好材料】栗東坂路で自己ベストとなる全体時計51.5秒をマーク。内枠からすんなり先行できる展開利。【懸念点】重馬場の実績に乏しい。",
       "Gemini印": "◎", 
-      "短評": "調教の動きが抜けており、稍重馬場も血統的にプラス。混戦を断つ軸として信頼。"
+      "短評": "前有利のストーリーに最も合致する1頭。調教生時計の全体ラップが秀逸で、恵まれた展開と内枠を活かせば勝ち切れると見て評価上昇。"
     }}
   ] 
 }}
@@ -555,7 +567,7 @@ Pythonが算出した【AI勝負気配判定】と【客観的スコア・1着�
 【⚠️最重要コンディション】
 想定馬場: 【 {cond} 】
 Pythonによる戦況ジャッジ: 【 {pat} 】
-※この戦況ジャッジ（混戦か順当か）および想定馬場を踏まえて分析してください。
+※この戦況ジャッジと想定馬場を踏まえ、4ステップ手順に沿って分析してください。
 
 {waku_info_text}
 
@@ -563,7 +575,7 @@ Pythonによる戦況ジャッジ: 【 {pat} 】
 {chr(10).join(table_summary)}
 """
 
-            with st.spinner("🧠 Geminiが血統・前走・極秘データ・定性情報を分析し、レース見解を作成中..."):
+            with st.spinner("🧠 Geminiがメンバー構成から独自の展開ストーリーを紡ぎ出しています..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 gemini_data = None
                 try:
@@ -578,6 +590,7 @@ Pythonによる戦況ジャッジ: 【 {pat} 】
                     )
                     
                     res_text = response.text if response.text else ""
+                    # ⚠️ 修正箇所: ここで文字列リテラル内の改行がエラーにならないように正規表現を修正
                     res_text = re.sub(r'^```(?:json)?\n', '', res_text)
                     res_text = re.sub(r'\n```$', '', res_text)
                     res_text = res_text.strip()
@@ -596,7 +609,6 @@ Pythonによる戦況ジャッジ: 【 {pat} 】
                     
                 if gemini_data:
                     gemini_view = gemini_data.get("race_view", "")
-                    rec_ticket_gemini = gemini_data.get("recommended_ticket", "Gemini推奨買い目")
                     
                     evals = gemini_data.get("evaluations", [])
                     eval_df = pd.DataFrame(evals)
@@ -608,30 +620,6 @@ Pythonによる戦況ジャッジ: 【 {pat} 】
                         merged_df = pd.merge(res_df, eval_df_clean, on='馬名_clean', how='left')
                         merged_df['Gemini印'] = merged_df['Gemini印'].fillna('消')
                         merged_df['短評'] = merged_df['短評'].fillna('-')
-                        
-                        def fmt_m(val):
-                            v_str = str(val)
-                            return "未定" if v_str.startswith("90") or int(float(v_str)) >= 90 else f"{int(float(v_str)):02d}"
-
-                        honmei_row = merged_df[merged_df['Gemini印'] == '◎']
-                        aite_rows = merged_df[merged_df['Gemini印'].isin(['◯', '▲', '△', '☆'])]
-                        
-                        gemini_buy_str = ""
-                        if not honmei_row.empty:
-                            h = honmei_row.iloc[0]
-                            h_str = f"{fmt_m(h['馬番'])}({h['馬名']})"
-                            aite_list = [f"{fmt_m(r['馬番'])}({r['馬名']})[{r['Gemini印']}]" for _, r in aite_rows.iterrows()]
-                            gemini_buy_str = f"軸: {h_str}(◎) ➔ 相手: {', '.join(aite_list)}"
-                        else:
-                            gemini_buy_str = "印の集計中"
-
-                        st.markdown(f"""
-                        <div style='background-color: #fcf3cf; border-left: 6px solid #f39c12; padding: 16px 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);'>
-                            <div style='font-size: 1.2rem; font-weight: bold; color: #b7950b;'>🧠 トラックマンGemini 厳選買い目判定</div>
-                            <div style='margin-top: 8px;'><b>🎟 推奨作戦:</b> <span style='font-size: 1.1rem; font-weight: bold; color: #d35400; background: #fff; padding: 4px 10px; border-radius: 4px; border: 1px solid #f39c12;'>{rec_ticket_gemini}</span></div>
-                            <div style='margin-top: 6px; font-size: 15px; color: #333;'><b>📝 買い目構成:</b> {gemini_buy_str}</div>
-                        </div>
-                        """, unsafe_allow_html=True)
                         
                         if gemini_view:
                             st.markdown(f"""
