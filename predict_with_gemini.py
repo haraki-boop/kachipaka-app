@@ -39,6 +39,24 @@ st.markdown("""
     .gemini-view-card { background-color: #f0f8ff; border-left: 5px solid #3498db; padding: 16px 20px; border-radius: 5px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
     .gemini-view-title { color: #2980b9; font-size: 1.2rem; font-weight: bold; margin-bottom: 8px; }
     .gemini-view-text { font-size: 16px; color: #333; line-height: 1.6; margin: 0; }
+    
+    /* 🚨 カスタムボタンデザイン（青系・グラデーション） */
+    div.stButton > button {
+        background: linear-gradient(135deg, #3498db 0%, #2980b9 100%);
+        color: white;
+        border: none;
+        border-radius: 6px;
+        padding: 10px 24px;
+        font-weight: bold;
+        font-size: 16px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        transition: all 0.3s ease;
+    }
+    div.stButton > button:hover {
+        background: linear-gradient(135deg, #2980b9 0%, #1f618d 100%);
+        box-shadow: 0 6px 8px rgba(0,0,0,0.15);
+        transform: translateY(-2px);
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -275,7 +293,7 @@ def generate_base_table(disp_df):
 
 def generate_fusion_table(merged_df):
     html = "<div class='table-container'><table class='kachi-table'>"
-    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>AIｽｺア</th><th>Python印</th><th>Gemini印</th><th style='text-align:left; min-width: 400px;'>Gemini短評 (展開・定性評価)</th></tr>"
+    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>AIｽｺア</th><th>調教評価</th><th style='min-width:120px;'>調教タイム</th><th>Python印</th><th>Gemini印</th><th style='text-align:left; min-width: 400px;'>Gemini短評 (展開・定性評価)</th></tr>"
     for _, r in merged_df.iterrows():
         w_num = str(r.get('枠番', ''))
         display_waku = w_num if w_num and w_num != 'nan' and not w_num.startswith("90") else "-"
@@ -283,18 +301,20 @@ def generate_fusion_table(merged_df):
         m_num = str(r.get('馬番', ''))
         display_umaban = "未定" if m_num.startswith("90") or int(float(m_num)) >= 90 else f"{int(float(m_num)):02d}"
         
-        # 🚨 隠されていた「pros_cons（分析プロセス）」と「短評」を合体させて表示
         pros_cons = r.get('pros_cons', '')
         tanpyo = r.get('短評', '-')
         
         if pd.notna(pros_cons) and str(pros_cons).strip() != '':
-            # プロセスをグレーの小文字で上に、結論を太字で下に表示
             combined_text = f"<div style='color:#7f8c8d; font-size:13px; margin-bottom:4px;'>{pros_cons}</div><div style='font-weight:bold; color:#2c3e50;'>📝 {tanpyo}</div>"
         else:
             combined_text = tanpyo
             
+        chokyo_eval = str(r.get('調教評価', '-'))
+        chokyo_time = str(r.get('調教タイム', '-'))
+            
         html += f"<tr><td><b>{display_waku}</b></td><td><b>{display_umaban}</b></td><td style='text-align:left; font-weight:bold;'>{r.get('馬名', '-')}</td>"
         html += f"<td><b>{int(r.get('ai_score', 100))}</b></td>"
+        html += f"<td><span style='font-weight:bold; color:#d35400;'>{chokyo_eval}</span></td><td style='font-size:12px; white-space:normal; line-height:1.3; color:#555;'>{chokyo_time}</td>"
         html += f"<td><span class='badge-mark {get_badge_class(r.get('印', '消'))}'>{r.get('印', '消')}</span></td>"
         html += f"<td><span class='badge-mark {get_badge_class(r.get('Gemini印', '消'))}'>{r.get('Gemini印', '消')}</span></td>"
         html += f"<td style='text-align:left; font-size:14px; white-space:normal; line-height:1.5; padding: 12px;'>{combined_text}</td></tr>"
@@ -311,9 +331,6 @@ def clear_all_caches():
 # ==========================================
 st.sidebar.button("🔄 画面リロード", on_click=clear_all_caches, use_container_width=True)
 
-# ------------------------------------------------------------------
-# 🎨 左側にロゴ、右側にレース選択UIを配置
-# ------------------------------------------------------------------
 col_logo, col_main = st.columns([1, 4])
 
 with col_logo:
@@ -474,7 +491,6 @@ if st.session_state['selected_race_id']:
             else:
                 search_instruction = "【条件戦の特別指示】提供された調教タイム・評価とコースの有利不利を考慮してください。脚質が不明な馬は無理に推測せず、フラットに評価してください。"
 
-            # 🚨 データの流し込み部分（血統と前走成績を追加）
             table_summary = []
             for _, r in res_df.iterrows():
                 w_val = r.get('枠番', '-')
@@ -483,73 +499,67 @@ if st.session_state['selected_race_id']:
                 m_val = r.get('馬番', '-')
                 m_str = m_val if pd.notna(m_val) and str(m_val) != 'nan' and not str(m_val).startswith('90') else "未定"
                 
-                info = (f"枠:{w_str} | 馬番:{m_str} | 馬名:{r.get('馬名','')} | 騎手:{r.get('騎手','')} | 調教師:{r.get('調教師','')} | "
+                win_val = float(r.get('win_prob', 0)) * 100
+                score_val = int(r.get('ai_score', 100))
+                
+                info = (f"枠:{w_str} | 馬番:{m_str} | 馬名:{r.get('馬名','')} | Pythonスコア:{score_val} (1着率:{win_val:.1f}%) | 騎手:{r.get('騎手','')} | 調教師:{r.get('調教師','')} | "
                         f"血統(父/母父):{r.get('父','-')} / {r.get('母父','-')} | "
                         f"脚質:{r.get('推測脚質','不明')} | 前走:{r.get('前走着順','-')} (通過:{r.get('前走通過順','-')} / 上がり3F:{r.get('前走上がり3F','-')}) | "
                         f"調教評価:{r.get('調教評価','-')} | 調教タイム:{r.get('調教タイム','-')} | 短評:{r.get('調教短評','-')} | 厩舎コメント:{r.get('厩舎コメント','-')}")
                 table_summary.append(info)
 
-            # 🚨 修正版 system_instruction を適用
             system_instruction = f"""
-あなたは競馬のトラックバイアス（馬場傾向）、展開、定性情報分析、および血統分析を専門とする一流のプロ競馬予想家（トラックマン）です。
+あなたは競馬のトラックバイアス（馬場傾向）、展開、定性情報分析、調教・血統分析を専門とする一流のプロ競馬予想家（トラックマン）です。
 
 【あなたの至上命題】
-Pythonが算出した「客観的スコア（持ち時計・過去実績・統計バイアス）」をレースの【ベース能力】として最大限に尊重した上で、当日の【想定馬場】【枠順傾向】【血統・調教・展開】を掛け合わせ、最終的な総合ジャッジを下すことです。
-※「無理な穴狙い」は厳禁です。データ上強い馬は素直に認め、その上で馬場悪化や展開利によって能力を底上げできる馬、あるいは逆に割り引くべき馬を論理的に見極めてください。
+Pythonが算出した【AI勝負気配判定】と【客観的スコア・1着率】をレース全体の土台・前提として厳格に受け入れた上で、当日の【想定馬場】【枠順傾向】【血統】【調教タイム】を総合し、最終的なジャッジを下すことです。
 
-【思考・分析ワークフロー】
-1. **Pythonスコアの確認（土台）**:
-   ・提供されたPythonスコアおよびPython印は、統計的な能力序列です。
-   ・原則として、スコア最上位（Pythonの◎・◯）は軸候補としての信頼度が極めて高い前提で扱ってください。
+【戦況に応じた思考スタンス】
+1. **Pythonの判定が「混戦気配」の場合**:
+   ・各馬の1着率が拮抗しており実力差が小さいため、調教タイムの良し悪しや当日の馬場バイアス（内有利/外差し等）を最大の決め手として順位を整理してください。
+   ・上位馬に致命的な不安（重馬場不適性や調教悪化）があれば【消し】や【△】に落とし、逆に調教抜群・血統利のある人気薄（中穴・大穴）がいれば積極的に【▲】や【☆】に抜擢してください。
+2. **Pythonの判定が「本命・鉄板気配」の場合**:
+   ・1位の馬の能力が抜けているため、無理な逆張りは厳禁です。素直に【◎】に据え、相手関係（ヒモ）の精査に注力してください。
 
-2. **馬場状態とトラックバイアスの定意**:
-   ・提示された【想定馬場（良・稍重・重・不良）】および【開催日数】から、コースの伸びどころを定義。
-   ・芝の道悪：内ラチの荒れ、パワー血統、掻き込み走法をプラス評価。
-   ・ダートの道悪：脚抜きの良さ、逃げ・先行有利を強く評価。
-
-3. **序列の補正（定性・血統チェック）**:
-   ・Pythonスコア上位馬に「道悪が極端に苦手な血統」などの重大なマイナス要因がないか確認。無ければ素直に【◎】または【◯】に据えてください。
-   ・逆にスコア中位〜下位の馬で、「今回の馬場・血統・前走内容に絶好の好走パターン」が合致する場合のみ、一発の魅力として【▲】や【☆】に抜擢してください。
-
-4. **各馬の徹底評価と印付け（プロセス重視）**:
-   ・必ず各馬ごとに「pros_cons（好材料と懸念点の比較）」を言語化してから印を打ってください。
-   ・「なぜPythonスコア上位の馬を評価するのか」「なぜこの中穴馬を引き上げたのか」という根拠を明確にしてください。
+【穴馬（☆・▲）抜擢のルール】
+・単に人気がない馬を適当に選ぶのは禁止です。「自己ベストを叩き出した絶好の調教時計」「道悪で一変する血統」「単騎逃げ濃厚の展開利」など、激走の明確なアリバイ・根拠がある場合のみ印を打ってください。
 
 【印の打ち方ルール】
-◎ (1頭: 原則としてPython上位馬の中から、今回の馬場・枠・展開に最も合致する本命馬)
+◎ (1頭: 当該レースの条件で最も信頼できる本命馬)
 ◯ (1頭: 本命に匹敵する対抗馬)
 ▲ (1頭: 単穴・上位馬を脅かす展開・血統利を持つ馬)
 △ (1頭: 連下の押さえ)
-☆ (1〜2頭: 馬場悪化や血統利で一発激走する可能性がある妙味馬)
+☆ (1〜2頭: 激走の根拠が揃った特注の穴馬。無理に打たなくてもよい)
 消 (それ以外の全頭)
 
-※必ず以下のJSON形式のみで出力してください。Markdownタグは含めず、純粋なJSON文字列のみを返してください。
+※必ず以下のJSON形式のみで出力してください。recommended_ticket には買い目提案（例: 3連複1頭軸流し、馬連BOX、ワイド流し等）も含めてください。
 {{
-  "race_view": "【馬場・展開見解】想定馬場（稍重）により先行有利。Python上位の○番は脚質・血統ともに今回の馬場にピタリと合致しており軸としての信頼度は高い。一方で...",
+  "race_view": "【展開・馬場総括】Pythonの判定通り混戦気配。上位陣の差は僅かで...",
+  "recommended_ticket": "3連複 ◎1頭軸流し (相手: ◯, ▲, △, ☆)",
   "evaluations": [ 
     {{
       "馬名": "馬名", 
-      "pros_cons": "【好材料】Pythonスコア1位。前走上がり最速。父キズナで道悪も歓迎。【懸念点】内枠で包まれるリスク。",
+      "pros_cons": "【好材料】栗東坂路でラスト12.1秒の自己ベスト。【懸念点】内枠で包まれるリスク。",
       "Gemini印": "◎", 
-      "短評": "Python高スコアが示す通り能力は抜けており、稍重馬場も血統的にプラス。崩れる要素が極めて少なく順当に本命評価。"
+      "短評": "調教の動きが抜けており、稍重馬場も血統的にプラス。混戦を断つ軸として信頼。"
     }}
   ] 
 }}
 """
 
-            # 🚨 修正版 prompt を適用
             prompt = f"""
 【分析対象レース】
 レース名: {sel_date} {r_info['place_name']} {r_info['r_num']}R {display_race_name}
 コース: {surface_info} {distance_info}m {turn_display} (開催{race_day}日目)
 
-【⚠️最重要コンディション：想定馬場】
-現在の想定馬場: 【 {cond} 】
-※この馬場状態（良/稍重/重/不良）がもたらす走破タイム、内外の伸びどころ、血統適性を最優先で考慮して分析してください。
+【⚠️最重要コンディション】
+想定馬場: 【 {cond} 】
+Pythonによる戦況ジャッジ: 【 {pat} 】
+※この戦況ジャッジ（混戦か順当か）および想定馬場を踏まえて分析してください。
 
 {waku_info_text}
 
-【出走馬リスト（血統・前走・調教・厩舎・脚質）】
+【出走馬リスト（Pythonスコア・調教タイム・血統・脚質・厩舎）】
 {chr(10).join(table_summary)}
 """
 
@@ -586,24 +596,50 @@ Pythonが算出した「客観的スコア（持ち時計・過去実績・統�
                     
                 if gemini_data:
                     gemini_view = gemini_data.get("race_view", "")
-                    if gemini_view:
-                        st.markdown(f"""
-                        <div class='gemini-view-card'>
-                            <div class='gemini-view-title'>📝 トラックマンGeminiの展開・血統総合見解</div>
-                            <p class='gemini-view-text'>{gemini_view}</p>
-                        </div>
-                        """, unsafe_allow_html=True)
+                    rec_ticket_gemini = gemini_data.get("recommended_ticket", "Gemini推奨買い目")
                     
                     evals = gemini_data.get("evaluations", [])
                     eval_df = pd.DataFrame(evals)
+                    
                     if not eval_df.empty and '馬名' in eval_df.columns:
                         eval_df['馬名_clean'] = eval_df['馬名'].astype(str).apply(clean_name)
-                        # pros_cons も出力がある場合は拾う
                         eval_df_clean = eval_df[['馬名_clean', 'Gemini印', '短評', 'pros_cons'] if 'pros_cons' in eval_df.columns else ['馬名_clean', 'Gemini印', '短評']].dropna(subset=['馬名_clean'])
                         
                         merged_df = pd.merge(res_df, eval_df_clean, on='馬名_clean', how='left')
                         merged_df['Gemini印'] = merged_df['Gemini印'].fillna('消')
                         merged_df['短評'] = merged_df['短評'].fillna('-')
+                        
+                        def fmt_m(val):
+                            v_str = str(val)
+                            return "未定" if v_str.startswith("90") or int(float(v_str)) >= 90 else f"{int(float(v_str)):02d}"
+
+                        honmei_row = merged_df[merged_df['Gemini印'] == '◎']
+                        aite_rows = merged_df[merged_df['Gemini印'].isin(['◯', '▲', '△', '☆'])]
+                        
+                        gemini_buy_str = ""
+                        if not honmei_row.empty:
+                            h = honmei_row.iloc[0]
+                            h_str = f"{fmt_m(h['馬番'])}({h['馬名']})"
+                            aite_list = [f"{fmt_m(r['馬番'])}({r['馬名']})[{r['Gemini印']}]" for _, r in aite_rows.iterrows()]
+                            gemini_buy_str = f"軸: {h_str}(◎) ➔ 相手: {', '.join(aite_list)}"
+                        else:
+                            gemini_buy_str = "印の集計中"
+
+                        st.markdown(f"""
+                        <div style='background-color: #fcf3cf; border-left: 6px solid #f39c12; padding: 16px 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);'>
+                            <div style='font-size: 1.2rem; font-weight: bold; color: #b7950b;'>🧠 トラックマンGemini 厳選買い目判定</div>
+                            <div style='margin-top: 8px;'><b>🎟 推奨作戦:</b> <span style='font-size: 1.1rem; font-weight: bold; color: #d35400; background: #fff; padding: 4px 10px; border-radius: 4px; border: 1px solid #f39c12;'>{rec_ticket_gemini}</span></div>
+                            <div style='margin-top: 6px; font-size: 15px; color: #333;'><b>📝 買い目構成:</b> {gemini_buy_str}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        if gemini_view:
+                            st.markdown(f"""
+                            <div class='gemini-view-card'>
+                                <div class='gemini-view-title'>📝 トラックマンGeminiの展開・血統総合見解</div>
+                                <p class='gemini-view-text'>{gemini_view}</p>
+                            </div>
+                            """, unsafe_allow_html=True)
                         
                         st.markdown("<div class='section-header'>🔥 Python（確率脳） × Gemini（定性・血統脳） 独立評価比較</div>", unsafe_allow_html=True)
                         st.markdown(generate_fusion_table(merged_df), unsafe_allow_html=True)
