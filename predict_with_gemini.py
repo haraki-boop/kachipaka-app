@@ -487,7 +487,6 @@ if st.session_state['selected_race_id']:
             has_foreign_or_local = False
             for _, r in res_df.iterrows():
                 trainer = str(r.get('調教師', ''))
-                # 地方競馬所属（美浦・栗東以外の表記）や海外
                 if trainer and not ('美浦' in trainer or '栗東' in trainer):
                     has_foreign_or_local = True
                     break
@@ -496,7 +495,7 @@ if st.session_state['selected_race_id']:
             if has_foreign_or_local or race_class == "新馬":
                 chokyo_exception_rule = "【特記事項】本レースは海外・地方所属馬、または新馬戦を含みます。調教時計が欠損している馬に対して機械的な自動【消】ルールを免除し、血統背景や実績・評判を最優先して評価してください。\n"
 
-            # 🚨 思考手順を完全強制するプロトラックマン・システムプロンプト（S-C-G-R完成版 ＋ 穴馬検知ロジック）
+            # 🚨 思考手順を完全強制するプロトラックマン・システムプロンプト（S-C-G-R完成版 ＋ 前半3Fのフェイルセーフ追加）
             system_instruction = f"""
 あなたは冷徹なトラックバイアス分析官であり、出走馬の隊列力学と生データ査定に特化したプロの競馬エンジニアです。
 
@@ -509,7 +508,8 @@ if st.session_state['selected_race_id']:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 1. Scenario（展開シナリオの演繹）
-・推測脚質、前走通過順、および調教の「全体時計（テンのダッシュ力・追走負荷）」から隊列・ペース（前傾/後傾）・馬群の密度を演繹する。
+・推測脚質、前走通過順、前走前半3F、および調教の「全体時計（テンのダッシュ力・追走負荷）」から隊列・ペース（前傾/後傾）・馬群の密度を演繹する。
+・※前走前半3Fが「-」や空白で欠損している馬（休養明け・地方帰り等）については、提供されている推測脚質と調教全体時計（テンの出足）から初速と追走力を補完・推測すること。
 ・想定馬場と、別途提供される【枠順別成績データ】の数値を直接照合し、直線で最も伸びる物理的勝負ゾーン（内前残り／外差し等）を1つ定義する。
 
 2. Collation（照合・生データ査定）
@@ -562,7 +562,7 @@ if st.session_state['selected_race_id']:
 }}
 """
 
-            # 🚨 裏側でGeminiに渡すデータ（重複を削除し、メタ単語を排除した1本に集約）
+            # 🚨 裏側でGeminiに渡すデータ（前走前半3Fを注入）
             table_summary = []
             for _, r in res_df.iterrows():
                 w_val = r.get('枠番', '-')
@@ -576,7 +576,7 @@ if st.session_state['selected_race_id']:
                 
                 info = (f"枠:{w_str} | 馬番:{m_str} | 馬名:{r.get('馬名','')} | 事前評価値:{score_val} (1着率:{win_val:.1f}%) | 騎手:{r.get('騎手','')} | 調教師:{r.get('調教師','')} | "
                         f"血統(父/母父):{r.get('父','-')} / {r.get('母父','-')} | "
-                        f"脚質:{r.get('推測脚質','不明')} | 前走:{r.get('前走着順','-')} (通過:{r.get('前走通過順','-')} / 上がり3F:{r.get('前走上がり3F','-')}) | "
+                        f"脚質:{r.get('推測脚質','不明')} | 前走:{r.get('前走着順','-')} (前半3F:{r.get('前走前半3F','-')} / 通過:{r.get('前走通過順','-')} / 上がり3F:{r.get('前走上がり3F','-')}) | "
                         f"調教評価:{r.get('調教評価','-')} | 調教タイム:{r.get('調教タイム','-')} | 短評:{r.get('調教短評','-')} | 厩舎コメント:{r.get('厩舎コメント','-')}")
                 table_summary.append(info)
 
@@ -609,7 +609,6 @@ if st.session_state['selected_race_id']:
                         config=types.GenerateContentConfig(
                             system_instruction=system_instruction, 
                             temperature=0.7, 
-                            response_mime_type="application/json",
                             tools=[{"googleSearch": {}}]
                         )
                     )
