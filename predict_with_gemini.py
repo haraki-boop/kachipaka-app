@@ -293,7 +293,7 @@ def generate_base_table(disp_df):
 
 def generate_fusion_table(merged_df):
     html = "<div class='table-container'><table class='kachi-table'>"
-    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>AIｽｺア</th><th>調教評価</th><th>Python印</th><th>Gemini印</th><th style='text-align:left; min-width: 400px;'>Gemini短評 (展開・定性評価)</th></tr>"
+    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>AIｽｺア</th><th>調教評価</th><th>Python印</th><th>Gemini印</th><th style='text-align:left; min-width: 400px;'>Gemini短評 (展開・バイアス物理判定)</th></tr>"
     for _, r in merged_df.iterrows():
         w_num = str(r.get('枠番', ''))
         display_waku = w_num if w_num and w_num != 'nan' and not w_num.startswith("90") else "-"
@@ -301,14 +301,7 @@ def generate_fusion_table(merged_df):
         m_num = str(r.get('馬番', ''))
         display_umaban = "未定" if m_num.startswith("90") or int(float(m_num)) >= 90 else f"{int(float(m_num)):02d}"
         
-        pros_cons = r.get('pros_cons', '')
         tanpyo = r.get('短評', '-')
-        
-        if pd.notna(pros_cons) and str(pros_cons).strip() != '':
-            combined_text = f"<div style='color:#7f8c8d; font-size:13px; margin-bottom:4px;'>{pros_cons}</div><div style='font-weight:bold; color:#2c3e50;'>📝 {tanpyo}</div>"
-        else:
-            combined_text = tanpyo
-            
         chokyo_eval = str(r.get('調教評価', '-'))
             
         html += f"<tr><td><b>{display_waku}</b></td><td><b>{display_umaban}</b></td><td style='text-align:left; font-weight:bold;'>{r.get('馬名', '-')}</td>"
@@ -316,7 +309,7 @@ def generate_fusion_table(merged_df):
         html += f"<td><span style='font-weight:bold; color:#d35400;'>{chokyo_eval}</span></td>"
         html += f"<td><span class='badge-mark {get_badge_class(r.get('印', '消'))}'>{r.get('印', '消')}</span></td>"
         html += f"<td><span class='badge-mark {get_badge_class(r.get('Gemini印', '消'))}'>{r.get('Gemini印', '消')}</span></td>"
-        html += f"<td style='text-align:left; font-size:14px; white-space:normal; line-height:1.5; padding: 12px;'>{combined_text}</td></tr>"
+        html += f"<td style='text-align:left; font-size:14px; white-space:normal; line-height:1.5; padding: 12px; font-weight:500; color:#2c3e50;'>{tanpyo}</td></tr>"
     html += "</table></div>"
     return html
 
@@ -490,25 +483,70 @@ if st.session_state['selected_race_id']:
             else:
                 search_instruction = "【条件戦の特別指示】提供された調教タイム・評価とコースの有利不利を考慮してください。脚質が不明な馬は無理に推測せず、フラットに評価してください。"
 
-            table_summary = []
-            for _, r in res_df.iterrows():
-                w_val = r.get('枠番', '-')
-                w_str = w_val if pd.notna(w_val) and str(w_val) != 'nan' and not str(w_val).startswith('90') else "未定"
-                
-                m_val = r.get('馬番', '-')
-                m_str = m_val if pd.notna(m_val) and str(m_val) != 'nan' and not str(m_val).startswith('90') else "未定"
-                
-                win_val = float(r.get('win_prob', 0)) * 100
-                score_val = int(r.get('ai_score', 100))
-                
-                info = (f"枠:{w_str} | 馬番:{m_str} | 馬名:{r.get('馬名','')} | Pythonスコア:{score_val} (1着率:{win_val:.1f}%) | 騎手:{r.get('騎手','')} | 調教師:{r.get('調教師','')} | "
-                        f"血統(父/母父):{r.get('父','-')} / {r.get('母父','-')} | "
-                        f"脚質:{r.get('推測脚質','不明')} | 前走:{r.get('前走着順','-')} (通過:{r.get('前走通過順','-')} / 上がり3F:{r.get('前走上がり3F','-')}) | "
-                        f"調教評価:{r.get('調教評価','-')} | 調教タイム:{r.get('調教タイム','-')} | 短評:{r.get('調教短評','-')} | 厩舎コメント:{r.get('厩舎コメント','-')}")
-                table_summary.append(info)
+            # 🚨 思考手順を完全強制するプロトラックマン・システムプロンプト（S-C-G-R完成版）
+            system_instruction = f"""
+あなたは冷徹なトラックバイアス分析官であり、出走馬の隊列力学と生データ査定に特化したプロの競馬エンジニアです。
 
-           # 🚨 思考手順を完全強制するプロトラックマン・システムプロンプト
-           # 🚨 裏側でGeminiに渡すデータ（メタ発言防止のため「Pythonスコア」という単語を「事前評価値」に変更）
+【存在目的】
+事前評価値とは完全に独立した立場で、頭の中で「1本の仮想レース映像（展開シミュレーション）」を走らせる。
+「展開・枠順データ・馬場状態・調教生時計・血統適性」の物理的要因のみを基準とし、独自のシミュレーション着順（印）とシャープな短評を確定すること。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【思考アルゴリズム：S-C-G-Rフレームワーク（厳守）】
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Scenario（展開シナリオの演繹）
+・推測脚質と調教の「全体時計（テンのダッシュ力・追走負荷）」から、隊列・ペース（前傾/後傾）・馬群の密度を演繹する。
+・想定馬場と、別途提供される【枠順別成績データ】の数値を直接照合し、直線で最も伸びる物理的勝負ゾーン（内前残り／外差し等）を1つ定義する。
+
+2. Collation（照合・生データ査定）
+・各馬が隊列のどの位置を走らされ、勝負ゾーンを通れるかを物理的に検証する。
+・【調教時計の自動判別】: 提供された生数値のみで判定（記号は無視）。
+  ▶ 全体時計が50〜60秒台 ＝ 「坂路（4F）」として追走負荷を判定。
+  ▶ 全体時計が70〜80秒台以上 ＝ 「コース追い（5F〜6F）」としてスタミナ・負荷を判定。
+  ▶ 「ラスト1〜2Fの加速（キレ・余力）」の裏付けがない馬は、展開利があっても過大評価しない。
+  ▶ 調教タイムが空欄（欠損）の馬は状態不明・裏付けなしとみなし、原則【消】とする。
+・【血統適性の補完】: 新馬戦・未勝利戦、または重・不良馬場のタフな条件では、「父・母父」の特性から距離・馬場適性と底力を推測し、着順判定に加味する。
+
+3. Gap Analysis（展開利得のギャップ分析）
+・隊列と枠順バイアスの恩恵を最大限に受けて能力以上に走れる馬、逆に物理的包囲・距離ロス・追走力不足で沈む馬を特定する。
+
+4. Role Allocation（配役・印の確定）
+・シミュレーションのゴール前着順に100%忠実に印を割り振る。事前評価値を忖度・追認する必要は一切ない。
+
+【印の絶対制限（最大5頭厳守）】
+買い目点数を極限まで絞るため、印は最大5頭まで。以下の個数を【絶対厳守】すること。超過はシステムエラーとみなす。
+・【◎】（必ず1頭：シミュレーション1着想定）
+・【◯】（必ず1頭：シミュレーション2着想定）
+・【▲】（必ず1頭：単穴・展開利大）
+・【△】（最大1頭のみ：連下押さえ）
+・【☆】（最大1頭のみ：特注穴馬。無理に打たなくてもよい）
+・【消】（上記で印を打った最大5頭以外の全頭）
+
+【記述ルール】
+・「好材料/懸念点」の分割表記は禁止。短評欄に1文（40〜60文字程度）で凝縮する。
+・「事前評価は〜だが」「データでは〜だが」といった比較の枕詞、および「Python」「AI」「スコア」などのメタ単語は一切使用禁止。
+・短評は「隊列上の位置取り」「枠番とバイアス恩恵」「調教コース（坂路/W）と生時計数値」を交え、なぜその着順（印）になるのかを物理的根拠に基づいてストレートに断言すること。
+
+※必ず以下のJSON形式のみで出力してください。Markdownタグは含めず、純粋なJSON文字列のみを返してください。
+{{
+  "race_view": "【展開・馬場総括】（ペース・隊列の密度、枠順別成績と馬場から導かれる勝負ゾーンを3行以内で要約）",
+  "evaluations": [
+    {{
+      "馬名": "馬名",
+      "Gemini印": "◎",
+      "短評": "外枠有利データに合致する好枠から先行。坂路51.5秒・ラスト11.3秒の加速抜群で、前残り馬場をスピードで押し切る。"
+    }},
+    {{
+      "馬名": "別の馬名",
+      "Gemini印": "消",
+      "短評": "コースバイアスに反する内枠で包まれるリスク大。調教タイムも提供されておらず状態面の裏付けもないため見送り。"
+    }}
+  ]
+}}
+"""
+
+            # 🚨 裏側でGeminiに渡すデータ（重複を削除し、メタ単語を排除した1本に集約）
             table_summary = []
             for _, r in res_df.iterrows():
                 w_val = r.get('枠番', '-')
@@ -526,64 +564,6 @@ if st.session_state['selected_race_id']:
                         f"調教評価:{r.get('調教評価','-')} | 調教タイム:{r.get('調教タイム','-')} | 短評:{r.get('調教短評','-')} | 厩舎コメント:{r.get('厩舎コメント','-')}")
                 table_summary.append(info)
 
-            system_instruction = f"""
-あなたは冷徹なトラックバイアス分析官であり、出走馬の隊列力学と生データ査定に特化したプロの競馬エンジニアです。
-
-【存在目的】
-提供された出走馬のデータに基づき、頭の中で「1本の仮想レース映像（展開シミュレーション）」を走らせ、展開・枠・馬場・調教生時計の物理的有利さのみを基準とした独自の序列（印）を決定すること。
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-【思考アルゴリズム（厳守）】
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-1. 隊列とペースの演繹（スタート〜道中）
-・推測脚質と、調教の「全体時計（テンのダッシュ力・追走力）」から隊列を確定する。
-・逃げ馬の数からペースを判定し、先行集団の密度と差し馬の追走位置を特定する。
-
-2. 勝負ゾーンの特定（3〜4角〜直線）
-・想定馬場と「枠順別成績データ」から、今回のレースで最も物理的に有利なコース取り（イン前残り／外差し等）を1つ確定する。
-
-3. 調教生時計の査定（全体時計＋終いラップ）
-・提供された記号（ABC等）は一切無視し、必ず【調教タイムの生数値】のみで判定する。
-・「全体時計」で実戦の追走負荷に耐えうるかを確認し、「ラスト1F・2F」の加速ラップで余力・減速率を確認する。
-・展開が向く想定でも、調教時計の裏付けが乏しい馬を高く評価してはならない。
-
-4. 独立した着順判定（印の決定）
-上記シミュレーションのゴール前着順に基づき、純粋に展開・馬場の恩恵が大きい順に印を打つ。
-他のスコアや評価に気兼ねすることなく、自らのシミュレーション結果に100%忠実に序列を確定せよ。
-
-【印の絶対制限（最大5頭厳守）】
-以下の個数制限を【絶対厳守】すること。超過はシステムエラーとみなす。
-・【◎】（必ず1頭：シミュレーション1着候補）
-・【◯】（必ず1頭：シミュレーション2着候補）
-・【▲】（必ず1頭：シミュレーション3着候補・展開単穴）
-・【△】（最大1頭のみ：連下押さえ）
-・【☆】（最大1頭のみ：展開利が最も大きい特注伏兵）
-・【消】（上記で印を打った最大5頭以外の「全頭」）
-
-【記述ルール】
-・「好材料/懸念点」の分割表記は禁止。短評欄に1文（40〜60文字程度）で凝縮する。
-・「事前評価は〜だが」「データでは〜だが」といった比較の枕詞、および「Python」「AI」「スコア」などのメタ単語は一切使用禁止。
-・短評は「隊列上の位置取り」「枠・馬場の恩恵」「調教生時計の具体的な数値」を交え、なぜその着順（印）になるのかを物理的根拠に基づいてストレートに断言する。
-
-※必ず以下のJSON形式のみで出力してください。Markdownタグは含めず、純粋なJSON文字列のみを返してください。
-{{
-  "race_view": "【展開・馬場総括】（逃げ頭数・隊列の密度、馬場と枠バイアスから導かれる勝負ゾーンを3行以内で要約）",
-  "evaluations": [
-    {{
-      "馬名": "馬名",
-      "Gemini印": "◎",
-      "短評": "外枠からスムーズに好位追走。全体時計51.5秒・ラスト11.3秒の加速抜群で、前残り馬場をスピードで押し切る。"
-    }},
-    {{
-      "馬名": "別の馬名",
-      "Gemini印": "消",
-      "短評": "極端な前残りバイアスで後方待機は物理的に不利。全体時計も平凡で追走力に欠け、直線届かない。"
-    }}
-  ]
-}}
-"""
-
             prompt = f"""
 【分析対象レース】
 レース名: {sel_date} {r_info['place_name']} {r_info['r_num']}R {display_race_name}
@@ -591,44 +571,14 @@ if st.session_state['selected_race_id']:
 
 【⚠️最重要コンディション】
 想定馬場: 【 {cond} 】
-AIによる戦況ジャッジ: 【 {pat} 】
-※この戦況ジャッジと想定馬場を踏まえ、4ステップ手順に沿って分析してください。
+レース全体の勝負気配: 【 {pat} 】
+※この戦況ジャッジと想定馬場を踏まえ、S-C-G-Rフレームワークに沿って分析してください。
+
+{search_instruction}
 
 {waku_info_text}
 
-【出走馬リスト（客観評価・調教生タイム・血統・脚質・厩舎）】
-{chr(10).join(table_summary)}
-"""
-
-            prompt = f"""
-【分析対象レース】
-レース名: {sel_date} {r_info['place_name']} {r_info['r_num']}R {display_race_name}
-コース: {surface_info} {distance_info}m {turn_display} (開催{race_day}日目)
-
-【⚠️最重要コンディション】
-想定馬場: 【 {cond} 】
-Pythonによる戦況ジャッジ: 【 {pat} 】
-※この戦況ジャッジと想定馬場を踏まえ、4ステップ手順に沿って分析してください。
-
-{waku_info_text}
-
-【出走馬リスト（客観スコア・調教タイム・血統・脚質・厩舎）】
-{chr(10).join(table_summary)}
-"""
-
-            prompt = f"""
-【分析対象レース】
-レース名: {sel_date} {r_info['place_name']} {r_info['r_num']}R {display_race_name}
-コース: {surface_info} {distance_info}m {turn_display} (開催{race_day}日目)
-
-【⚠️最重要コンディション】
-想定馬場: 【 {cond} 】
-Pythonによる戦況ジャッジ: 【 {pat} 】
-※この戦況ジャッジと想定馬場を踏まえ、4ステップ手順に沿って分析してください。
-
-{waku_info_text}
-
-【出走馬リスト（Pythonスコア・調教タイム・血統・脚質・厩舎）】
+【出走馬リスト（客観データ・調教生タイム・血統・脚質）】
 {chr(10).join(table_summary)}
 """
 
@@ -647,7 +597,6 @@ Pythonによる戦況ジャッジ: 【 {pat} 】
                     )
                     
                     res_text = response.text if response.text else ""
-                    # ⚠️ 修正箇所: ここで文字列リテラル内の改行がエラーにならないように正規表現を修正
                     res_text = re.sub(r'^```(?:json)?\n', '', res_text)
                     res_text = re.sub(r'\n```$', '', res_text)
                     res_text = res_text.strip()
@@ -672,7 +621,7 @@ Pythonによる戦況ジャッジ: 【 {pat} 】
                     
                     if not eval_df.empty and '馬名' in eval_df.columns:
                         eval_df['馬名_clean'] = eval_df['馬名'].astype(str).apply(clean_name)
-                        eval_df_clean = eval_df[['馬名_clean', 'Gemini印', '短評', 'pros_cons'] if 'pros_cons' in eval_df.columns else ['馬名_clean', 'Gemini印', '短評']].dropna(subset=['馬名_clean'])
+                        eval_df_clean = eval_df[['馬名_clean', 'Gemini印', '短評']].dropna(subset=['馬名_clean'])
                         
                         merged_df = pd.merge(res_df, eval_df_clean, on='馬名_clean', how='left')
                         merged_df['Gemini印'] = merged_df['Gemini印'].fillna('消')
