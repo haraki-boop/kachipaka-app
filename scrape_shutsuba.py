@@ -70,37 +70,15 @@ def get_premium_details(driver, race_id):
     def init_horse(name):
         if name not in premium_data:
             premium_data[name] = {
-                "厩舎コメント": "", "調教タイム": "", "調教短評": "", "調教評価": "", "調子偏差値": "", "推測脚質": "",
-                "父": "", "母父": "", "前走着順": "", "前走通過順": "", "前走上がり3F": "", "前走前半3F": "-"
+                "調教タイム": "", "調教評価": "", "推測脚質": "",
+                "父": "", "母父": "", "前走着順": "", "前走頭数": "", "間隔": "",
+                "前走通過順": "", "前走上がり3F": "", "前走上がり順位": ""
             }
 
-    # 📌 1. コメントページ
-    try:
-        driver.get(f"https://race.netkeiba.com/race/comment.html?race_id={race_id}")
-        time.sleep(1.5)
-        soup = BeautifulSoup(driver.page_source, "html.parser")
-        
-        current_horse = ""
-        for item in soup.find_all(re.compile("tr|div|li"), class_=re.compile("HorseList|CommentItem")):
-            a_tag = item.find("a", href=re.compile(r"/horse/"))
-            if a_tag:
-                current_horse = clean_horse_name(a_tag.text)
-                
-            if not current_horse: continue
-            init_horse(current_horse)
-            
-            comment_elem = item.find(class_=re.compile("Comment"))
-            if comment_elem:
-                c_text = comment_elem.text.strip().replace('\n', ' ')
-                if c_text and c_text != '-':
-                    premium_data[current_horse]["厩舎コメント"] = c_text
-    except Exception:
-        pass
-
-    # 📌 2. 調教ページ
+    # 📌 1. 調教ページ（コメント・調子偏差値の取得は廃止し高速化）
     try:
         driver.get(f"https://race.netkeiba.com/race/oikiri.html?race_id={race_id}")
-        time.sleep(2)
+        time.sleep(1.5)
         soup = BeautifulSoup(driver.page_source, "html.parser")
         
         current_horse = ""
@@ -128,13 +106,6 @@ def get_premium_details(driver, race_id):
                 if lap_times:
                     if not premium_data[current_horse]["調教タイム"]:
                         premium_data[current_horse]["調教タイム"] = " ".join(lap_times)
-
-            critic_elem = tr.find(class_=re.compile("TrainingCritic|TrainingComment|OikiriComment|TrainingReview_Cell"))
-            if critic_elem:
-                c_text = critic_elem.get_text(strip=True)
-                if c_text and c_text != '-' and len(c_text) > 2 and not any(kw in c_text for kw in ['先着', '遅れ', '併入', '同入']):
-                    if not premium_data[current_horse]["調教短評"]:
-                        premium_data[current_horse]["調教短評"] = c_text
             
             eval_elem = tr.find(class_=re.compile("Rank_")) or tr.find("td", class_=re.compile("Hyoka|Eval"))
             if eval_elem:
@@ -145,25 +116,8 @@ def get_premium_details(driver, race_id):
                         premium_data[current_horse]["調教評価"] = e_text_clean
     except Exception as e:
         print(f"調教ページ解析エラー: {e}")
-        
-    # 📌 3. 調子偏差値
-    try:
-        driver.get(f"https://race.sp.netkeiba.com/barometer/score.html?race_id={race_id}")
-        time.sleep(1.5)
-        soup = BeautifulSoup(driver.page_source, "html.parser")
-        for tr in soup.find_all("tr", class_=re.compile("HorseList")):
-            name_elem = tr.find(class_=re.compile("Horse_Name")) or tr.find("a", href=re.compile(r"/horse/"))
-            if not name_elem: continue
-            h_name = clean_horse_name(name_elem.text)
-            init_horse(h_name)
-            
-            val_span = tr.find("span", class_="Value_Num")
-            if val_span:
-                premium_data[h_name]["調子偏差値"] = val_span.text.strip()
-    except Exception:
-        pass
 
-    # 📌 4. 前走成績の取得 (shutuba_past.html)
+    # 📌 2. 前走成績の取得 (shutuba_past.html)
     try:
         place_code = int(str(race_id)[4:6])
         domain = "race.netkeiba.com" if place_code <= 10 else "nar.netkeiba.com"
@@ -190,55 +144,49 @@ def get_premium_details(driver, race_id):
             if past1:
                 d1 = past1.find(class_="Data01")
                 if d1:
+                    d1_text = d1.get_text(" ", strip=True)
+                    # 着順
                     num_span = d1.find("span", class_="Num")
                     if num_span:
                         premium_data[h_name]["前走着順"] = num_span.get_text(strip=True) + "着"
+                    # 前走頭数
+                    m_tousuu = re.search(r'(\d+)頭', d1_text)
+                    if m_tousuu:
+                        premium_data[h_name]["前走頭数"] = m_tousuu.group(1)
                 
+                # 間隔（ローテーション）
+                d2 = past1.find(class_="Data02")
+                if d2:
+                    d2_text = d2.get_text(" ", strip=True)
+                    m_kankaku = re.search(r'(中\d+週|連闘|半年休)', d2_text)
+                    if m_kankaku:
+                        premium_data[h_name]["間隔"] = m_kankaku.group(1)
+
                 d6 = past1.find(class_="Data06")
                 if d6:
                     d6_text = d6.get_text(" ", strip=True)
-                    m_up3f = re.search(r'\((\d{2}\.\d)\)', d6_text)
+                    # 上がり3Fと順位
+                    m_up3f = re.search(r'(\d{2}\.\d)', d6_text)
                     if m_up3f: premium_data[h_name]["前走上がり3F"] = m_up3f.group(1)
                     
+                    m_rank = re.search(r'\(.*?(\d+)位?\)', d6_text)
+                    if m_rank:
+                        premium_data[h_name]["前走上がり順位"] = m_rank.group(1)
+                    else:
+                        # 丸数字対応 (①, ②...)
+                        maru_dict = {'①': '1', '②': '2', '③': '3', '④': '4', '⑤': '5', '⑥': '6', '⑦': '7', '⑧': '8', '⑨': '9', '⑩': '10'}
+                        for k, v in maru_dict.items():
+                            if k in d6_text:
+                                premium_data[h_name]["前走上がり順位"] = v
+                                break
+                    
+                    # 通過順
                     m_pass = re.search(r'(\d+-\d+(?:-\d+)*)', d6_text)
                     if m_pass: premium_data[h_name]["前走通過順"] = m_pass.group(1)
     except Exception:
         pass
-        
-    # 📌 4.5. 🎯新機能：競馬新聞（newspaper.html）から「前半3F」の取得
-    try:
-        place_code = int(str(race_id)[4:6])
-        domain = "race.netkeiba.com" if place_code <= 10 else "nar.netkeiba.com"
-        driver.get(f"https://{domain}/race/newspaper.html?race_id={race_id}")
-        time.sleep(1.5)
-        soup = BeautifulSoup(driver.page_source, "html.parser")
-        
-        for tr in soup.find_all("tr", class_=re.compile("HorseList")):
-            name_elem = tr.find(class_=re.compile("Horse_Name|HorseName"))
-            if not name_elem:
-                name_elem = tr.find("div", class_="Horse02")
-            
-            h_name = ""
-            if name_elem:
-                a_tag = name_elem.find("a", href=re.compile(r"/horse/"))
-                if a_tag:
-                    h_name = clean_horse_name(a_tag.text)
-            
-            if not h_name: continue
-            init_horse(h_name)
 
-            past_cells = tr.find_all("div", class_="PastDataLine")
-            if past_cells:
-                past1 = past_cells[0]
-                data19 = past1.find("span", class_=re.compile(r"Data19"))
-                if data19:
-                    m_f3 = re.search(r'(\d{2}\.\d)', data19.get_text(strip=True))
-                    if m_f3:
-                        premium_data[h_name]["前走前半3F"] = m_f3.group(1)
-    except Exception as e:
-        print(f"新聞ページ解析エラー: {e}")
-
-    # 📌 5. 血統データの取得
+    # 📌 3. 血統データの取得
     try:
         place_code = int(str(race_id)[4:6])
         domain = "race.netkeiba.com" if place_code <= 10 else "nar.netkeiba.com"
@@ -314,7 +262,7 @@ def scrape_shutsuba():
             
             try:
                 driver.get(shutuba_url)
-                time.sleep(3)
+                time.sleep(2)
                 
                 soup = BeautifulSoup(driver.page_source, "html.parser")
                 
@@ -390,9 +338,20 @@ def scrape_shutsuba():
                                 if m: p_val = int(m.group(1))
 
                         p_data = p_data_dict.get(horse_name, {
-                            "厩舎コメント": "", "調教タイム": "", "調教短評": "", "調教評価": "", "調子偏差値": "", "推測脚質": "",
-                            "父": "", "母父": "", "前走着順": "", "前走通過順": "", "前走上がり3F": "", "前走前半3F": "-"
+                            "調教タイム": "", "調教評価": "", "推測脚質": "",
+                            "父": "", "母父": "", "前走着順": "", "前走頭数": "", "間隔": "",
+                            "前走通過順": "", "前走上がり3F": "", "前走上がり順位": ""
                         })
+                        
+                        # もし間隔が空で、出馬表側（shutuba.html）に載っているなら補完
+                        kankaku = p_data["間隔"]
+                        if not kankaku:
+                            for td in tds:
+                                txt = clean_text(td.text)
+                                m_k = re.search(r'(中\d+週|連闘|休養)', txt)
+                                if m_k:
+                                    kankaku = m_k.group(1)
+                                    break
 
                         temp_horse_list.append({
                             "race_id": race_id,
@@ -415,14 +374,13 @@ def scrape_shutsuba():
                             "父": p_data.get("父", ""),
                             "母父": p_data.get("母父", ""),
                             "前走着順": p_data.get("前走着順", ""),
-                            "前走前半3F": p_data.get("前走前半3F", "-"),
+                            "前走頭数": p_data.get("前走頭数", ""),
+                            "間隔": kankaku,
                             "前走通過順": p_data.get("前走通過順", ""),
                             "前走上がり3F": p_data.get("前走上がり3F", ""),
-                            "調子偏差値": p_data["調子偏差値"],
+                            "前走上がり順位": p_data.get("前走上がり順位", ""),
                             "調教タイム": p_data["調教タイム"],
-                            "調教短評": p_data["調教短評"],
-                            "調教評価": p_data["調教評価"],
-                            "厩舎コメント": p_data["厩舎コメント"]
+                            "調教評価": p_data["調教評価"]
                         })
                     except Exception:
                         continue

@@ -75,10 +75,10 @@ CACHE_FILE = "app_cache.pkl"
 class HorseEvaluation(BaseModel):
     馬名: str = Field(description="評価対象の馬名")
     最終印: Literal["◎", "◯", "▲", "△", "☆", "消"] = Field(
-        description="割り振る印。◎・◯・▲・△・☆はレース全体で各1頭のみ。他はすべて消。"
+        description="割り振る印。◎・◯・▲・△は各1頭ずつ必須。☆は最大1頭（少頭数時は不使用）。それ以外の全馬には必ず「消」を割り振ること。"
     )
     短評: str = Field(
-        description="調教ラップや前走内容に基づく短評。Python上位から【消】にした馬は脱落理由を明記。"
+        description="調教ラップ、血統、前走内容に基づく短評。Python上位から【消】にした馬は脱落理由を明記。"
     )
 
 class RaceAuditResult(BaseModel):
@@ -98,37 +98,135 @@ system_instruction = """
 提供されたデータを元に、Pythonモデルが算出した初期の買い目を監査・アップデートし、最終的な印を決定してください。
 
 # 前提状況
-統計・確率モデル（Python）が算出した「Python上位6頭」の中に、約9割の確率で1着馬が存在します。
+統計・確率モデル（Python）が算出した「Python上位6頭」の中に、通常は約9割の確率で1着馬が存在します。
 しかし、初期印の序列が崩れて下位評価が勝つケースや、3着にPython選定外（7番手以下）の伏兵が飛び込むケースがあります。
+※ただし【新馬戦】においてはPythonモデルも過去データがないため、Pythonの初期順位は完全に無視し、あなたの独自鑑定でゼロベースで買い目を構築してください。
 
 # あなたの任務
-Python上位6頭の中から最も信頼できる「軸・相手（◎・◯）」を確定させ、全出走馬の中から激走気配を持つ「ヒモ・穴馬（▲・△・☆）」を選別してください。
+- 通常戦: Python上位6頭の中から最も信頼できる「軸・相手（◎・◯）」を確定させ、全出走馬の中から激走気配を持つ「ヒモ・穴馬（▲・△・☆）」を選別してください。
+- 新馬戦: Python順位を一切無視し、全頭の中から【調教加速ラップ】と【血統適性】を基準に最高評価の軸・相手を選定してください。
 
 # 評価の絶対ルール（計算・定性コメントの禁止）
 - 枠順成績、コースバイアス、斤量差はPythonモデル側ですべて計算・織り込み済みです。これらに言及したり、計算して評価を変更することは【厳禁】です。
-- 記者の主観コメントや厩舎コメントは考慮せず、提示された「客観データ（数字）」のみで判断してください。
+- 記者の主観コメントや厩舎コメントは考慮せず、提示された「客観データ（数字・血統・判定タグ）」のみで判断してください。
 
 # 客観データの監査基準
-1. 調教タイムの加速ラップ（引き算）:
+1. 調教タイム・加速ラップ（現在の状態）:
    - 全体時計の絶対値だけで判断しない（朝イチの内目を回れば時計は出るため）。
-   - ラスト2Fからラスト1Fにかけて鋭く加速しているか（終い重点で伸びているか）を重視。
-   - ラスト1Fが13秒台を要するなど、終い失速している馬は状態不安として割り引く。
-2. 前走内容（通過順 × 上がり3F）:
+   - コース別（坂路・ウッド）の全体時計の差は比較せず、「終い1Fの伸び脚（前Fとの引き算）」のみに集中すること。
+   - ラスト2Fからラスト1Fへの差分が「-0.2秒以下」の加速ラップを高く評価する。
+   - 【絶対失速ルール】: 終い1Fが「13.0秒以上」を要している馬は、全体時計にかかわらず自動的に「状態不安（失速）」として評価を大幅に割り引くこと。
+   - 【例外ルール（データ欠損時）】: 地方馬、海外帰りなどで調教タイムが存在しない（データなし）馬は、減点も加点も行わず「判定保留」とし、前走内容等の客観データのみでフラットに評価すること。データがないことだけを理由に【消】にすることは厳禁。
+
+2. 【新馬戦の特別監査（完全Gemini委譲）】:
+   - 前走データがない新馬戦では、前走監査を自動スキップする。
+   - Pythonの初期評価・区分は完全に無視し、以下の2点のみで全出走馬をフラットに評価する：
+     ① 調教の加速ラップ（終いが鋭く伸びて仕上がっている馬を最上位とする）
+     ② 血統適性（父・母父が該当コース・距離・馬場質に合致しているか）
+
+3. 通常戦の前走内容（通過順 × 上がり3F）:
    - 前走着順の数字だけで判断しない。
-   - 後方通過（例: 12-12）から上がり3F最速〜上位の脚を使って敗れている馬は、展開不向きによる【着順詐欺】として高く評価する。
-   - 逆に前走好走していても、スローペースで単に前残りしただけで上がりが平凡な馬は過信しない。
+   - 【着順詐欺（高評価・穴馬候補）】:
+     「4コーナー通過順が10番手以降（または後方30%以内）」かつ「上がり3F上位（判定タグあり、または鋭い脚）」で敗れている馬は、展開不向きによる着順詐欺として着順不問で高く評価し、▲・△・☆の最優先候補とする。
+   - 【前残り恵まれ（過信禁物・消し候補）】:
+     前走好走していても、「4コーナー3番手以内」かつ「上がりが平凡」で単に展開に恵まれただけの馬は過信せず、調教が並以下なら【消】の筆頭候補とする。
+
+4. 休養明け（中10週以上・長期ブランク・前走日付不詳）の扱い:
+   - 休養明けの馬は前走データの「賞味期限切れ」とみなし、前走内容の評価ウエイトをゼロに近づけ、【今回の調教状態】を最大ウエイトとする。調教で鋭い加速ラップが出ていれば高評価、調教失速馬は「太め残り・息不足」として即座に【消】とする。
 
 # 印の割り振りルール
 出走全頭に対して、必ず以下のいずれかの印を1つずつ割り振ってください。印の数には以下の厳格な制限を設けます。
+
+【通常戦（新馬戦以外）】
 - 【◎】（必ず1頭のみ）:「Python上位6頭」の中から選定。調教の加速力・前走内容から最も1着突き抜けが期待できる軸馬。
 - 【◯】（必ず1頭のみ）:「Python上位6頭」の中から選定。2着以内に粘る相手本線の実力馬。
 - 【▲】（必ず1頭のみ）:「全出走馬」の中から選定。2〜3着に食い込む単穴。
 - 【△】（必ず1頭のみ）:「全出走馬」の中から選定。連下として押さえるべき巻き返し馬。
-- 【☆】（必ず1頭のみ）:「全出走馬」の中から選定。調教の加速ラップや前走内容から一撃を秘める特注穴馬。
-  ※▲・△・☆は、Python上位陣・選定外（7番手以下）のどちらから選んでも自由です。
-- 【消】（上記5頭以外の残り全頭）:
+- 【☆】（最大1頭・少頭数免除）:「全出走馬」の中から選定。調教の加速ラップや前走内容から一撃を秘める特注穴馬。
+  ※【少頭数免除ルール】: 出走頭数が「9頭以下」のレースでは、点数を絞るため【☆】は打たず、印を最大4頭（◎・◯・▲・△）に制限してください。
+- 【消】（印を打った馬以外の残り全頭）:
   ※「Python上位6頭」から漏れて【消】となった馬については、短評に必ず明確な脱落理由（終い失速、前走展開恵まれ等）を記述してください。
+
+【新馬戦の場合】
+- 上位6頭の縛りは完全撤廃。全頭フラットに【調教加速ラップ】と【血統】のみで◎・◯・▲・△・(☆)の最大5頭を選定せよ。
+- なお、選定されなかった残りの全馬には、通常戦と同様に必ず【消】の印を割り当て、出走全頭分のリストを構築してください。
+
+※上位全滅時の消去法ルール:
+万が一Python上位6頭が全員調教失速等の不安を抱えている場合でも、通常戦のルール通り上位6頭の中から最も減点材料の少ない2頭を消去法で◎・◯に据え、短評に懸念を明記すること。
 """
+
+# ==========================================
+# 🔧 前処理ヘルパー関数
+# ==========================================
+def parse_training_lap_stats(t_str):
+    """
+    調教タイムから終い1F・前Fタイム・差分を算出し、加速/失速タグを付与する
+    """
+    if not t_str or pd.isna(t_str) or str(t_str).strip() in ['-', 'nan', 'NaN', '']:
+        return "調教データなし"
+    
+    s = str(t_str).strip()
+    m_floats = re.findall(r'\d+\.?\d*', s)
+    if not m_floats:
+        return "調教データなし"
+    
+    final_1f = float(m_floats[-1])
+    
+    # 2F合計タイム（21.0秒〜30.0秒の数値）を逆順探索
+    two_f_total = None
+    for val_str in reversed(m_floats[:-1]):
+        v = float(val_str)
+        if 21.0 <= v <= 30.0:
+            two_f_total = v
+            break
+            
+    if two_f_total and two_f_total > final_1f:
+        penultimate_1f = round(two_f_total - final_1f, 1)
+        diff = round(final_1f - penultimate_1f, 1)
+        if diff <= -0.2:
+            status = f"加速({diff:+.1f}s)"
+        elif diff <= 0.1:
+            status = f"維持({diff:+.1f}s)"
+        else:
+            status = f"失速({diff:+.1f}s)"
+        
+        warn = " [⚠️終い失速・要警戒]" if final_1f >= 13.0 else ""
+        return f"終い:{final_1f:.1f}s (前F:{penultimate_1f:.1f}s, 差:{diff:+.1f}s, {status}){warn}"
+    else:
+        warn = " [⚠️終い失速・要警戒]" if final_1f >= 13.0 else ""
+        return f"終い:{final_1f:.1f}s{warn}"
+
+def parse_past_race_stats(order_str, passage_str, agari_str, agari_rank=None, total_horses=16, is_shinba=False, surface="芝"):
+    """
+    前走の通過順とメンバー内上がり順位から、着順詐欺・前残り・休養明けフラグを付与する
+    """
+    if is_shinba or pd.isna(order_str) or str(order_str).strip() in ['-', 'nan', 'NaN', '']:
+        return "前走データなし ⚠️【休養明け/初出走：前走不問・調教状態を最重視】"
+
+    pass_clean = str(passage_str).strip()
+    corner_last = None
+    if pass_clean and pass_clean not in ['-', 'nan', 'NaN', '']:
+        corners = re.findall(r'\d+', pass_clean)
+        if corners:
+            corner_last = int(corners[-1])
+
+    rank_text = f" (メンバー内{int(agari_rank)}位)" if agari_rank and not pd.isna(agari_rank) else ""
+    tag = ""
+
+    # 着順詐欺判定: 4角が後方（10番手以降、または後方30%以内） かつ 上がり順位が上位（1〜3位）
+    is_rear = (corner_last is not None) and (corner_last >= 10 or corner_last >= total_horses * 0.7)
+    is_top_agari = (agari_rank is not None) and (agari_rank <= 3)
+
+    # 前残り判定: 4角3番手以内 かつ 上がり順位が下位（7位以下）
+    is_front = (corner_last is not None) and (corner_last <= 3)
+    is_slow_agari = (agari_rank is not None) and (agari_rank >= 7)
+
+    if is_rear and is_top_agari:
+        tag = f" 🔥【着順詐欺判定：後方追込×上がり上位{rank_text}】"
+    elif is_front and is_slow_agari:
+        tag = f" ⚠️【前残り警戒：前受先行×上がり平凡{rank_text}】"
+
+    return f"着順:{order_str} (通過:{passage_str} / 上がり3F:{agari_str}{rank_text}){tag}"
 
 def clean_name(text):
     if pd.isna(text): return ""
@@ -401,25 +499,52 @@ if st.session_state['selected_race_id']:
                 st.error("【設定エラー】APIキーが見つかりません。")
                 st.stop()
 
+            # 新馬戦判定
+            is_shinba = "新馬" in display_race_name or res_df['前走着順'].isna().all()
+            total_horses = len(res_df)
+
+            # 🎯 レース内の前走上がり3F相対順位をPython側で動的計算
+            res_df_calc = res_df.copy()
+            res_df_calc['前走上がり3F_num'] = pd.to_numeric(res_df_calc['前走上がり3F'], errors='coerce')
+            res_df_calc['前走上がり3F_rank'] = res_df_calc['前走上がり3F_num'].rank(ascending=True, method='min')
+
             table_summary = []
-            for i, (_, r) in enumerate(res_df.iterrows()):
+            for i, (_, r) in enumerate(res_df_calc.iterrows()):
                 m_str = str(r['馬番'])
                 display_m = "未定" if m_str.startswith("90") else f"{int(float(m_str)):02d}"
                 
-                # 上位6頭か選定外かを明示
-                py_group = "【Python上位6頭】" if i < 6 else "【Python選定外】"
+                # 新馬戦ならPython区分を無効化
+                if is_shinba:
+                    py_group = "【新馬戦：全頭フラット評価】"
+                else:
+                    py_group = "【Python上位6頭】" if i < 6 else "【Python選定外】"
+                    
                 win_val = float(r.get('win_prob', 0)) * 100
                 
+                # 事前計算した調教・前走サマリーを生成
+                chokyo_summary = parse_training_lap_stats(r.get('調教タイム', ''))
+                past_summary = parse_past_race_stats(
+                    order_str=r.get('前走着順', '-'),
+                    passage_str=r.get('前走通過順', '-'),
+                    agari_str=r.get('前走上がり3F', '-'),
+                    agari_rank=r.get('前走上がり3F_rank', None),
+                    total_horses=total_horses,
+                    is_shinba=is_shinba,
+                    surface=surface_info
+                )
+                
                 info = (f"馬番:{display_m} | 馬名:{r.get('馬名','')} | 区分:{py_group} | 初期評価:{r.get('印','消')} (勝率:{win_val:.1f}%) | "
+                        f"血統(父/母父):{r.get('父','-')} / {r.get('母父','-')} | "
                         f"脚質:{r.get('推測脚質','-')} | 騎手:{r.get('騎手','-')} | "
-                        f"前走:{r.get('前走着順','-')} (通過:{r.get('前走通過順','-')} / 上がり3F:{r.get('前走上がり3F','-')}) | "
-                        f"調教評価:{r.get('調教評価','-')} | 調教タイム:{r.get('調教タイム','-')}")
+                        f"前走:{past_summary} | 調教評価:{r.get('調教評価','-')} | 調教分析:{chokyo_summary}")
                 table_summary.append(info)
 
             prompt = f"""
 以下のレースデータに基づき、指示に従って全出走馬を監査し、最終印（JSON）を出力してください。
 
 【分析対象レース】: {r_info['place_name']} {r_info['r_num']}R ({surface_info}{distance_info}m)
+【出走頭数】: {total_horses}頭 {"(少頭数レース: ☆なし・最大4頭推奨)" if total_horses <= 9 else ""}
+【レース種別】: {"【新馬戦】(Python評価無視・調教加速ラップと血統重視)" if is_shinba else "通常戦"}
 
 【出走馬データ一覧】
 {chr(10).join(table_summary)}
@@ -439,7 +564,6 @@ if st.session_state['selected_race_id']:
                         )
                     )
                     
-                    # response.text は確実に RaceAuditResult のスキーマに沿ったJSON文字列になる
                     result = RaceAuditResult.model_validate_json(response.text)
                     
                     eval_df = pd.DataFrame([e.model_dump() for e in result.evaluations])
