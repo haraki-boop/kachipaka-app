@@ -8,6 +8,8 @@ import unicodedata
 import streamlit as st
 from google import genai
 from google.genai import types
+from pydantic import BaseModel, Field
+from typing import List, Literal
 
 # ==========================================
 # 🎨 アプリの基本設定 & スタイル定義
@@ -66,8 +68,67 @@ if 'selected_race_id' not in st.session_state:
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 FUTURE_CSV = "future_races.csv"
 CACHE_FILE = "app_cache.pkl"
-BIAS_CSV = "course_bias.csv"
-WAKU_CSV = "all_races_waku_stats.csv"
+
+# ==========================================
+# 📊 Pydanticによる出力スキーマの定義
+# ==========================================
+class HorseEvaluation(BaseModel):
+    馬名: str = Field(description="評価対象の馬名")
+    最終印: Literal["◎", "◯", "▲", "△", "☆", "消"] = Field(
+        description="割り振る印。◎・◯・▲・△・☆はレース全体で各1頭のみ。他はすべて消。"
+    )
+    短評: str = Field(
+        description="調教ラップや前走内容に基づく短評。Python上位から【消】にした馬は脱落理由を明記。"
+    )
+
+class RaceAuditResult(BaseModel):
+    summary: str = Field(
+        description="◎の選定根拠、および選定外から抜擢した穴馬や落とした人気馬の理由（300文字以内）"
+    )
+    evaluations: List[HorseEvaluation] = Field(
+        description="出走全頭分の評価リスト（頭数欠落なし）"
+    )
+
+# ==========================================
+# 🧠 システムプロンプト（system_instruction）
+# ==========================================
+system_instruction = """
+# 役割定義
+あなたは競走馬の状態鑑定・客観データ分析に特化した「監査役トラックマン」です。
+提供されたデータを元に、Pythonモデルが算出した初期の買い目を監査・アップデートし、最終的な印を決定してください。
+
+# 前提状況
+統計・確率モデル（Python）が算出した「Python上位6頭」の中に、約9割の確率で1着馬が存在します。
+しかし、初期印の序列が崩れて下位評価が勝つケースや、3着にPython選定外（7番手以下）の伏兵が飛び込むケースがあります。
+
+# あなたの任務
+Python上位6頭の中から最も信頼できる「軸・相手（◎・◯）」を確定させ、全出走馬の中から激走気配を持つ「ヒモ・穴馬（▲・△・☆）」を選別してください。
+
+# 評価の絶対ルール（計算・定性コメントの禁止）
+- 枠順成績、コースバイアス、斤量差はPythonモデル側ですべて計算・織り込み済みです。これらに言及したり、計算して評価を変更することは【厳禁】です。
+- 記者の主観コメントや厩舎コメントは考慮せず、提示された「客観データ（数字）」のみで判断してください。
+
+# 客観データの監査基準
+1. 調教タイムの加速ラップ（引き算）:
+   - 全体時計の絶対値だけで判断しない（朝イチの内目を回れば時計は出るため）。
+   - ラスト2Fからラスト1Fにかけて鋭く加速しているか（終い重点で伸びているか）を重視。
+   - ラスト1Fが13秒台を要するなど、終い失速している馬は状態不安として割り引く。
+2. 前走内容（通過順 × 上がり3F）:
+   - 前走着順の数字だけで判断しない。
+   - 後方通過（例: 12-12）から上がり3F最速〜上位の脚を使って敗れている馬は、展開不向きによる【着順詐欺】として高く評価する。
+   - 逆に前走好走していても、スローペースで単に前残りしただけで上がりが平凡な馬は過信しない。
+
+# 印の割り振りルール
+出走全頭に対して、必ず以下のいずれかの印を1つずつ割り振ってください。印の数には以下の厳格な制限を設けます。
+- 【◎】（必ず1頭のみ）:「Python上位6頭」の中から選定。調教の加速力・前走内容から最も1着突き抜けが期待できる軸馬。
+- 【◯】（必ず1頭のみ）:「Python上位6頭」の中から選定。2着以内に粘る相手本線の実力馬。
+- 【▲】（必ず1頭のみ）:「全出走馬」の中から選定。2〜3着に食い込む単穴。
+- 【△】（必ず1頭のみ）:「全出走馬」の中から選定。連下として押さえるべき巻き返し馬。
+- 【☆】（必ず1頭のみ）:「全出走馬」の中から選定。調教の加速ラップや前走内容から一撃を秘める特注穴馬。
+  ※▲・△・☆は、Python上位陣・選定外（7番手以下）のどちらから選んでも自由です。
+- 【消】（上記5頭以外の残り全頭）:
+  ※「Python上位6頭」から漏れて【消】となった馬については、短評に必ず明確な脱落理由（終い失速、前走展開恵まれ等）を記述してください。
+"""
 
 def clean_name(text):
     if pd.isna(text): return ""
@@ -125,70 +186,9 @@ def load_cache():
             return {}
     return {}
 
-def load_course_bias():
-    if os.path.exists(BIAS_CSV):
-        return pd.read_csv(BIAS_CSV, dtype={'距離': str}, encoding='utf-8-sig')
-    else:
-        df = pd.DataFrame(columns=['競馬場', '芝ダート', '距離', '内枠', '外枠', '逃げ', '先行', '差し', '追込'])
-        df.loc[0] = ['東京', '芝', '1600', 1.05, 0.95, 0.90, 0.95, 1.10, 1.05]
-        df.to_csv(BIAS_CSV, index=False, encoding='utf-8-sig')
-        return df
-
-def load_waku_stats():
-    if os.path.exists(WAKU_CSV):
-        return pd.read_csv(WAKU_CSV, dtype={'距離': str}, encoding='utf-8-sig')
-    return pd.DataFrame()
-
 df_future = load_future_data()
-df_course_bias = load_course_bias()
 
-def calculate_mixed_bias(row, place_name, surface, distance, cond, race_day, df_bias):
-    coef = 1.0
-    kyaku = str(row.get('推測脚質', '不明')).strip()
-    waku_str = str(row.get('枠番', ''))
-    
-    waku_num = int(waku_str) if waku_str.isdigit() else 0
-    is_uchi = 1 <= waku_num <= 3
-    is_soto = 6 <= waku_num <= 8
-    
-    dist_str = re.sub(r'\D', '', str(distance))
-    if not dist_str: dist_str = "1600"
-    
-    search_surface = 'ダート' if 'ダ' in str(surface) else '芝'
-
-    if not df_bias.empty:
-        match = df_bias[(df_bias['競馬場'] == place_name) & 
-                        (df_bias['芝ダート'] == search_surface) & 
-                        (df_bias['距離'] == dist_str)]
-        
-        if not match.empty:
-            b = match.iloc[0]
-            if is_uchi and pd.notna(b.get('内枠')): coef *= float(b['内枠'])
-            if is_soto and pd.notna(b.get('外枠')): coef *= float(b['外枠'])
-            
-            if kyaku == '逃げ' and pd.notna(b.get('逃げ')): coef *= float(b['逃げ'])
-            elif kyaku == '先行' and pd.notna(b.get('先行')): coef *= float(b['先行'])
-            elif kyaku == '差し' and pd.notna(b.get('差し')): coef *= float(b['差し'])
-            elif kyaku == '追込' and pd.notna(b.get('追込')): coef *= float(b['追込'])
-
-    if search_surface == '芝':
-        if cond in ['重', '不良']:
-            if kyaku in ['逃げ', '先行']: coef *= 1.05
-            elif kyaku in ['差し', '追込']: coef *= 0.95
-    elif search_surface == 'ダート':
-        if cond in ['稍重', '重', '不良']:
-            if kyaku in ['逃げ', '先行']: coef *= 1.08 
-            elif kyaku in ['追込']: coef *= 0.90
-
-    if waku_num > 0 and search_surface == '芝':
-        if race_day <= 4:
-            if is_uchi: coef *= 1.05
-        elif race_day >= 9:
-            if is_soto: coef *= 1.05
-
-    return round(max(0.70, min(coef, 1.50)), 2)
-
-def render_race_predictions(race_id_target, cond):
+def render_race_predictions(race_id_target):
     if df_future.empty: return None, None, None, None, None
     
     cache_data = load_cache()
@@ -211,26 +211,15 @@ def render_race_predictions(race_id_target, cond):
     
     df['win_prob'] = df['馬名_clean'].map(lambda x: horse_preds.get(x, {}).get('win_prob', 0.1))
     
-    place_name = str(df['place_name'].iloc[0])
-    surface = str(df['surface'].iloc[0])
-    distance = str(df['distance'].iloc[0])
+    # 確率のみでソート
+    df = df.sort_values(by=['win_prob'], ascending=False).reset_index(drop=True)
     
-    try:
-        race_day = int(target_key[8:10])
-    except:
-        race_day = 1
-
-    df['bias_coef'] = df.apply(lambda row: calculate_mixed_bias(row, place_name, surface, distance, cond, race_day, df_course_bias), axis=1)
-
-    df['win_prob'] = df['win_prob'] * df['bias_coef']
-    sum_p = df['win_prob'].sum()
-    if sum_p > 0: df['win_prob'] = df['win_prob'] / sum_p
-
+    # スコア計算
     min_p, max_p = df['win_prob'].min(), df['win_prob'].max()
     if max_p > min_p:
         df['ai_score'] = (50 + (df['win_prob'] - min_p) / (max_p - min_p) * 100).round().astype(int)
-
-    df = df.sort_values(by=['win_prob'], ascending=False).reset_index(drop=True)
+    else:
+         df['ai_score'] = 100
 
     mark_list = ['◎', '◯', '▲', '△', '☆', '☆']
     new_marks = []
@@ -251,12 +240,17 @@ def render_race_predictions(race_id_target, cond):
         buy_detail = f"軸: {fmt_m(h1['馬番'])}({h1['馬名']})(◎) -> 相手: {aite_str}"
     else:
         buy_detail = predictions.get('buy_detail', '')
+        
+    try:
+        race_day = int(target_key[8:10])
+    except:
+        race_day = 1
 
     return df, pat, rec_ticket, buy_detail, race_day
 
 def generate_base_table(disp_df):
     html = "<div class='table-container'><table class='kachi-table'>"
-    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>推測脚質</th><th>斤量</th><th>騎手</th><th>スコア</th><th>1着率</th><th>補正係数</th><th>Python印</th></tr>"
+    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>推測脚質</th><th>斤量</th><th>騎手</th><th>スコア</th><th>1着率</th><th>Python印</th></tr>"
     for _, r in disp_df.iterrows():
         w_num = str(r.get('枠番', ''))
         display_waku = w_num if w_num and w_num != 'nan' and not w_num.startswith("90") else "-"
@@ -266,12 +260,8 @@ def generate_base_table(disp_df):
         
         win_val = float(r.get('win_prob', 0))
         kinryo_val = float(r.get('斤量', 55.0))
-        coef_val = float(r.get('bias_coef', 1.0))
         score_str = f"<b>{int(r.get('ai_score', 100))}</b>"
         win_str = f"<span style='color:#e74c3c; font-weight:bold;'>{win_val*100:.1f}%</span>" if win_val >= 0.25 else f"{win_val*100:.1f}%"
-        
-        coef_color = "color:#e74c3c; font-weight:bold;" if coef_val > 1.0 else "color:#3498db;" if coef_val < 1.0 else "color:#95a5a6;"
-        coef_str = f"<span style='{coef_color}'>x{coef_val:.2f}</span>"
         
         mark = r.get('印', '消')
         
@@ -286,7 +276,7 @@ def generate_base_table(disp_df):
         jockey_val = str(r.get('騎手', '-')).strip()
         
         html += f"<tr><td><b>{display_waku}</b></td><td><b>{display_umaban}</b></td><td style='text-align:left; font-weight:bold;'>{r.get('馬名', '-')}</td>"
-        html += f"<td>{style_html}</td><td>{kinryo_val:.1f}kg</td><td>{jockey_val}</td><td>{score_str}</td><td>{win_str}</td><td>{coef_str}</td>"
+        html += f"<td>{style_html}</td><td>{kinryo_val:.1f}kg</td><td>{jockey_val}</td><td>{score_str}</td><td>{win_str}</td>"
         html += f"<td><span class='badge-mark {get_badge_class(mark)}'>{mark}</span></td></tr>"
     html += "</table></div>"
     return html
@@ -384,18 +374,14 @@ if st.session_state['selected_race_id']:
     
     turn_display = f" / {turn_info}" if turn_info else ""
     
-    res_df, pat, rec_ticket, buy_detail, race_day = render_race_predictions(t_id, "良")
+    res_df, pat, rec_ticket, buy_detail, race_day = render_race_predictions(t_id)
     
     st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{display_race_name}】 <span style='font-size:18px; color:#7f8c8d;'>({surface_info}{distance_info}m{turn_display} / 開催{race_day}日目)</span></h2>", unsafe_allow_html=True)
-    
-    cond = st.radio("想定馬場 (AIのコース・馬場バイアス補正に反映されます)", ["良", "稍重", "重", "不良"], horizontal=True)
-    
-    res_df, pat, rec_ticket, buy_detail, _ = render_race_predictions(t_id, cond)
     
     if res_df is not None:
         is_mokuyou = any(res_df['馬番'].astype(str).str.startswith('90'))
         if is_mokuyou:
-            st.info("ℹ️ 現在は枠順確定前の「特別登録状態」のため、枠番・馬番は未定として表示され、枠順バイアスは計算から除外されています。")
+            st.info("ℹ️ 現在は枠順確定前の「特別登録状態」のため、枠番・馬番は未定として表示されています。")
             
         st.markdown(f"""
         <div class='sense-card'>
@@ -405,7 +391,7 @@ if st.session_state['selected_race_id']:
         </div>
         """, unsafe_allow_html=True)
 
-        st.markdown("<div class='section-header'>📊 Pythonベース予想データ (全要素バイアス補正済み)</div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-header'>📊 Pythonベース予想データ (バイアス補正・CSV削除済み)</div>", unsafe_allow_html=True)
         st.markdown(generate_base_table(res_df), unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
@@ -415,229 +401,49 @@ if st.session_state['selected_race_id']:
                 st.error("【設定エラー】APIキーが見つかりません。")
                 st.stop()
 
-            race_class = "条件戦"
-            if re.search(r'新馬|メイクデビュー', display_race_name):
-                race_class = "新馬"
-            elif re.search(r'未勝利', display_race_name):
-                race_class = "未勝利"
-            elif re.search(r'1勝|500万', display_race_name):
-                race_class = "1勝クラス"
-            elif re.search(r'2勝|1000万', display_race_name):
-                race_class = "2勝クラス"
-            elif re.search(r'3勝|1600万', display_race_name):
-                race_class = "3勝クラス"
-            elif re.search(r'G1|G2|G3|OP|オープン|リステッド|L', display_race_name, re.IGNORECASE):
-                race_class = "OP"
-                
-            waku_info_text = ""
-            df_waku = load_waku_stats()
-            search_surface = 'ダート' if 'ダ' in str(surface_info) else '芝'
-            
-            waku_extracted_name = ""
-            w_data = None
-
-            if not df_waku.empty:
-                match = pd.DataFrame()
-                for idx, row in df_waku.iterrows():
-                    csv_race_name = str(row['レース名_クラス']).strip()
-                    if csv_race_name in display_race_name and csv_race_name not in ['OP', '3勝クラス', '2勝クラス', '1勝クラス', '未勝利', '新馬']:
-                        match = df_waku.iloc[[idx]]
-                        waku_extracted_name = csv_race_name
-                        break
-                
-                if match.empty:
-                    match = df_waku[(df_waku['レース名_クラス'] == race_class) & 
-                                    (df_waku['競馬場'] == place_name_str) & 
-                                    (df_waku['芝ダート'] == search_surface) & 
-                                    (df_waku['距離'] == dist_num_str)]
-                    if not match.empty:
-                        waku_extracted_name = f"{place_name_str}{search_surface}{dist_num_str}m ({race_class})"
-
-                if match.empty:
-                    match = df_waku[(df_waku['競馬場'] == place_name_str) & 
-                                    (df_waku['芝ダート'] == search_surface) & 
-                                    (df_waku['距離'] == dist_num_str)]
-                    if not match.empty:
-                        waku_extracted_name = f"{place_name_str}{search_surface}{dist_num_str}m (クラス不問/参考値)"
-
-                if not match.empty:
-                    w_data = match.iloc[0]
-            
-            if w_data is not None:
-                waku_info_text = f"\n【㊙️トラックマン極秘データ：過去10年の同条件({waku_extracted_name}) 枠順別成績】\n"
-                for i in range(1, 9):
-                    win = w_data.get(f'{i}枠_勝率', '-')
-                    pl = w_data.get(f'{i}枠_複勝率', '-')
-                    waku_info_text += f"・{i}枠：勝率 {win}% / 複勝率 {pl}%\n"
-                st.success(f"✅ Geminiにカンペを渡しました: 『過去10年の {waku_extracted_name} 枠順別成績』を参考にして考察します。")
-            else:
-                waku_info_text = f"\n【㊙️トラックマン極秘データ：過去10年の同条件({place_name_str}{search_surface}{dist_num_str}m) 枠順別成績】\n"
-                for i in range(1, 9):
-                    waku_info_text += f"・{i}枠：勝率 12.5% / 複勝率 37.5%\n"
-                st.info(f"ℹ️ {place_name_str}{search_surface}{dist_num_str}mの枠データがCSVにないため、枠の有利不利はない(フラット)という前提でGeminiに考察させます。必要ならCSVにデータを追記してください。")
-
-            if race_class == "新馬":
-                search_instruction = "【新馬戦の特別指示】脚質データがないため、Google検索で『馬名 新馬 評判』を調べ、関係者の絶賛コメントや血統から脚質と適性を推測してください。"
-            elif race_class == "OP" or re.search(r'G1|G2|G3', display_race_name, re.IGNORECASE):
-                search_instruction = "【重賞・OPの特別指示】Google検索で『対象レース名 過去10年 傾向』を調べ、好走ローテと合致度を評価してください。脚質が不明な馬がいれば前走を検索して脚質を推測してください。"
-            else:
-                search_instruction = "【条件戦の特別指示】提供された調教タイム・評価とコースの有利不利を考慮してください。脚質が不明な馬は無理に推測せず、フラットに評価してください。"
-
-            has_foreign_or_local = False
-            for _, r in res_df.iterrows():
-                trainer = str(r.get('調教師', ''))
-                if trainer and not ('美浦' in trainer or '栗東' in trainer):
-                    has_foreign_or_local = True
-                    break
-
-            chokyo_exception_rule = ""
-            if has_foreign_or_local or race_class == "新馬":
-                chokyo_exception_rule = "【特記事項】本レースは海外・地方所属馬、または新馬戦を含みます。調教時計が欠損している馬に対して機械的な自動【消】ルールを免除し、血統背景や実績・評判を最優先して評価してください。\n"
-
-            system_instruction = f"""
-あなたは冷徹なトラックバイアス分析官であり、出走馬の隊列力学と生データ査定に特化したプロの競馬エンジニアです。
-
-【存在目的】
-事前評価値とは完全に独立した立場で、頭の中で「1本の仮想レース映像（展開シミュレーション）」を走らせる。
-「展開・枠順データ・馬場状態・調教生時計・血統適性」の物理的要因のみを基準とし、独自のシミュレーション着順（印）とシャープな短評を確定すること。
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-【思考アルゴリズム：S-C-G-Rフレームワーク（厳守）】
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-1. Scenario（展開シナリオの演繹）
-・推測脚質、前走通過順、前走前半3F、および調教の「全体時計（テンのダッシュ力・追走負荷）」から隊列・ペース（前傾/後傾）・馬群の密度を演繹する。
-・※前走前半3Fが「-」や空白で欠損している馬（休養明け・地方帰り等）については、提供されている推測脚質と調教全体時計（テンの出足）から初速と追走力を補完・推測すること。
-・想定馬場と、別途提供される【枠順別成績データ】の数値を直接照合し、直線で最も伸びる物理的勝負ゾーン（内前残り／外差し等）を1つ定義する。
-
-2. Collation（照合・生データ査定）
-・各馬が隊列のどの位置を走らされ、勝負ゾーンを通れるかを物理的に検証する。
-・【調教時計と本番斤量のギャップ判定（物理相殺ルール）】:
-  1. 調教タイムは本番の斤量を背負って出した数値ではないことを前提とする。
-  2. 「調教良 × 酷斤量（58kg以上）」vs「調教やや良 × 軽量（52〜54kg）」の比較では、斤量差（1kg＝約0.2秒）が調教の微差を物理的に相殺・凌駕すると判定する。
-  3. 特にハイペースの消耗戦や坂のあるコースでは、調教が最上位でも重斤量馬の末甘リスクをシビアに査定し、調教水準が担保された軽量馬をゴール前の伸び脚で上位と評価すること。
-  4. ただし、単に斤量が軽いだけで「調教タイム平凡以下（時計不足・終い失速）」の馬は、基礎スピード不足として過大評価しないこと。
-・【調教時計の自動判別】: 提供された生数値のみで判定（記号は無視）。
-  ▶ 全体時計が50〜60秒台 ＝ 「坂路（4F）」として追走負荷を判定。
-  ▶ 全体時計が70〜80秒台以上 ＝ 「コース追い（5F〜6F）」としてスタミナ・負荷を判定。
-  ▶ 「ラスト1〜2Fの加速（キレ・余力）」の裏付けがない馬は、展開利があっても過大評価しない。
-  ▶ 調教タイムが空欄（欠損）の馬は状態不明・裏付けなしとみなし、原則【消】とする（※海外・地方・新馬の特記事項がある場合を除く）。
-・【血統適性の補完】: 新馬戦・未勝利戦、または重・不良馬場のタフな条件では、「父・母父」の特性から距離・馬場適性と底力を推測し、着順判定に加味する。
-
-3. Gap Analysis（展開利得のギャップ分析と穴馬検知）
-隊列と枠順バイアスの恩恵を最大限に受けて能力以上に走れる馬、逆に物理的包囲や距離ロスで沈む馬を特定する。
-【★穴馬（▲・☆）の抜擢判定ルール】※ペース想定と逆行する不合理な穴馬指名は厳禁
-  ▶ ハイペース判定時: 先行総崩れシナリオを適用。調教全体時計で追走力が担保され、外差しゾーンから突っ込める【差し・追込穴】を抜擢。
-  ▶ スローペース判定時: 前残りシナリオを適用。単騎やイン好位でマイペース追走ができ、内枠利を活かして粘り込む【逃げ・先行穴】を抜擢。
-
-4. Role Allocation（配役・印の確定）
-・シミュレーションのゴール前着順に100%忠実に印を割り振る。事前評価値を忖度・追認する必要は一切ない。
-
-【印の絶対制限（最大5頭厳守）】
-買い目点数を極限まで絞るため、印は最大5頭まで。以下の個数を【絶対厳守】すること。超過はシステムエラーとみなす。
-・【◎】（必ず1頭：シミュレーション1着想定）
-・【◯】（必ず1頭：シミュレーション2着想定）
-・【▲】（必ず1頭：単穴・展開利大）
-・【△】（最大1頭のみ：連下押さえ）
-・【☆】（最大1頭のみ：特注穴馬。無理に打たなくてもよい）
-・【消】（上記で印を打った最大5頭以外の全頭）
-
-【記述ルール】
-・「好材料/懸念点」の分割表記は禁止。短評欄に1文（60〜100文字程度）で凝縮する。
-・「事前評価は〜だが」「データでは〜だが」といった比較の枕詞、および「Python」「AI」「スコア」などのメタ単語は一切使用禁止。
-・短評は「想定ペースと位置取り」「枠番とバイアス恩恵」「調教コース（坂路/W）と生時計数値」を必ず交え、なぜその着順（印）になるのかを物理的根拠に基づいてストレートに断言すること。
-
-※出力の最初と最後は必ず「{{」と「}}」で始めてください。マークダウンの ``` や ```json といった装飾テキストは、1文字たりとも出力に含めてはなりません。
-{{
-  "race_view": "【展開・馬場総括】（ペース・隊列の密度、枠順別成績と馬場から導かれる勝負ゾーンを3行以内で要約）",
-  "evaluations": [
-    {{
-      "馬名": "馬名",
-      "Gemini印": "◎",
-      "短評": "スロー濃厚で単騎逃げが可能。内枠有利データにも合致し、坂路51.5秒・終い11.8秒のテンの速さで前残り馬場をスピードで押し切る。"
-    }},
-    {{
-      "馬名": "別の馬名",
-      "Gemini印": "消",
-      "短評": "コースバイアスに反する内枠で包まれるリスク大。調教タイムも提供されておらず状態面の裏付けもないため見送り。"
-    }}
-  ]
-}}
-"""
-
             table_summary = []
-            for _, r in res_df.iterrows():
-                w_val = r.get('枠番', '-')
-                w_str = w_val if pd.notna(w_val) and str(w_val) != 'nan' and not str(w_val).startswith('90') else "未定"
+            for i, (_, r) in enumerate(res_df.iterrows()):
+                m_str = str(r['馬番'])
+                display_m = "未定" if m_str.startswith("90") else f"{int(float(m_str)):02d}"
                 
-                m_val = r.get('馬番', '-')
-                m_str = m_val if pd.notna(m_val) and str(m_val) != 'nan' and not str(m_val).startswith('90') else "未定"
-                
+                # 上位6頭か選定外かを明示
+                py_group = "【Python上位6頭】" if i < 6 else "【Python選定外】"
                 win_val = float(r.get('win_prob', 0)) * 100
-                score_val = int(r.get('ai_score', 100))
-                kinryo_str = f"{float(r.get('斤量', 55.0)):.1f}kg"
-
-                info = (f"枠:{w_str} | 馬番:{m_str} | 馬名:{r.get('馬名','')} | 斤量:{kinryo_str} | 事前評価値:{score_val} (1着率:{win_val:.1f}%) | 騎手:{r.get('騎手','')} | 調教師:{r.get('調教師','')} | "
-                        f"血統(父/母父):{r.get('父','-')} / {r.get('母父','-')} | "
-                        f"脚質:{r.get('推測脚質','不明')} | 前走:{r.get('前走着順','-')} (前半3F:{r.get('前走前半3F','-')} / 通過:{r.get('前走通過順','-')} / 上がり3F:{r.get('前走上がり3F','-')}) | "
-                        f"調教評価:{r.get('調教評価','-')} | 調教タイム:{r.get('調教タイム','-')} | 短評:{r.get('調教短評','-')} | 厩舎コメント:{r.get('厩舎コメント','-')}")
+                
+                info = (f"馬番:{display_m} | 馬名:{r.get('馬名','')} | 区分:{py_group} | 初期評価:{r.get('印','消')} (勝率:{win_val:.1f}%) | "
+                        f"脚質:{r.get('推測脚質','-')} | 騎手:{r.get('騎手','-')} | "
+                        f"前走:{r.get('前走着順','-')} (通過:{r.get('前走通過順','-')} / 上がり3F:{r.get('前走上がり3F','-')}) | "
+                        f"調教評価:{r.get('調教評価','-')} | 調教タイム:{r.get('調教タイム','-')}")
                 table_summary.append(info)
 
             prompt = f"""
-【分析対象レース】
-レース名: {sel_date} {r_info['place_name']} {r_info['r_num']}R {display_race_name}
-コース: {surface_info} {distance_info}m {turn_display} (開催{race_day}日目)
+以下のレースデータに基づき、指示に従って全出走馬を監査し、最終印（JSON）を出力してください。
 
-【⚠️最重要コンディション】
-想定馬場: 【 {cond} 】
-レース全体の勝負気配: 【 {pat} 】
-※この戦況ジャッジと想定馬場を踏まえ、S-C-G-Rフレームワークに沿って分析してください。
+【分析対象レース】: {r_info['place_name']} {r_info['r_num']}R ({surface_info}{distance_info}m)
 
-{chokyo_exception_rule}
-{search_instruction}
-
-{waku_info_text}
-
-【出走馬リスト（客観データ・調教生タイム・血統・脚質）】
+【出走馬データ一覧】
 {chr(10).join(table_summary)}
 """
 
             with st.spinner("🧠 Geminiがメンバー構成から独自の展開ストーリーを紡ぎ出しています..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
-                gemini_data = None
                 try:
                     response = client.models.generate_content(
                         model='gemini-2.5-flash', 
                         contents=prompt, 
                         config=types.GenerateContentConfig(
                             system_instruction=system_instruction, 
-                            temperature=0.7, 
-                            tools=[{"googleSearch": {}}]
+                            temperature=0.2, 
+                            response_mime_type="application/json",
+                            response_schema=RaceAuditResult,
                         )
                     )
                     
-                    res_text = response.text if response.text else ""
-                    res_text = re.sub(r'^```(?:json)?\n', '', res_text)
-                    res_text = re.sub(r'\n```$', '', res_text)
-                    res_text = res_text.strip()
+                    # response.text は確実に RaceAuditResult のスキーマに沿ったJSON文字列になる
+                    result = RaceAuditResult.model_validate_json(response.text)
                     
-                    match = re.search(r'\{.*\}', res_text, re.DOTALL)
-                    if match:
-                        res_text = match.group(0)
-                        
-                    gemini_data = json.loads(res_text)
-                    
-                except json.JSONDecodeError as e:
-                    st.error("❌ JSONパースエラー: Geminiの出力形式が不正です。もう一度ボタンを押してください。")
-                    st.write("【エラー出力の生データ】", res_text)
-                except Exception as e:
-                    st.error(f"❌ API通信エラー: {e}")
-                    
-                if gemini_data:
-                    gemini_view = gemini_data.get("race_view", "")
-                    
-                    evals = gemini_data.get("evaluations", [])
-                    eval_df = pd.DataFrame(evals)
+                    eval_df = pd.DataFrame([e.model_dump() for e in result.evaluations])
+                    eval_df.rename(columns={'最終印': 'Gemini印'}, inplace=True)
                     
                     if not eval_df.empty and '馬名' in eval_df.columns:
                         eval_df['馬名_clean'] = eval_df['馬名'].astype(str).apply(clean_name)
@@ -647,13 +453,15 @@ if st.session_state['selected_race_id']:
                         merged_df['Gemini印'] = merged_df['Gemini印'].fillna('消')
                         merged_df['短評'] = merged_df['短評'].fillna('-')
                         
-                        if gemini_view:
-                            st.markdown(f"""
-                            <div class='gemini-view-card'>
-                                <div class='gemini-view-title'>📝 トラックマンGeminiの展開・血統総合見解</div>
-                                <p class='gemini-view-text'>{gemini_view}</p>
-                            </div>
-                            """, unsafe_allow_html=True)
+                        st.markdown(f"""
+                        <div class='gemini-view-card'>
+                            <div class='gemini-view-title'>📝 トラックマンGeminiの展開・血統総合見解</div>
+                            <p class='gemini-view-text'>{result.summary}</p>
+                        </div>
+                        """, unsafe_allow_html=True)
                         
                         st.markdown("<div class='section-header'>🔥 Python（確率脳） × Gemini（定性・血統脳） 独立評価比較</div>", unsafe_allow_html=True)
                         st.markdown(generate_fusion_table(merged_df), unsafe_allow_html=True)
+                
+                except Exception as e:
+                    st.error(f"❌ API通信エラー: {e}")
