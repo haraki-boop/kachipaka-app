@@ -302,8 +302,11 @@ def generate_base_table(disp_df):
     return html
 
 def generate_fusion_multiplied_table(merged_df):
+    # 🎯 初期印と最終印の列位置を入れ替え:
+    # 変更前: [最終印] [馬番] [馬名] [元勝率] [Gemini倍率] [補正後勝率] [初期印] [補正理由]
+    # 変更後: [初期印] [馬番] [馬名] [元勝率] [Gemini倍率] [補正後勝率] [最終印] [補正理由]
     html = "<div class='table-container'><table class='kachi-table'>"
-    html += "<tr><th>最終印</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>元勝率</th><th>Gemini倍率</th><th>補正後勝率</th><th>初期印</th><th style='text-align:left; min-width: 420px;'>補正理由 (物理・定性根拠)</th></tr>"
+    html += "<tr><th>初期印</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>元勝率</th><th>Gemini倍率</th><th>補正後勝率</th><th>最終印</th><th style='text-align:left; min-width: 420px;'>補正理由 (物理・定性根拠)</th></tr>"
     for _, r in merged_df.iterrows():
         m_num = str(r.get('馬番', ''))
         display_umaban = "未定" if m_num.startswith("90") or int(float(m_num)) >= 90 else f"{int(float(m_num)):02d}"
@@ -323,10 +326,10 @@ def generate_fusion_multiplied_table(merged_df):
             
         tanpyo = r.get('短評', '-')
             
-        html += f"<tr><td><span class='badge-mark {get_badge_class(f_mark)}'>{f_mark}</span></td>"
+        html += f"<tr><td><span class='badge-mark {get_badge_class(b_mark)}'>{b_mark}</span></td>"
         html += f"<td><b>{display_umaban}</b></td><td style='text-align:left; font-weight:bold;'>{r.get('馬名', '-')}</td>"
         html += f"<td>{w_base:.1f}%</td><td>{mult_str}</td><td><b style='color:#e74c3c; font-size:17px;'>{w_final:.1f}%</b></td>"
-        html += f"<td><span class='badge-mark {get_badge_class(b_mark)}'>{b_mark}</span></td>"
+        html += f"<td><span class='badge-mark {get_badge_class(f_mark)}'>{f_mark}</span></td>"
         html += f"<td style='text-align:left; font-size:14px; white-space:normal; line-height:1.5; padding: 10px; color:#2c3e50;'>{tanpyo}</td></tr>"
     html += "</table></div>"
     return html
