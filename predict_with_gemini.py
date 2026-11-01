@@ -159,9 +159,6 @@ system_instruction = """
 # 🔧 前処理ヘルパー関数
 # ==========================================
 def parse_training_lap_stats(t_str):
-    """
-    調教タイムから終い1F・前Fタイム・差分を算出し、加速/失速タグを付与する
-    """
     if not t_str or pd.isna(t_str) or str(t_str).strip() in ['-', 'nan', 'NaN', '']:
         return "調教データなし"
     
@@ -172,7 +169,6 @@ def parse_training_lap_stats(t_str):
     
     final_1f = float(m_floats[-1])
     
-    # 2F合計タイム（21.0秒〜30.0秒の数値）を逆順探索
     two_f_total = None
     for val_str in reversed(m_floats[:-1]):
         v = float(val_str)
@@ -196,9 +192,9 @@ def parse_training_lap_stats(t_str):
         warn = " [⚠️終い失速・要警戒]" if final_1f >= 13.0 else ""
         return f"終い:{final_1f:.1f}s{warn}"
 
-def parse_past_race_stats(order_str, passage_str, agari_str, agari_rank=None, total_horses=16, is_shinba=False, surface="芝"):
+def parse_past_race_stats(order_str, passage_str, agari_str, agari_rank=None, past_tousuu=None, interval_str="", is_shinba=False, surface="芝"):
     """
-    前走の通過順とメンバー内上がり順位から、着順詐欺・前残り・休養明けフラグを付与する
+    スクレイパーが取得した前走上がり順位・前走頭数・間隔を元に、着順詐欺フラグや休養明けフラグを生成する
     """
     if is_shinba or pd.isna(order_str) or str(order_str).strip() in ['-', 'nan', 'NaN', '']:
         return "前走データなし ⚠️【休養明け/初出走：前走不問・調教状態を最重視】"
@@ -210,23 +206,35 @@ def parse_past_race_stats(order_str, passage_str, agari_str, agari_rank=None, to
         if corners:
             corner_last = int(corners[-1])
 
-    rank_text = f" (メンバー内{int(agari_rank)}位)" if agari_rank and not pd.isna(agari_rank) else ""
+    # 順位と頭数のキャスト処理
+    try:
+        rank_val = int(float(str(agari_rank)))
+        rank_text = f" (上がり{rank_val}位)"
+    except (ValueError, TypeError):
+        rank_val = None
+        rank_text = ""
+        
+    try:
+        tousuu_val = int(float(str(past_tousuu)))
+        tousuu_text = f"{tousuu_val}頭立て / "
+    except (ValueError, TypeError):
+        tousuu_val = 16
+        tousuu_text = ""
+
     tag = ""
+    is_rear = (corner_last is not None) and (corner_last >= 10 or corner_last >= tousuu_val * 0.7)
+    is_top_agari = (rank_val is not None) and (rank_val <= 3)
 
-    # 着順詐欺判定: 4角が後方（10番手以降、または後方30%以内） かつ 上がり順位が上位（1〜3位）
-    is_rear = (corner_last is not None) and (corner_last >= 10 or corner_last >= total_horses * 0.7)
-    is_top_agari = (agari_rank is not None) and (agari_rank <= 3)
-
-    # 前残り判定: 4角3番手以内 かつ 上がり順位が下位（7位以下）
     is_front = (corner_last is not None) and (corner_last <= 3)
-    is_slow_agari = (agari_rank is not None) and (agari_rank >= 7)
+    is_slow_agari = (rank_val is not None) and (rank_val >= 7)
 
     if is_rear and is_top_agari:
-        tag = f" 🔥【着順詐欺判定：後方追込×上がり上位{rank_text}】"
+        tag = f" 🔥【着順詐欺判定：後方追込×上がり上位】"
     elif is_front and is_slow_agari:
-        tag = f" ⚠️【前残り警戒：前受先行×上がり平凡{rank_text}】"
+        tag = f" ⚠️【前残り警戒：前受先行×上がり平凡】"
 
-    return f"着順:{order_str} (通過:{passage_str} / 上がり3F:{agari_str}{rank_text}){tag}"
+    interval_info = f"[{interval_str}] " if interval_str and str(interval_str) not in ['nan', 'NaN', ''] else ""
+    return f"{interval_info}着順:{order_str} ({tousuu_text}通過:{passage_str} / 上がり3F:{agari_str}{rank_text}){tag}"
 
 def clean_name(text):
     if pd.isna(text): return ""
@@ -309,10 +317,8 @@ def render_race_predictions(race_id_target):
     
     df['win_prob'] = df['馬名_clean'].map(lambda x: horse_preds.get(x, {}).get('win_prob', 0.1))
     
-    # 確率のみでソート
     df = df.sort_values(by=['win_prob'], ascending=False).reset_index(drop=True)
     
-    # スコア計算
     min_p, max_p = df['win_prob'].min(), df['win_prob'].max()
     if max_p > min_p:
         df['ai_score'] = (50 + (df['win_prob'] - min_p) / (max_p - min_p) * 100).round().astype(int)
@@ -499,21 +505,14 @@ if st.session_state['selected_race_id']:
                 st.error("【設定エラー】APIキーが見つかりません。")
                 st.stop()
 
-            # 新馬戦判定
             is_shinba = "新馬" in display_race_name or res_df['前走着順'].isna().all()
             total_horses = len(res_df)
 
-            # 🎯 レース内の前走上がり3F相対順位をPython側で動的計算
-            res_df_calc = res_df.copy()
-            res_df_calc['前走上がり3F_num'] = pd.to_numeric(res_df_calc['前走上がり3F'], errors='coerce')
-            res_df_calc['前走上がり3F_rank'] = res_df_calc['前走上がり3F_num'].rank(ascending=True, method='min')
-
             table_summary = []
-            for i, (_, r) in enumerate(res_df_calc.iterrows()):
+            for i, (_, r) in enumerate(res_df.iterrows()):
                 m_str = str(r['馬番'])
                 display_m = "未定" if m_str.startswith("90") else f"{int(float(m_str)):02d}"
                 
-                # 新馬戦ならPython区分を無効化
                 if is_shinba:
                     py_group = "【新馬戦：全頭フラット評価】"
                 else:
@@ -521,14 +520,14 @@ if st.session_state['selected_race_id']:
                     
                 win_val = float(r.get('win_prob', 0)) * 100
                 
-                # 事前計算した調教・前走サマリーを生成
                 chokyo_summary = parse_training_lap_stats(r.get('調教タイム', ''))
                 past_summary = parse_past_race_stats(
                     order_str=r.get('前走着順', '-'),
                     passage_str=r.get('前走通過順', '-'),
                     agari_str=r.get('前走上がり3F', '-'),
-                    agari_rank=r.get('前走上がり3F_rank', None),
-                    total_horses=total_horses,
+                    agari_rank=r.get('前走上がり順位', None),
+                    past_tousuu=r.get('前走頭数', None),
+                    interval_str=r.get('間隔', ''),
                     is_shinba=is_shinba,
                     surface=surface_info
                 )
