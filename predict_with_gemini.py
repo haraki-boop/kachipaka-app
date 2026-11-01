@@ -9,58 +9,43 @@ import streamlit as st
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
-from typing import List, Literal
+from typing import List
 
 # ==========================================
 # 🎨 アプリの基本設定 & スタイル定義
 # ==========================================
-st.set_page_config(page_title="AI予想 勝ちぱかくん", page_icon="logo.png", layout="wide")
+st.set_page_config(page_title="AI予想 勝ちぱかくん (乗算補正版)", page_icon="logo.png", layout="wide")
 
-st.markdown("""
+st.markdown('''
 <style>
-    /* 🎯 背景グラデーション */
-    .stApp {
-        background: linear-gradient(135deg, #e0f7fa 0%, #ffffff 100%);
-    }
-    
+    .stApp { background: linear-gradient(135deg, #e0f7fa 0%, #ffffff 100%); }
     .block-container { padding-top: 3.5rem; padding-bottom: 2rem; }
-    
     .section-header { font-size: 1.5rem; font-weight: bold; color: #2c3e50; margin: 1.2rem 0; border-bottom: 2px solid #ecf0f1; padding-bottom: 6px; }
-    .kachi-table { width: 100%; border-collapse: collapse; background-color: #ffffff; white-space: nowrap; font-size: 17px; }
-    .kachi-table th { padding: 12px 10px; text-align: center; background: #f8f9fa; border-bottom: 2px solid #dee2e6; font-size: 17px; font-weight: bold; }
-    .kachi-table td { padding: 12px 10px; text-align: center; border-bottom: 1px solid #f1f3f5; font-size: 17px; }
-    .badge-mark { color: #fff; padding: 6px 12px; border-radius: 6px; font-weight: bold; display: inline-block; min-width: 60px; font-size: 16px; }
+    .kachi-table { width: 100%; border-collapse: collapse; background-color: #ffffff; white-space: nowrap; font-size: 16px; }
+    .kachi-table th { padding: 12px 10px; text-align: center; background: #f8f9fa; border-bottom: 2px solid #dee2e6; font-size: 16px; font-weight: bold; }
+    .kachi-table td { padding: 10px 8px; text-align: center; border-bottom: 1px solid #f1f3f5; font-size: 16px; }
+    
+    .badge-mark { color: #fff; padding: 5px 10px; border-radius: 6px; font-weight: bold; display: inline-block; min-width: 50px; font-size: 15px; }
     .badge-honmei { background: #e74c3c; } .badge-taikou { background: #3498db; }
     .badge-tana { background: #2ecc71; } .badge-renka { background: #f39c12; }
     .badge-ana { background: #9b59b6; } .badge-keshi { background: #e0e0e0; color: #7f8c8d; }
     
+    .multiplier-up { color: #e74c3c; font-weight: bold; }
+    .multiplier-down { color: #3498db; font-weight: bold; }
+    .multiplier-flat { color: #7f8c8d; }
+
     .sense-card { background-color: #ffffff; border-left: 6px solid #8e44ad; padding: 16px 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
     .sense-title { font-size: 1.2rem; font-weight: bold; color: #8e44ad; }
     .ticket-badge { font-size: 1.1rem; font-weight: bold; color: #d35400; background: #fef5e7; padding: 4px 10px; border-radius: 4px; display: inline-block; }
     
     .gemini-view-card { background-color: #f0f8ff; border-left: 5px solid #3498db; padding: 16px 20px; border-radius: 5px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
     .gemini-view-title { color: #2980b9; font-size: 1.2rem; font-weight: bold; margin-bottom: 8px; }
-    .gemini-view-text { font-size: 16px; color: #333; line-height: 1.6; margin: 0; }
+    .gemini-view-text { font-size: 15px; color: #333; line-height: 1.6; margin: 0; }
     
-    /* 🚨 カスタムボタンデザイン（青系・グラデーション） */
-    div.stButton > button {
-        background: linear-gradient(135deg, #3498db 0%, #2980b9 100%);
-        color: white;
-        border: none;
-        border-radius: 6px;
-        padding: 10px 24px;
-        font-weight: bold;
-        font-size: 16px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        transition: all 0.3s ease;
-    }
-    div.stButton > button:hover {
-        background: linear-gradient(135deg, #2980b9 0%, #1f618d 100%);
-        box-shadow: 0 6px 8px rgba(0,0,0,0.15);
-        transform: translateY(-2px);
-    }
+    div.stButton > button { background: linear-gradient(135deg, #3498db 0%, #2980b9 100%); color: white; border: none; border-radius: 6px; padding: 10px 24px; font-weight: bold; font-size: 16px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: all 0.3s ease; }
+    div.stButton > button:hover { background: linear-gradient(135deg, #2980b9 0%, #1f618d 100%); box-shadow: 0 6px 8px rgba(0,0,0,0.15); transform: translateY(-2px); }
 </style>
-""", unsafe_allow_html=True)
+''', unsafe_allow_html=True)
 
 if 'selected_race_id' not in st.session_state:
     st.session_state['selected_race_id'] = None
@@ -70,70 +55,50 @@ FUTURE_CSV = "future_races.csv"
 CACHE_FILE = "app_cache.pkl"
 
 # ==========================================
-# 📊 Pydanticによる出力スキーマの定義
+# 📊 Pydanticによる係数出力スキーマ
 # ==========================================
-class HorseEvaluation(BaseModel):
-    馬名: str = Field(description="評価対象の馬名")
-    最終印: Literal["◎", "◯", "▲", "△", "☆", "消"] = Field(
-        description="割り振る印。◎・◯・▲・△は各1頭ずつ必須。☆は最大1頭（少頭数時は不使用）。それ以外の全馬には必ず「消」を割り振ること。"
+class HorseCoefficient(BaseModel):
+    馬名: str = Field(description="評価対象の馬名（データと完全一致）")
+    補正係数: float = Field(
+        ge=0.5, le=1.6,
+        description="定性根拠に基づく確率補正倍率。0.5（状態不安・展開逆境）〜 1.0（現状維持）〜 1.6（調教絶好・展開物理ドンピシャ）の連続数値。"
     )
     短評: str = Field(
-        description="調教ラップ、血統、前走内容に基づく短評。Python上位から【消】にした馬は脱落理由を明記。"
+        description="なぜその補正倍率を付与したかの物理的・定性的理由（調教ラップ、コース脚質適合度、前走不利など）"
     )
 
-class RaceAuditResult(BaseModel):
+class RaceCoefficientResult(BaseModel):
     summary: str = Field(
-        description="◎の選定根拠、および選定外から抜擢した穴馬や落とした人気馬の理由（300文字以内）"
+        description="レース全体の物理バイアス（展開ペース、馬場、有利な脚質）と重要補正馬の統括見解（300文字以内）"
     )
-    evaluations: List[HorseEvaluation] = Field(
-        description="出走全頭分の評価リスト（頭数欠落なし）"
+    coefficients: List[HorseCoefficient] = Field(
+        description="出走全頭分の補正係数リスト（全頭必須・欠落厳禁）"
     )
 
 # ==========================================
-# 🧠 システムプロンプト（system_instruction）
+# 🧠 システムプロンプト（乗算レバレッジ仕様）
 # ==========================================
 system_instruction = """
 # 役割定義
-あなたは客観的根拠に基づく展開・適性鑑定のプロ「監査役トラックマン」です。
-統計モデル（Python）が算出した初期順位をベースに、調教状態・前走内容・物理的コースバイアスを精査し、過剰人気馬の危険察知と真の激走馬を見極めて印を再構築してください。
+あなたは統計モデル（Python）が算出したベース確率に対し、直前定性データから乗算補正倍率を付与する「動的レバレッジ鑑定AI」です。
+印（◎◯▲等）を決める必要はありません。各馬の好走確率を何倍にすべきか、客観的根拠から【0.5 〜 1.6】の補正倍率を精密に鑑定してください。
 
-# 前提状況
-- 統計・確率モデル（Python）が算出した「Python上位6頭（◎◯▲△☆☆）」の中に、通常約9割の確率で1着馬が存在します。
-- したがって、軸（◎）および本線相手（◯）は、必ずこの地力が担保された【Python上位6頭】の中から選定してください（新馬戦を除く）。
-- あなたの任務は「Python上位6頭のなかで序列を入れ替えて最も信頼できる◎・◯を決めること」、そして「全出走馬の中から激走可能なヒモ穴馬（▲・△・☆）を発掘すること」です。
+# 係数付与の基準（0.5 〜 1.6）
+- 1.4 〜 1.6（極大プラス補正）:
+  調教で鋭い加速ラップを刻み仕上がり超抜、かつ今回のコース形態と推測脚質が完全に噛み合っている馬。または前走明確な不利・致命的な超スロー展開を強いられ今回物理的に好転する実力馬。
+- 1.1 〜 1.3（微小プラス補正）:
+  調教順調、脚質や枠・血統に適性が見込める馬。
+- 1.0（中立・補正なし）:
+  可もなく不可もない状態。データ通りの走りが期待できる馬。データ欠損馬も1.0を基準とする。
+- 0.8 〜 0.9（微小マイナス補正）:
+  調教の時計が物足りない、または直線距離や展開面でわずかに割り引きが必要な馬。
+- 0.5 〜 0.7（大幅マイナス補正）:
+  調教で「⚠️急減速」などの明らかな状態不安、または小回り・短距離戦で物理的に届かない後方脚質など、明確な物理的逆境を抱える馬。
 
-# ハルシネーション（都合の良い展開捏造）の禁止
-「今回はハナを叩ける」「超スローペースになる」など、過去の実績や推測脚質にない展開を妄想・捏造して評価を上げることは【厳禁】です。提示された客観データ（推測脚質、前走着差、調教実績）に裏付けられた根拠のみで判断してください。
-
-# 印の選定・繰り上げの厳格な審査基準
-1. 【能力の担保なき調教時計は無視せよ】
-   - 単に調教で加速ラップを出しただけの「絶対能力が足りない馬」を上位に抜擢してはならない。
-   - 繰り上げ対象は、「前走不利や展開不向きで能力を出し切れなかった実力馬」や「クラス実績があるのに調教絶好で復活気配の馬」に限る。
-
-2. 【コース・馬場物理に逆らうな】
-   - ダート短距離や小回りコース（中山・福島・小倉など）で、先行力のない追込馬を「調教が良い」「上がりが速い」という理由だけで高く評価することは厳禁。
-   - 直線が長いコース（東京・外回り芝）でない限り、上位馬は「好位・好ポジションで競馬ができる馬」から選定すること。
-
-3. 【着順詐欺の厳格な見極め（偽物の排除）】
-   - 後方から上がり上位を使って負けた馬でも、「勝ち馬から0.7秒以上離されている馬」は単に前半のペースについていけなかっただけの能力不足。繰り上げ厳禁。
-   - 評価すべきは、「道中前が詰まる等の明確な不利」「超スロー前残りで位置取りの差で0.4秒差以内に届かなかった馬」のみ。
-
-4. 【調教判定の是正】
-   - 単に終い13.0秒を超えているだけで一律に「状態不安」と判定しない（坂路や負荷をかけた調教への配慮）。急激な失速や「⚠️終い急減速」タグがある場合のみ減点する。
-
-# 印の割り振りルール
-【通常戦】
-- 【◎】（1頭のみ）: 【Python上位6頭】の中から選定。調教が順調で、コース形態や脚質から最も崩れにくい軸馬。※【逆張りの禁止】：Python1位馬が順調（調教評価A〜B、または加速ラップ）である場合は、人間の主観で難癖をつけずに素直に◎に据えること。「入れ替えること自体」を目的にして、些細な理由で1位馬を格下げすることは厳禁とする。
-- 【◯】（1頭のみ）: 【Python上位6頭】の中から選定。2着以内に粘る相手本線の実力馬。
-- 【▲】（1頭のみ）: 【全出走馬】の中から選定。2〜3着に食い込む単穴（Python選定外からの抜擢も可）。
-- 【△】（1頭のみ）: 【全出走馬】の中から選定。連下に押さえるべき巻き返し馬。
-- 【☆】（最大1頭）: 全出走馬の中から選定。無理に人気薄の大穴を探す枠ではなく、3着の取りこぼしを防ぐための「セーフティネット枠」である。
-  - レース全体が堅調で、Python選定外に魅力的な穴馬がいない場合は、Pythonの4〜6番手（順当な相手）を素直に☆に据えて3着の網羅性を高めよ。
-  - 審査基準を満たす本物の着順詐欺馬・調教急上昇馬がいる場合のみ、波乱を演出する特注穴馬として抜擢せよ（9頭以下の少頭数は不使用）。
-- 【消】: 印以外の残り全頭。Python上位6頭から【消】にした馬は、短評に明確な脱落理由（調教急減速、前走完全力負け等）を明記すること。
-
-【新馬戦】
-- Python順位は過去データがないため完全無視。全頭フラットに【調教加速ラップ】と【血統適性】のみで◎・◯・▲・△・(☆)を選定せよ。
+# 厳格な鑑定ルール
+1. オッズや人気の概念は排除し、提示された「調教ラップ」「前走通過順・上がり」「推測脚質」「コース形態」の物理データのみで係数を決定せよ。
+2. 妄想による展開捏造（逃げ馬ではない馬が逃げる等）は厳禁。推測脚質と前走内容に即して判断せよ。
+3. 出走全頭に対して必ず1つずつ係数と短評を出力せよ。
 """
 
 # ==========================================
@@ -174,11 +139,8 @@ def parse_training_lap_stats(t_str):
         return f"終い:{final_1f:.1f}s{warn}"
 
 def parse_past_race_stats(order_str, passage_str, agari_str, agari_rank=None, past_tousuu=None, interval_str="", is_shinba=False, surface="芝"):
-    """
-    スクレイパーが取得した前走上がり順位・前走頭数・間隔を元に、着順詐欺フラグや休養明けフラグを生成する
-    """
     if is_shinba or pd.isna(order_str) or str(order_str).strip() in ['-', 'nan', 'NaN', '']:
-        return "前走データなし ⚠️【休養明け/初出走：前走不問・調教状態を最重視】"
+        return "前走データなし ⚠️【休養明け/初出走】"
 
     pass_clean = str(passage_str).strip()
     corner_last = None
@@ -187,7 +149,6 @@ def parse_past_race_stats(order_str, passage_str, agari_str, agari_rank=None, pa
         if corners:
             corner_last = int(corners[-1])
 
-    # 順位と頭数のキャスト処理
     try:
         rank_val = int(float(str(agari_rank)))
         rank_text = f" (上がり{rank_val}位)"
@@ -205,7 +166,6 @@ def parse_past_race_stats(order_str, passage_str, agari_str, agari_rank=None, pa
     tag = ""
     is_rear = (corner_last is not None) and (corner_last >= 10 or corner_last >= tousuu_val * 0.7)
     is_top_agari = (rank_val is not None) and (rank_val <= 3)
-
     is_front = (corner_last is not None) and (corner_last <= 3)
     is_slow_agari = (rank_val is not None) and (rank_val >= 7)
 
@@ -277,7 +237,6 @@ df_future = load_future_data()
 
 def render_race_predictions(race_id_target):
     if df_future.empty: return None, None, None, None, None
-    
     cache_data = load_cache()
     if not cache_data:
         st.warning("⚠️ キャッシュファイル(app_cache.pkl)が見つかりません。")
@@ -291,107 +250,90 @@ def render_race_predictions(race_id_target):
     predictions = all_preds.get(target_key) or all_preds.get(str(race_id_target))
     
     if not predictions:
-        st.error(f"⚠️ レースID '{target_key}' の計算済みデータが見つかりません。推論を実行してください。")
+        st.error(f"⚠️ レースID '{target_key}' の計算済みデータが見つかりません。")
         return None, None, None, None, None
 
     horse_preds = predictions.get('horses', {})
-    
     df['win_prob'] = df['馬名_clean'].map(lambda x: horse_preds.get(x, {}).get('win_prob', 0.1))
-    
     df = df.sort_values(by=['win_prob'], ascending=False).reset_index(drop=True)
     
     min_p, max_p = df['win_prob'].min(), df['win_prob'].max()
-    if max_p > min_p:
-        df['ai_score'] = (50 + (df['win_prob'] - min_p) / (max_p - min_p) * 100).round().astype(int)
-    else:
-         df['ai_score'] = 100
+    df['ai_score'] = (50 + (df['win_prob'] - min_p) / (max_p - min_p) * 100).round().astype(int) if max_p > min_p else 100
 
     mark_list = ['◎', '◯', '▲', '△', '☆', '☆']
-    new_marks = []
-    for i in range(len(df)):
-        new_marks.append(mark_list[i] if i < len(mark_list) else '消')
-    df['印'] = new_marks
+    df['初期印'] = [mark_list[i] if i < len(mark_list) else '消' for i in range(len(df))]
 
     pat = predictions.get('pattern', '③ 混戦気配')
     rec_ticket = predictions.get('ticket', '3連複')
     
+    def fmt_m(val):
+        v_str = str(val)
+        return "未定" if v_str.startswith("90") or int(float(v_str)) >= 90 else f"{int(float(v_str)):02d}"
+
     if len(df) >= 6:
         h1 = df.iloc[0]
-        def fmt_m(val):
-            v_str = str(val)
-            return "未定" if v_str.startswith("90") or int(float(v_str)) >= 90 else f"{int(float(v_str)):02d}"
-        
-        aite_str = ", ".join([f"{fmt_m(df.iloc[i]['馬番'])}({df.iloc[i]['馬名']})({df.iloc[i]['印']})" for i in range(1, 6)])
+        aite_str = ", ".join([f"{fmt_m(df.iloc[i]['馬番'])}({df.iloc[i]['馬名']})({df.iloc[i]['初期印']})" for i in range(1, 6)])
         buy_detail = f"軸: {fmt_m(h1['馬番'])}({h1['馬名']})(◎) -> 相手: {aite_str}"
     else:
         buy_detail = predictions.get('buy_detail', '')
         
-    try:
-        race_day = int(target_key[8:10])
-    except:
-        race_day = 1
+    try: race_day = int(target_key[8:10])
+    except: race_day = 1
 
     return df, pat, rec_ticket, buy_detail, race_day
 
 def generate_base_table(disp_df):
     html = "<div class='table-container'><table class='kachi-table'>"
-    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>推測脚質</th><th>斤量</th><th>騎手</th><th>スコア</th><th>1着率</th><th>Python印</th></tr>"
+    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>脚質</th><th>斤量</th><th>騎手</th><th>Python勝率</th><th>初期印</th></tr>"
     for _, r in disp_df.iterrows():
         w_num = str(r.get('枠番', ''))
         display_waku = w_num if w_num and w_num != 'nan' and not w_num.startswith("90") else "-"
-        
         m_num = str(r['馬番'])
         display_umaban = "未定" if m_num.startswith("90") or int(float(m_num)) >= 90 else f"{int(float(m_num)):02d}"
-        
-        win_val = float(r.get('win_prob', 0))
+        win_val = float(r.get('win_prob', 0)) * 100
         kinryo_val = float(r.get('斤量', 55.0))
-        score_str = f"<b>{int(r.get('ai_score', 100))}</b>"
-        win_str = f"<span style='color:#e74c3c; font-weight:bold;'>{win_val*100:.1f}%</span>" if win_val >= 0.25 else f"{win_val*100:.1f}%"
-        
-        mark = r.get('印', '消')
-        
+        mark = r.get('初期印', '消')
         style_raw = str(r.get('推測脚質', '不明')).strip()
-        if style_raw == '不明':
-            style_html = "<span style='color:#bdc3c7;'>-</span>"
-        elif style_raw == '逃げ':
-            style_html = "<span style='color:#e74c3c; font-weight:bold;'>逃げ</span>"
-        else:
-            style_html = style_raw
-            
-        jockey_val = str(r.get('騎手', '-')).strip()
         
         html += f"<tr><td><b>{display_waku}</b></td><td><b>{display_umaban}</b></td><td style='text-align:left; font-weight:bold;'>{r.get('馬名', '-')}</td>"
-        html += f"<td>{style_html}</td><td>{kinryo_val:.1f}kg</td><td>{jockey_val}</td><td>{score_str}</td><td>{win_str}</td>"
+        html += f"<td>{style_raw}</td><td>{kinryo_val:.1f}kg</td><td>{r.get('騎手', '-')}</td><td><b>{win_val:.1f}%</b></td>"
         html += f"<td><span class='badge-mark {get_badge_class(mark)}'>{mark}</span></td></tr>"
     html += "</table></div>"
     return html
 
-def generate_fusion_table(merged_df):
+def generate_fusion_multiplied_table(merged_df):
     html = "<div class='table-container'><table class='kachi-table'>"
-    html += "<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>AIｽｺア</th><th>調教評価</th><th>Python印</th><th>Gemini印</th><th style='text-align:left; min-width: 400px;'>Gemini短評 (展開・バイアス物理判定)</th></tr>"
+    html += "<tr><th>最終印</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>元勝率</th><th>Gemini倍率</th><th>補正後勝率</th><th>初期印</th><th style='text-align:left; min-width: 420px;'>補正理由 (物理・定性根拠)</th></tr>"
     for _, r in merged_df.iterrows():
-        w_num = str(r.get('枠番', ''))
-        display_waku = w_num if w_num and w_num != 'nan' and not w_num.startswith("90") else "-"
-        
         m_num = str(r.get('馬番', ''))
         display_umaban = "未定" if m_num.startswith("90") or int(float(m_num)) >= 90 else f"{int(float(m_num)):02d}"
         
-        tanpyo = r.get('短評', '-')
-        chokyo_eval = str(r.get('調教評価', '-'))
+        f_mark = r.get('最終印', '消')
+        b_mark = r.get('初期印', '消')
+        w_base = float(r.get('win_prob', 0)) * 100
+        w_final = float(r.get('final_prob', 0)) * 100
+        mult = float(r.get('補正係数', 1.0))
+        
+        if mult >= 1.2:
+            mult_str = f"<span class='multiplier-up'>×{mult:.2f} ⬆</span>"
+        elif mult <= 0.8:
+            mult_str = f"<span class='multiplier-down'>×{mult:.2f} ⬇</span>"
+        else:
+            mult_str = f"<span class='multiplier-flat'>×{mult:.2f}</span>"
             
-        html += f"<tr><td><b>{display_waku}</b></td><td><b>{display_umaban}</b></td><td style='text-align:left; font-weight:bold;'>{r.get('馬名', '-')}</td>"
-        html += f"<td><b>{int(r.get('ai_score', 100))}</b></td>"
-        html += f"<td><span style='font-weight:bold; color:#d35400;'>{chokyo_eval}</span></td>"
-        html += f"<td><span class='badge-mark {get_badge_class(r.get('印', '消'))}'>{r.get('印', '消')}</span></td>"
-        html += f"<td><span class='badge-mark {get_badge_class(r.get('Gemini印', '消'))}'>{r.get('Gemini印', '消')}</span></td>"
-        html += f"<td style='text-align:left; font-size:14px; white-space:normal; line-height:1.5; padding: 12px; font-weight:500; color:#2c3e50;'>{tanpyo}</td></tr>"
+        tanpyo = r.get('短評', '-')
+            
+        html += f"<tr><td><span class='badge-mark {get_badge_class(f_mark)}'>{f_mark}</span></td>"
+        html += f"<td><b>{display_umaban}</b></td><td style='text-align:left; font-weight:bold;'>{r.get('馬名', '-')}</td>"
+        html += f"<td>{w_base:.1f}%</td><td>{mult_str}</td><td><b style='color:#e74c3c; font-size:17px;'>{w_final:.1f}%</b></td>"
+        html += f"<td><span class='badge-mark {get_badge_class(b_mark)}'>{b_mark}</span></td>"
+        html += f"<td style='text-align:left; font-size:14px; white-space:normal; line-height:1.5; padding: 10px; color:#2c3e50;'>{tanpyo}</td></tr>"
     html += "</table></div>"
     return html
 
 def clear_all_caches():
     st.cache_data.clear()
-    if hasattr(st, 'cache_resource'):
-        st.cache_resource.clear()
+    if hasattr(st, 'cache_resource'): st.cache_resource.clear()
 
 # ==========================================
 # 🎯 画面表示
@@ -399,14 +341,11 @@ def clear_all_caches():
 st.sidebar.button("🔄 画面リロード", on_click=clear_all_caches, use_container_width=True)
 
 col_logo, col_main = st.columns([1, 4])
-
-with col_logo:
-    if os.path.exists("logo.png"):
-        st.image("logo.png", use_container_width=True)
+if os.path.exists("logo.png"):
+    with col_logo: st.image("logo.png", use_container_width=True)
 
 with col_main:
     st.markdown("<div class='section-header' style='margin-top: 0;'>🎯 レース選択</div>", unsafe_allow_html=True)
-
     if df_future.empty:
         st.warning("出馬表データがありません。scrape_shutsuba.py を実行してください。")
         st.stop()
@@ -432,7 +371,7 @@ with col_main:
                         if cols[k].button(f"{r}R {r_name}" if r_name and r_name!='nan' else f"{r}R", key=f"btn_{r_id}", use_container_width=True):
                             st.session_state['selected_race_id'] = r_id
 
-if st.session_state['selected_race_id']:
+if st.session_state.get('selected_race_id'):
     t_id = str(st.session_state['selected_race_id'])
     t_rows = df_future[df_future['race_id'].astype(str) == t_id]
     if t_rows.empty: st.stop()
@@ -445,45 +384,18 @@ if st.session_state['selected_race_id']:
     surface_info = r_info.get('surface', '不明')
     distance_info = r_info.get('distance', '')
     
-    place_name_str = r_info.get('place_name', '')
-    dist_str = str(distance_info)
-    dist_num_str = re.sub(r'\D', '', dist_str)
-    turn_info = ""
-    
-    if place_name_str == "新潟" and dist_num_str == "1000":
-        turn_info = "直線"
-    elif place_name_str in ['中山', '阪神', '京都', '札幌', '函館', '福島', '小倉']:
-        turn_info = "右回り"
-    elif place_name_str in ['東京', '新潟', '中京']:
-        turn_info = "左回り"
-    
-    turn_display = f" / {turn_info}" if turn_info else ""
-    
     res_df, pat, rec_ticket, buy_detail, race_day = render_race_predictions(t_id)
-    
-    st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{display_race_name}】 <span style='font-size:18px; color:#7f8c8d;'>({surface_info}{distance_info}m{turn_display} / 開催{race_day}日目)</span></h2>", unsafe_allow_html=True)
+    st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{display_race_name}】 <span style='font-size:18px; color:#7f8c8d;'>({surface_info}{distance_info}m / 開催{race_day}日目)</span></h2>", unsafe_allow_html=True)
     
     if res_df is not None:
-        is_mokuyou = any(res_df['馬番'].astype(str).str.startswith('90'))
-        if is_mokuyou:
-            st.info("ℹ️ 現在は枠順確定前の「特別登録状態」のため、枠番・馬番は未定として表示されています。")
-            
-        st.markdown(f"""
-        <div class='sense-card'>
-            <div class='sense-title'>🧠 AI勝負気配判定: {pat}</div>
-            <div style='margin-top: 8px;'><b>🎟 推奨買い目:</b> <span class='ticket-badge'>{rec_ticket}</span></div>
-            <div style='margin-top: 6px; font-size: 15px; color: #555;'><b>📝 買い目詳細:</b> {buy_detail}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        st.markdown("<div class='section-header'>📊 Pythonベース予想データ (バイアス補正・CSV削除済み)</div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-header'>📊 1. Pythonベース地力スコア</div>", unsafe_allow_html=True)
         st.markdown(generate_base_table(res_df), unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        if st.button("🧠 Geminiに全データを渡し、展開予想と定性評価を実行", type="primary", use_container_width=True):
+        if st.button("⚡ Geminiによる動的レバレッジ補正を実行（乗算モデル）", type="primary", use_container_width=True):
             if not GEMINI_API_KEY:
-                st.error("【設定エラー】APIキーが見つかりません。")
+                st.error("【設定エラー】GEMINI_API_KEYが設定されていません。")
                 st.stop()
 
             is_shinba = "新馬" in display_race_name or res_df['前走着順'].isna().all()
@@ -493,12 +405,6 @@ if st.session_state['selected_race_id']:
             for i, (_, r) in enumerate(res_df.iterrows()):
                 m_str = str(r['馬番'])
                 display_m = "未定" if m_str.startswith("90") else f"{int(float(m_str)):02d}"
-                
-                if is_shinba:
-                    py_group = "【新馬戦：全頭フラット評価】"
-                else:
-                    py_group = "【Python上位6頭】" if i < 6 else "【Python選定外】"
-                    
                 win_val = float(r.get('win_prob', 0)) * 100
                 
                 chokyo_summary = parse_training_lap_stats(r.get('調教タイム', ''))
@@ -513,24 +419,22 @@ if st.session_state['selected_race_id']:
                     surface=surface_info
                 )
                 
-                info = (f"馬番:{display_m} | 馬名:{r.get('馬名','')} | 区分:{py_group} | 初期評価:{r.get('印','消')} (勝率:{win_val:.1f}%) | "
-                        f"血統(父/母父):{r.get('父','-')} / {r.get('母父','-')} | "
+                info = (f"馬番:{display_m} | 馬名:{r.get('馬名','')} | Python勝率:{win_val:.1f}% | "
                         f"脚質:{r.get('推測脚質','-')} | 騎手:{r.get('騎手','-')} | "
                         f"前走:{past_summary} | 調教評価:{r.get('調教評価','-')} | 調教分析:{chokyo_summary}")
                 table_summary.append(info)
 
             prompt = f"""
-以下のレースデータに基づき、指示に従って全出走馬を監査し、最終印（JSON）を出力してください。
+以下の出走馬データに基づき、指示に従って全出走馬の補正係数（0.5〜1.6）と理由を出力してください。
 
-【分析対象レース】: {r_info['place_name']} {r_info['r_num']}R ({surface_info}{distance_info}m)
-【出走頭数】: {total_horses}頭 {"(少頭数レース: ☆なし・最大4頭推奨)" if total_horses <= 9 else ""}
-【レース種別】: {"【新馬戦】(Python評価無視・調教加速ラップと血統重視)" if is_shinba else "通常戦"}
+【対象レース】: {r_info['place_name']} {r_info['r_num']}R ({surface_info}{distance_info}m)
+【出走頭数】: {total_horses}頭
 
 【出走馬データ一覧】
 {chr(10).join(table_summary)}
 """
 
-            with st.spinner("🧠 Geminiがメンバー構成から独自の展開ストーリーを紡ぎ出しています..."):
+            with st.spinner("🧠 Geminiが調教・展開データから各馬の確率補正倍率を精密算出中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 try:
                     response = client.models.generate_content(
@@ -538,34 +442,61 @@ if st.session_state['selected_race_id']:
                         contents=prompt, 
                         config=types.GenerateContentConfig(
                             system_instruction=system_instruction, 
-                            temperature=0.2, 
+                            temperature=0.1, 
                             response_mime_type="application/json",
-                            response_schema=RaceAuditResult,
+                            response_schema=RaceCoefficientResult,
                         )
                     )
                     
-                    result = RaceAuditResult.model_validate_json(response.text)
+                    result = RaceCoefficientResult.model_validate_json(response.text)
+                    coeff_df = pd.DataFrame([c.model_dump() for c in result.coefficients])
                     
-                    eval_df = pd.DataFrame([e.model_dump() for e in result.evaluations])
-                    eval_df.rename(columns={'最終印': 'Gemini印'}, inplace=True)
-                    
-                    if not eval_df.empty and '馬名' in eval_df.columns:
-                        eval_df['馬名_clean'] = eval_df['馬名'].astype(str).apply(clean_name)
-                        eval_df_clean = eval_df[['馬名_clean', 'Gemini印', '短評']].dropna(subset=['馬名_clean'])
+                    if not coeff_df.empty and '馬名' in coeff_df.columns:
+                        coeff_df['馬名_clean'] = coeff_df['馬名'].astype(str).apply(clean_name)
+                        coeff_df_clean = coeff_df[['馬名_clean', '補正係数', '短評']].dropna(subset=['馬名_clean'])
                         
-                        merged_df = pd.merge(res_df, eval_df_clean, on='馬名_clean', how='left')
-                        merged_df['Gemini印'] = merged_df['Gemini印'].fillna('消')
-                        merged_df['短評'] = merged_df['短評'].fillna('-')
+                        # 結合して最終確率を数学的に乗算
+                        merged = pd.merge(res_df, coeff_df_clean, on='馬名_clean', how='left')
+                        merged['補正係数'] = merged['補正係数'].fillna(1.0)
+                        merged['短評'] = merged['短評'].fillna('データ保留')
+                        
+                        # 🎯 数学的な乗算: 最終確率 = Python基準勝率 × 補正係数
+                        merged['raw_final'] = merged['win_prob'] * merged['補正係数']
+                        # 確率の正規化（合計100%に揃える）
+                        merged['final_prob'] = merged['raw_final'] / merged['raw_final'].sum()
+                        
+                        # 最終確率順にソートして新たな印（◎◯▲△☆）を機械的に付与
+                        merged = merged.sort_values(by='final_prob', ascending=False).reset_index(drop=True)
+                        
+                        marks = ['◎', '◯', '▲', '△', '☆']
+                        final_marks = []
+                        for idx in range(len(merged)):
+                            if idx < len(marks):
+                                final_marks.append(marks[idx])
+                            else:
+                                final_marks.append('消')
+                        merged['最終印'] = final_marks
                         
                         st.markdown(f"""
                         <div class='gemini-view-card'>
-                            <div class='gemini-view-title'>📝 トラックマンGeminiの展開・血統総合見解</div>
+                            <div class='gemini-view-title'>📝 トラックマンGeminiのレース物理バイアス統括</div>
                             <p class='gemini-view-text'>{result.summary}</p>
                         </div>
                         """, unsafe_allow_html=True)
                         
-                        st.markdown("<div class='section-header'>🔥 Python（確率脳） × Gemini（定性・血統脳） 独立評価比較</div>", unsafe_allow_html=True)
-                        st.markdown(generate_fusion_table(merged_df), unsafe_allow_html=True)
+                        # 買い目サマリーの動的更新
+                        h_o = merged.iloc[0]
+                        h_m = merged.iloc[1]
+                        st.markdown(f"""
+                        <div class='sense-card'>
+                            <div class='sense-title'>🎟 乗算補正後の最終推奨買い目</div>
+                            <div style='margin-top: 6px;'><b>【本線単勝・馬連】</b>: ◎ {h_o['馬名']} (新勝率 {h_o['final_prob']*100:.1f}%) ⇄ ◯ {h_m['馬名']}</div>
+                            <div style='margin-top: 4px;'><b>【3連複フォーメーション】</b>: ◎ 1頭軸 ➔ 相手: ◯, ▲, △, ☆</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        st.markdown("<div class='section-header'>🔥 2. 数学融合結果（Python地力 × Gemini倍率）</div>", unsafe_allow_html=True)
+                        st.markdown(generate_fusion_multiplied_table(merged), unsafe_allow_html=True)
                 
                 except Exception as e:
-                    st.error(f"❌ API通信エラー: {e}")
+                    st.error(f"❌ API通信・計算エラー: {e}")
