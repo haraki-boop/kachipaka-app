@@ -16,10 +16,11 @@ FUTURE_CSV = "future_races.csv"
 def get_target_dates():
     today = datetime.now()
     dates = []
-    # 🎯 変更点: 来週の未確定レースを省くため、今日〜明後日（range(3)）のみを取得
-    for i in range(3):
+    # 🎯 変更点: 今週・来週の週末（土日）を自動取得するように拡張
+    for i in range(8):
         d = today + timedelta(days=i)
-        dates.append(d.strftime("%Y%m%d"))
+        if d.weekday() in [5, 6]:  # 5=土曜日, 6=日曜日
+            dates.append(d.strftime("%Y%m%d"))
     return sorted(list(set(dates)))
 
 def clean_text(text):
@@ -73,13 +74,13 @@ def get_premium_details(driver, race_id):
             premium_data[name] = {
                 "調教タイム": "", "調教評価": "", "推測脚質": "",
                 "父": "", "母父": "", "前走着順": "", "前走頭数": "", "間隔": "",
-                "前走通過順": "", "前走上がり3F": "", "前走上がり順位": ""  # 前走前半3Fを完全に削除
+                "前走通過順": "", "前走上がり3F": "", "前走上がり順位": ""
             }
 
     place_code = int(str(race_id)[4:6])
     domain = "race.netkeiba.com" if place_code <= 10 else "nar.netkeiba.com"
 
-    # 📌 1. 競馬新聞ページ (newspaper.html) から「間隔」と「前走頭数」を確実取得
+    # 📌 1. 競馬新聞ページ (newspaper.html)
     try:
         driver.get(f"https://{domain}/race/newspaper.html?race_id={race_id}")
         time.sleep(1.2)
@@ -94,13 +95,11 @@ def get_premium_details(driver, race_id):
             if not h_name: continue
             init_horse(h_name)
 
-            # ① 間隔（HorseList全体のテキストから検索）
             full_text = dl.get_text(" ", strip=True)
             m_kan = re.search(r'(中\d+週|連闘|\d+カ?月半?休養|\d+ヵ?月半?休養|\d+年\d+カ?月休養)', full_text)
             if m_kan and not premium_data[h_name]["間隔"]:
                 premium_data[h_name]["間隔"] = m_kan.group(1)
 
-            # ② 前走頭数（Past_Wrapper の中から抽出）
             past_wrapper = dl.find("dd", class_=re.compile("Past_Wrapper"))
             if past_wrapper:
                 first_past = past_wrapper.find("div", class_=re.compile("PastBox"))
@@ -115,7 +114,7 @@ def get_premium_details(driver, race_id):
     except Exception as e:
         pass
 
-    # 📌 2. 調教ページ (oikiri.html) -> 特別・重賞（2行構成）にも対応
+    # 📌 2. 調教ページ (oikiri.html)
     try:
         driver.get(f"https://{domain}/race/oikiri.html?race_id={race_id}")
         time.sleep(1.2)
@@ -133,7 +132,6 @@ def get_premium_details(driver, race_id):
                         current_horse = h_name
                         init_horse(current_horse)
 
-            # 保持している馬に対して、同じ行または次の行のタイムを紐付け
             if current_horse:
                 time_td = tr.find("td", class_=re.compile("TrainingTimeData"))
                 if time_td:
@@ -154,7 +152,7 @@ def get_premium_details(driver, race_id):
     except Exception as e:
         print(f"調教ページ解析エラー: {e}")
 
-    # 📌 3. 前走成績の取得 (shutuba_past.html) -> 着順・上がり・通過順など
+    # 📌 3. 前走成績の取得 (shutuba_past.html)
     try:
         driver.get(f"https://{domain}/race/shutuba_past.html?race_id={race_id}")
         time.sleep(1.2)
