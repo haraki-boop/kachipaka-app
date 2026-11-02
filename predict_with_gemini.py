@@ -16,7 +16,7 @@ from typing import List
 # ==========================================
 st.set_page_config(page_title="AI予想 勝ちぱかくん (乗算補正版)", page_icon="logo.png", layout="wide")
 
-st.markdown('''
+st.markdown("""
 <style>
     .stApp { background: linear-gradient(135deg, #e0f7fa 0%, #ffffff 100%); }
     .block-container { padding-top: 3.5rem; padding-bottom: 2rem; }
@@ -28,7 +28,7 @@ st.markdown('''
     .badge-mark { color: #fff; padding: 5px 10px; border-radius: 6px; font-weight: bold; display: inline-block; min-width: 50px; font-size: 15px; }
     .badge-honmei { background: #e74c3c; } .badge-taikou { background: #3498db; }
     .badge-tana { background: #2ecc71; } .badge-renka { background: #f39c12; }
-    .badge-ana { background: #9b59b6; } .badge-keshi { background: #e0e0e0; color: #7f8c8d; }
+    .badge-ana { background: #9b59b6; } .badge-chuu { background: #e67e22; } .badge-keshi { background: #e0e0e0; color: #7f8c8d; }
     
     .multiplier-up { color: #e74c3c; font-weight: bold; }
     .multiplier-down { color: #3498db; font-weight: bold; }
@@ -45,7 +45,7 @@ st.markdown('''
     div.stButton > button { background: linear-gradient(135deg, #3498db 0%, #2980b9 100%); color: white; border: none; border-radius: 6px; padding: 10px 24px; font-weight: bold; font-size: 16px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: all 0.3s ease; }
     div.stButton > button:hover { background: linear-gradient(135deg, #2980b9 0%, #1f618d 100%); box-shadow: 0 6px 8px rgba(0,0,0,0.15); transform: translateY(-2px); }
 </style>
-''', unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
 if 'selected_race_id' not in st.session_state:
     st.session_state['selected_race_id'] = None
@@ -80,30 +80,40 @@ class RaceCoefficientResult(BaseModel):
 # ==========================================
 system_instruction = """
 # 役割定義
-あなたは統計モデル（Python）が算出したベース確率に対し、直前定性データから乗算補正倍率を付与する「動的レバレッジ鑑定AI」です。
-印（◎◯▲等）を決める必要はありません。各馬の好走確率を何倍にすべきか、客観的根拠から【0.5 〜 1.6】の補正倍率を精密に鑑定してください。
+あなたは統計モデル（Python）が算出したベース確率に対し、直前定性データから乗算補正倍率を付与する「精密レバレッジ鑑定AI」です。
+印を決める必要はありません。各馬の好走確率を何倍にすべきか、客観的根拠から【0.5 〜 1.6】の補正倍率を精密に鑑定してください。
 
 # 係数付与の基準（0.5 〜 1.6）
 - 1.4 〜 1.6（極大プラス補正）:
-  調教で鋭い加速ラップを刻み仕上がり超抜、かつ今回のコース形態と推測脚質が完全に噛み合っている馬。
-  または【明確な斤量恩恵（ハンデ戦等で最軽量、他馬より2kg〜4kg以上軽い物理的有利）】がある馬。
-  または【前走からの大幅な斤量減（-2kg〜-4kg）】により、前走の着順詐欺（重い斤量でバテただけ）から一変が確定的な馬。好走実績のある斤量に戻った馬も含む。
-  または【血統適性の爆発】（新馬戦・ダート替わり・距離延長などで、父・母父の血統キャラクターが今回のコース・馬場条件にドンピシャで合致する馬）。
+  【好走休養明け×究極仕上がり（激走穴馬特注ルール）】:
+  「前走1〜2着」かつ「レース間隔中10週以上の休養明け」で、調教分析に「🔥【究極ギアチェンジ】」またはラスト鋭い加速（坂路12.1秒以下/ウッド11.5秒以下）を記録している馬。
+  目標レースに向けて極限まで体調が仕上げられた物理的証明（勝負気配の客観的裏付け）であるため、過去の実績不足やPython初期勝率が低くても積極的に【1.35〜1.50倍】のレバレッジをかけて浮上させよ。
+  また【明確な斤量恩恵（ハンデ戦等で他馬より2kg〜4kg以上軽い物理的有利）】や【前走からの大幅斤量減（-2kg〜-4kg）】のある馬。
+  また【血統適性の爆発】（新馬戦・ダート替わり・芝1400mの先行シルバーステートなど、コース条件にドンピシャで合致する馬）。
+
 - 1.1 〜 1.3（微小プラス補正）:
-  調教順調、脚質や枠・血統に適性が見込める馬、または手頃な斤量恩恵がある馬。
-  または【明確な鞍上強化】により、前走の物理的敗因（折り合い欠き、進路ミス）が今回解消される見込みが立つ馬。
+  調教が加速・維持で順調な動きを見せている馬。コース脚質適性に合致する馬。
+  または【明確な鞍上強化】により、前走の物理的敗因が今回解消される見込みが立つ馬。
+
 - 1.0（中立・補正なし）:
-  可もなく不可もない状態。データ通りの走りが期待できる馬。全頭同斤量のレース、または斤量差・血統適性が平均的な馬。
+  可もなく不可もない状態。データ通りの走りが期待できる馬。
+  ※【58kgに関する絶対ルール】: 古馬・牡馬における「55.0kg〜58.0kg」は日本の競馬における【完全に標準的な規定重量】である。この範囲の斤量を背負っていること「だけ」を理由にマイナス補正をかけることは【完全厳禁】とする。
+
 - 0.8 〜 0.9（微小マイナス補正）:
-  調教の時計が物足りない、血統適性に疑問がある、または平均より斤量がやや重い馬。
+  調教タイムの前Fとの落差が物足りない馬。または血統適性に疑問がある馬。
+
 - 0.5 〜 0.7（大幅マイナス補正）:
-  調教で「⚠️急減速」などの明らかな状態不安、小回り・短距離戦で物理的に届かない後方脚質、および【トップハンデ・酷量（最軽量馬と3kg〜5kg以上の格差を背負う馬）】。
+  調教分析で明確な「大失速（前Fより0.6秒以上の失速、またはバテている記述）」がある明らかな状態不安馬。
+  または、小回り・短距離戦で物理的に届かない極端な後方脚質（追込）の馬。
+  または【物理的限界を超えた酷量】（ハンデ戦で「59.0kg〜60.0kg超」を背負う、あるいは「前走から+3.0kg以上の急激な重量増」で物理的負荷が限界を超えている馬）。
 
 # 厳格な鑑定ルール
-1. 【斤量物理の重視】: 斤量差は走破タイムとスタミナ消費に直結する物理的負荷である。前走からの大幅減量馬や最軽量馬は物理的恩恵として積極的にプラス補正（1.2〜1.5倍）せよ。
-2. 【血統ポテンシャルの評価】: Pythonは血統を単なる記号として扱うが、あなたは「血統の物理的キャラクター（ダート適性、距離適性、道悪適性など）」を熟知している。レース条件と血統が完璧に合致する穴馬はレバレッジをかけて浮上させよ。
-3. 【乗り替わりの扱い（二重計上防止）】: ルメールや川田などの名前だけで無条件に加点してはならない（Pythonがすでにベース勝率に織り込み済みのため）。「前走は若手騎手で制御できず敗退 ➔ 今回トップ騎手への乗り替わりで弱点が解消される」という物理的な理由がある場合のみプラス評価せよ。
-4. 出走全頭に対して必ず1つずつ係数と短評を出力せよ。
+1. 【調教減速馬への加点厳禁】: 調教分析に「減速」と明記されている馬に対し、調教を理由として1.0を超えるプラス補正を付与することは【完全厳禁】とする（現状維持1.0、または0.8〜0.95のマイナス補正とせよ）。
+2. 【特大レバレッジ（>1.30）の発動条件】: 1.30倍を超える極大補正は、調教の「🔥【究極ギアチェンジ】」または斤量の「【減量恩恵】」などの確定タグが存在する馬にのみ厳格に限定せよ。
+3. 【記者コメント・主観マークの完全無視】: 新聞記者の主観ラベルは信用せず、Python側で算出された「調教分析（終い時計・前Fとの差分秒数）」という客観的な物理タイムのみを信じよ。
+4. 【性齢の規定重量への配慮】: 牡馬（58kg）と牝馬（56kg）の差は性別の規定重量差であり、59kg以上の異常な酷量でない限り58kgを嫌って格下げしてはならない。
+5. 【短評に物理根拠を明記】: なぜその係数を付与したのか（特に「好走休養×ギアチェンジ」「斤量減量」「血統コース適合」など）を短評に明確に記述せよ。
+6. 出走全頭に対して必ず1つずつ係数と短評を出力せよ。
 """
 
 # ==========================================
@@ -114,15 +124,18 @@ def parse_training_lap_stats(t_str):
         return "調教データなし"
     
     s = str(t_str).strip()
-    m_floats = re.findall(r'\d+\.?\d*', s)
+    m_floats = [float(x) for x in re.findall(r'\d+\.?\d*', s)]
     if not m_floats:
         return "調教データなし"
     
-    final_1f = float(m_floats[-1])
+    total_time = m_floats[0]
+    final_1f = m_floats[-1]
+    
+    is_hanro = total_time < 70.0
+    course_type = "坂路" if is_hanro else "ウッド/CW"
     
     two_f_total = None
-    for val_str in reversed(m_floats[:-1]):
-        v = float(val_str)
+    for v in reversed(m_floats[:-1]):
         if 21.0 <= v <= 30.0:
             two_f_total = v
             break
@@ -130,18 +143,19 @@ def parse_training_lap_stats(t_str):
     if two_f_total and two_f_total > final_1f:
         penultimate_1f = round(two_f_total - final_1f, 1)
         diff = round(final_1f - penultimate_1f, 1)
-        if diff <= -0.2:
-            status = f"加速({diff:+.1f}s)"
-        elif diff <= 0.3:
-            status = f"維持({diff:+.1f}s)"
-        else:
-            status = f"減速({diff:+.1f}s)"
         
-        warn = " [⚠️終い急減速]" if (diff >= 0.8 and final_1f >= 13.2) else ""
-        return f"終い:{final_1f:.1f}s (前F:{penultimate_1f:.1f}s, 差:{diff:+.1f}s, {status}){warn}"
+        is_gear_change = False
+        if is_hanro and final_1f <= 12.1 and diff <= -0.5:
+            is_gear_change = True
+        elif (not is_hanro) and final_1f <= 11.5 and diff <= -0.5:
+            is_gear_change = True
+            
+        gear_tag = " 🔥【究極ギアチェンジ】" if is_gear_change else ""
+        status = f"加速({diff:+.1f}s)" if diff <= -0.2 else (f"維持({diff:+.1f}s)" if diff <= 0.3 else f"減速({diff:+.1f}s)")
+        
+        return f"[{course_type}] 終い:{final_1f:.1f}s (前F:{penultimate_1f:.1f}s, 差:{diff:+.1f}s, {status}){gear_tag}"
     else:
-        warn = " [⚠️終い要確認]" if final_1f >= 13.5 else ""
-        return f"終い:{final_1f:.1f}s{warn}"
+        return f"[{course_type}] 終い:{final_1f:.1f}s"
 
 def parse_past_race_stats(order_str, passage_str, agari_str, agari_rank=None, past_tousuu=None, interval_str="", is_shinba=False, surface="芝"):
     if is_shinba or pd.isna(order_str) or str(order_str).strip() in ['-', 'nan', 'NaN', '']:
@@ -183,50 +197,36 @@ def parse_past_race_stats(order_str, passage_str, agari_str, agari_rank=None, pa
     return f"{interval_info}着順:{order_str} ({tousuu_text}通過:{passage_str} / 上がり3F:{agari_str}{rank_text}){tag}"
 
 def format_weight_analysis(kinryo_val, min_w, max_w, avg_w, has_weight_gap, past1_w=None, past2_w=None):
-    """
-    今回斤量・他馬との格差だけでなく、前走・前々走からの斤量増減（自分自身の重量変化）を算出
-    """
     tags = []
-    
-    # --- 自分自身の斤量変化（前走比・前々走比） ---
     try:
-        if past1_w and str(past1_w).strip() != "":
+        if past1_w and str(past1_w).strip() not in ["", "nan", "NaN"]:
             diff_p1 = round(kinryo_val - float(past1_w), 1)
             if diff_p1 <= -2.0:
-                tags.append(f"【🔥前走比 {diff_p1:+.1f}kg: 大幅減量で一変警戒】")
-            elif diff_p1 >= 2.0:
-                tags.append(f"【⚠️前走比 {diff_p1:+.1f}kg: 大幅増量で失速警戒】")
-            elif diff_p1 < 0:
-                tags.append(f"[前走比 {diff_p1:+.1f}kg]")
-            elif diff_p1 > 0:
+                tags.append(f"【前走比 {diff_p1:+.1f}kg: 減量恩恵】")
+            elif diff_p1 >= 3.0:
+                tags.append(f"【前走比 {diff_p1:+.1f}kg: 急な重量増に注意】")
+            else:
                 tags.append(f"[前走比 {diff_p1:+.1f}kg]")
     except Exception:
         pass
 
     try:
-        if past2_w and str(past2_w).strip() != "":
+        if past2_w and str(past2_w).strip() not in ["", "nan", "NaN"]:
             diff_p2 = round(kinryo_val - float(past2_w), 1)
             if diff_p2 == 0 and "前走比" in "".join(tags) and ("+" in "".join(tags)):
-                tags.append("【🚀好走時(前々走)の軽斤量へ戻り恩恵】")
+                tags.append("【好走時(前々走)の斤量に戻る】")
     except Exception:
         pass
 
-    # --- 他馬との格差 ---
     if not has_weight_gap:
         tags.append("(全頭同斤量)")
     else:
-        diff_from_min = round(kinryo_val - min_w, 1)
         diff_from_max = round(kinryo_val - max_w, 1)
         diff_from_avg = round(kinryo_val - avg_w, 1)
-        
-        if kinryo_val == min_w:
-            tags.append(f"【最軽量恩恵: トップハンデ比 {diff_from_max:+.1f}kg】")
-        elif diff_from_avg <= -1.5:
-            tags.append(f"【軽量有利: 平均比 {diff_from_avg:+.1f}kg】")
-        elif kinryo_val == max_w:
-            tags.append(f"【最重量酷量: 最軽量比 {diff_from_min:+.1f}kg】")
-        elif diff_from_avg >= 1.5:
-            tags.append(f"【重量不利: 平均比 {diff_from_avg:+.1f}kg】")
+        if kinryo_val >= 59.0:
+            tags.append(f"【59kg以上のトップハンデ: 平均比 {diff_from_avg:+.1f}kg】")
+        elif kinryo_val == min_w and (max_w - min_w) >= 3.0:
+            tags.append(f"【ハンデ戦の軽量馬: トップ比 {diff_from_max:+.1f}kg】")
         else:
             tags.append(f"(平均比 {diff_from_avg:+.1f}kg)")
             
@@ -244,6 +244,7 @@ def get_badge_class(mark):
     elif "▲" in mark: return "badge-tana"
     elif "△" in mark: return "badge-renka"
     elif "☆" in mark: return "badge-ana"
+    elif "注" in mark: return "badge-chuu"
     return "badge-keshi"
 
 def normalize_kyakushitsu(k_str):
@@ -357,7 +358,7 @@ def generate_base_table(disp_df):
     return html
 
 def generate_fusion_multiplied_table(merged_df):
-    # 🎯 左端に初期印、計算後に確定した最終印を中央右に配置
+    # 🎯 初期印と最終印の列位置を入れ替え
     html = "<div class='table-container'><table class='kachi-table'>"
     html += "<tr><th>初期印</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>元勝率</th><th>Gemini倍率</th><th>補正後勝率</th><th>最終印</th><th style='text-align:left; min-width: 420px;'>補正理由 (物理・定性根拠)</th></tr>"
     for _, r in merged_df.iterrows():
@@ -463,25 +464,25 @@ if st.session_state.get('selected_race_id'):
             avg_w = float(weights.mean())
             has_weight_gap = (max_w - min_w) >= 0.5
 
+            res_df['chokyo_summary'] = res_df['調教タイム'].apply(parse_training_lap_stats)
+            res_df['weight_info'] = [
+                format_weight_analysis(float(r.get('斤量', 55.0)), min_w, max_w, avg_w, has_weight_gap, r.get('前走斤量'), r.get('前々走斤量'))
+                for _, r in res_df.iterrows()
+            ]
+
             table_summary = []
             for i, (_, r) in enumerate(res_df.iterrows()):
                 m_str = str(r['馬番'])
                 display_m = "未定" if m_str.startswith("90") else f"{int(float(m_str)):02d}"
                 win_val = float(r.get('win_prob', 0)) * 100
-                
-                kinryo_f = float(r.get('斤量', 55.0))
-                past1_w = r.get('前走斤量', None)
-                past2_w = r.get('前々走斤量', None)
-                weight_info = format_weight_analysis(kinryo_f, min_w, max_w, avg_w, has_weight_gap, past1_w, past2_w)
+                weight_info = r['weight_info']
                 jockey_val = str(r.get('騎手', '-'))
                 kyakushitsu_val = str(r.get('推測脚質', '-'))
-                
-                # 🎯 血統情報の抽出と埋め込み
                 sire = str(r.get('父', '不明'))
                 bms = str(r.get('母父', '不明'))
                 blood_info = f"血統: 父[{sire}] 母父[{bms}]"
-
-                chokyo_summary = parse_training_lap_stats(r.get('調教タイム', ''))
+                chokyo_summary = r['chokyo_summary']
+                
                 past_summary = parse_past_race_stats(
                     order_str=r.get('前走着順', '-'),
                     passage_str=r.get('前走通過順', '-'),
@@ -495,7 +496,7 @@ if st.session_state.get('selected_race_id'):
                 
                 info = (f"馬番:{display_m} | 馬名:{r.get('馬名','')} | Python勝率:{win_val:.1f}% | {weight_info} | "
                         f"脚質:{kyakushitsu_val} | 騎手:{jockey_val} | {blood_info} | "
-                        f"前走:{past_summary} | 調教評価:{r.get('調教評価','-')} | 調教分析:{chokyo_summary}")
+                        f"前走:{past_summary} | 調教分析:{chokyo_summary}")
                 table_summary.append(info)
 
             prompt = f"""
@@ -530,24 +531,53 @@ if st.session_state.get('selected_race_id'):
                         coeff_df['馬名_clean'] = coeff_df['馬名'].astype(str).apply(clean_name)
                         coeff_df_clean = coeff_df[['馬名_clean', '補正係数', '短評']].dropna(subset=['馬名_clean'])
                         
-                        # 結合して最終確率を数学的に乗算
                         merged = pd.merge(res_df, coeff_df_clean, on='馬名_clean', how='left')
                         merged['補正係数'] = merged['補正係数'].fillna(1.0)
                         merged['短評'] = merged['短評'].fillna('データ保留')
                         
-                        # 🎯 数学的な乗算: 最終確率 = Python基準勝率 × 補正係数
+                        # 🛡️ Pythonバックエンド防衛的プログラミング（二重安全クリップ構造・完全盤石版）
+                        clipped_coeffs = []
+                        for _, r in merged.iterrows():
+                            mult = float(r.get('補正係数', 1.0))
+                            c_tag = str(r.get('chokyo_summary', ''))
+                            w_tag = str(r.get('weight_info', ''))
+                            
+                            # 🎯 斤量差分の数値直突き合わせ（文字列依存を完全排除）
+                            kinryo_f = float(r.get('斤量', 55.0))
+                            p1_w = r.get('前走斤量')
+                            is_num_weight_bonus = False
+                            if pd.notna(p1_w) and str(p1_w).strip() not in ['', 'nan', 'NaN']:
+                                try:
+                                    if round(kinryo_f - float(p1_w), 1) <= -2.0:
+                                        is_num_weight_bonus = True
+                                except Exception:
+                                    pass
+                            
+                            has_special_flag = ("究極ギアチェンジ" in c_tag) or ("減量恩恵" in w_tag) or is_num_weight_bonus
+                            is_gensoku = "減速" in c_tag
+                            
+                            # ガードレール1: 確定フラグを持たない馬の特大レバレッジ暴走を物理カット
+                            if not has_special_flag and mult > 1.30:
+                                mult = 1.30
+                            # ガードレール2: 調教減速馬の意味論的ハルシネーション（1.00超の不当加点）を完全カット
+                            if is_gensoku and mult > 1.00:
+                                mult = 1.00
+                                
+                            clipped_coeffs.append(mult)
+                        merged['補正係数'] = clipped_coeffs
+
+                        # 🎯 数学的な乗算と総和正規化（連続値floatを保持しつつ合計100%へ収束）
                         merged['raw_final'] = merged['win_prob'] * merged['補正係数']
-                        # 確率の正規化（合計100%に揃える）
                         merged['final_prob'] = merged['raw_final'] / merged['raw_final'].sum()
-                        
-                        # 最終確率順にソートして新たな印（◎◯▲△☆）を機械的に付与
                         merged = merged.sort_values(by='final_prob', ascending=False).reset_index(drop=True)
                         
                         marks = ['◎', '◯', '▲', '△', '☆']
                         final_marks = []
-                        for idx in range(len(merged)):
+                        for idx, row_m in merged.iterrows():
                             if idx < len(marks):
                                 final_marks.append(marks[idx])
+                            elif float(row_m.get('補正係数', 1.0)) >= 1.35:
+                                final_marks.append('注')  # 🎯 地力不足で圏外だが仕上がり超抜の特注穴馬
                             else:
                                 final_marks.append('消')
                         merged['最終印'] = final_marks
@@ -559,14 +589,32 @@ if st.session_state.get('selected_race_id'):
                         </div>
                         """, unsafe_allow_html=True)
                         
-                        # 買い目サマリーの動的更新
                         h_o = merged.iloc[0]
                         h_m = merged.iloc[1]
+                        
+                        # 🎯 印圏外だがレバレッジ特大（×1.35以上）の特注伏兵を抽出
+                        chuu_horses = merged[merged['最終印'] == '注']
+                        chuu_html = ""
+                        if not chuu_horses.empty:
+                            chuu_list = []
+                            for _, ch in chuu_horses.iterrows():
+                                ch_m = str(ch.get('馬番', ''))
+                                ch_umaban = f"{int(float(ch_m)):02d}" if ch_m and not ch_m.startswith('90') else "-"
+                                chuu_list.append(f"<b>【馬番{ch_umaban} {ch['馬名']}】</b>(倍率 ×{ch['補正係数']:.2f}) : {ch.get('短評', '-')}")
+                            chuu_html = f"""
+                            <div style='margin-top: 12px; padding: 10px 14px; background-color: #fff9e6; border-left: 4px solid #f39c12; border-radius: 4px;'>
+                                <div style='font-weight: bold; color: #d35400; font-size: 15px;'>🔥【仕上がり超抜の特注伏兵（注）】※地力は圏外だが一変警戒</div>
+                                <div style='font-size: 14px; color: #444; margin-top: 4px; line-height: 1.6;'>{'<br>'.join(chuu_list)}</div>
+                            </div>
+                            """
+
+                        aite_labels = "◯, ▲, △, ☆" + (", 注" if not chuu_horses.empty else "")
                         st.markdown(f"""
                         <div class='sense-card'>
                             <div class='sense-title'>🎟 乗算補正後の最終推奨買い目</div>
                             <div style='margin-top: 6px;'><b>【本線単勝・馬連】</b>: ◎ {h_o['馬名']} (新勝率 {h_o['final_prob']*100:.1f}%) ⇄ ◯ {h_m['馬名']}</div>
-                            <div style='margin-top: 4px;'><b>【3連複フォーメーション】</b>: ◎ 1頭軸 ➔ 相手: ◯, ▲, △, ☆</div>
+                            <div style='margin-top: 4px;'><b>【3連複フォーメーション】</b>: ◎ 1頭軸 ➔ 相手: {aite_labels}</div>
+                            {chuu_html}
                         </div>
                         """, unsafe_allow_html=True)
                         
