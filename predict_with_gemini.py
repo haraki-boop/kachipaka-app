@@ -64,19 +64,19 @@ class HorseCoefficient(BaseModel):
         description="定性根拠に基づく確率補正倍率。0.5（状態不安・展開逆境）〜 1.0（現状維持）〜 1.6（調教絶好・展開物理ドンピシャ）の連続数値。"
     )
     短評: str = Field(
-        description="なぜその補正倍率を付与したかの物理的・定性的理由（調教ラップ、コース脚質適合度、前走不利など）"
+        description="なぜその補正倍率を付与したかの物理的・定性的理由（調教ラップ、斤量差分、血統適性、コース脚質適合度など）"
     )
 
 class RaceCoefficientResult(BaseModel):
     summary: str = Field(
-        description="レース全体の物理バイアス（展開ペース、馬場、有利な脚質）と重要補正馬の統括見解（300文字以内）"
+        description="レース全体の物理バイアス（展開ペース、馬場、斤量・血統傾向）と重要補正馬の統括見解（300文字以内）"
     )
     coefficients: List[HorseCoefficient] = Field(
         description="出走全頭分の補正係数リスト（全頭必須・欠落厳禁）"
     )
 
 # ==========================================
-# 🧠 システムプロンプト（乗算レバレッジ仕様）
+# 🧠 システムプロンプト（乗算レバレッジ完全仕様）
 # ==========================================
 system_instruction = """
 # 役割定義
@@ -85,20 +85,25 @@ system_instruction = """
 
 # 係数付与の基準（0.5 〜 1.6）
 - 1.4 〜 1.6（極大プラス補正）:
-  調教で鋭い加速ラップを刻み仕上がり超抜、かつ今回のコース形態と推測脚質が完全に噛み合っている馬。または前走明確な不利・致命的な超スロー展開を強いられ今回物理的に好転する実力馬。
+  調教で鋭い加速ラップを刻み仕上がり超抜、かつ今回のコース形態と推測脚質が完全に噛み合っている馬。
+  または【明確な斤量恩恵（ハンデ戦等で最軽量、他馬より2kg〜4kg以上軽い物理的有利）】がある馬。
+  または【前走からの大幅な斤量減（-2kg〜-4kg）】により、前走の着順詐欺（重い斤量でバテただけ）から一変が確定的な馬。好走実績のある斤量に戻った馬も含む。
+  または【血統適性の爆発】（新馬戦・ダート替わり・距離延長などで、父・母父の血統キャラクターが今回のコース・馬場条件にドンピシャで合致する馬）。
 - 1.1 〜 1.3（微小プラス補正）:
-  調教順調、脚質や枠・血統に適性が見込める馬。
+  調教順調、脚質や枠・血統に適性が見込める馬、または手頃な斤量恩恵がある馬。
+  または【明確な鞍上強化】により、前走の物理的敗因（折り合い欠き、進路ミス）が今回解消される見込みが立つ馬。
 - 1.0（中立・補正なし）:
-  可もなく不可もない状態。データ通りの走りが期待できる馬。データ欠損馬も1.0を基準とする。
+  可もなく不可もない状態。データ通りの走りが期待できる馬。全頭同斤量のレース、または斤量差・血統適性が平均的な馬。
 - 0.8 〜 0.9（微小マイナス補正）:
-  調教の時計が物足りない、または直線距離や展開面でわずかに割り引きが必要な馬。
+  調教の時計が物足りない、血統適性に疑問がある、または平均より斤量がやや重い馬。
 - 0.5 〜 0.7（大幅マイナス補正）:
-  調教で「⚠️急減速」などの明らかな状態不安、または小回り・短距離戦で物理的に届かない後方脚質など、明確な物理的逆境を抱える馬。
+  調教で「⚠️急減速」などの明らかな状態不安、小回り・短距離戦で物理的に届かない後方脚質、および【トップハンデ・酷量（最軽量馬と3kg〜5kg以上の格差を背負う馬）】。
 
 # 厳格な鑑定ルール
-1. オッズや人気の概念は排除し、提示された「調教ラップ」「前走通過順・上がり」「推測脚質」「コース形態」の物理データのみで係数を決定せよ。
-2. 妄想による展開捏造（逃げ馬ではない馬が逃げる等）は厳禁。推測脚質と前走内容に即して判断せよ。
-3. 出走全頭に対して必ず1つずつ係数と短評を出力せよ。
+1. 【斤量物理の重視】: 斤量差は走破タイムとスタミナ消費に直結する物理的負荷である。前走からの大幅減量馬や最軽量馬は物理的恩恵として積極的にプラス補正（1.2〜1.5倍）せよ。
+2. 【血統ポテンシャルの評価】: Pythonは血統を単なる記号として扱うが、あなたは「血統の物理的キャラクター（ダート適性、距離適性、道悪適性など）」を熟知している。レース条件と血統が完璧に合致する穴馬はレバレッジをかけて浮上させよ。
+3. 【乗り替わりの扱い（二重計上防止）】: ルメールや川田などの名前だけで無条件に加点してはならない（Pythonがすでにベース勝率に織り込み済みのため）。「前走は若手騎手で制御できず敗退 ➔ 今回トップ騎手への乗り替わりで弱点が解消される」という物理的な理由がある場合のみプラス評価せよ。
+4. 出走全頭に対して必ず1つずつ係数と短評を出力せよ。
 """
 
 # ==========================================
@@ -176,6 +181,56 @@ def parse_past_race_stats(order_str, passage_str, agari_str, agari_rank=None, pa
 
     interval_info = f"[{interval_str}] " if interval_str and str(interval_str) not in ['nan', 'NaN', ''] else ""
     return f"{interval_info}着順:{order_str} ({tousuu_text}通過:{passage_str} / 上がり3F:{agari_str}{rank_text}){tag}"
+
+def format_weight_analysis(kinryo_val, min_w, max_w, avg_w, has_weight_gap, past1_w=None, past2_w=None):
+    """
+    今回斤量・他馬との格差だけでなく、前走・前々走からの斤量増減（自分自身の重量変化）を算出
+    """
+    tags = []
+    
+    # --- 自分自身の斤量変化（前走比・前々走比） ---
+    try:
+        if past1_w and str(past1_w).strip() != "":
+            diff_p1 = round(kinryo_val - float(past1_w), 1)
+            if diff_p1 <= -2.0:
+                tags.append(f"【🔥前走比 {diff_p1:+.1f}kg: 大幅減量で一変警戒】")
+            elif diff_p1 >= 2.0:
+                tags.append(f"【⚠️前走比 {diff_p1:+.1f}kg: 大幅増量で失速警戒】")
+            elif diff_p1 < 0:
+                tags.append(f"[前走比 {diff_p1:+.1f}kg]")
+            elif diff_p1 > 0:
+                tags.append(f"[前走比 {diff_p1:+.1f}kg]")
+    except Exception:
+        pass
+
+    try:
+        if past2_w and str(past2_w).strip() != "":
+            diff_p2 = round(kinryo_val - float(past2_w), 1)
+            if diff_p2 == 0 and "前走比" in "".join(tags) and ("+" in "".join(tags)):
+                tags.append("【🚀好走時(前々走)の軽斤量へ戻り恩恵】")
+    except Exception:
+        pass
+
+    # --- 他馬との格差 ---
+    if not has_weight_gap:
+        tags.append("(全頭同斤量)")
+    else:
+        diff_from_min = round(kinryo_val - min_w, 1)
+        diff_from_max = round(kinryo_val - max_w, 1)
+        diff_from_avg = round(kinryo_val - avg_w, 1)
+        
+        if kinryo_val == min_w:
+            tags.append(f"【最軽量恩恵: トップハンデ比 {diff_from_max:+.1f}kg】")
+        elif diff_from_avg <= -1.5:
+            tags.append(f"【軽量有利: 平均比 {diff_from_avg:+.1f}kg】")
+        elif kinryo_val == max_w:
+            tags.append(f"【最重量酷量: 最軽量比 {diff_from_min:+.1f}kg】")
+        elif diff_from_avg >= 1.5:
+            tags.append(f"【重量不利: 平均比 {diff_from_avg:+.1f}kg】")
+        else:
+            tags.append(f"(平均比 {diff_from_avg:+.1f}kg)")
+            
+    return f"斤量:{kinryo_val:.1f}kg " + " ".join(tags)
 
 def clean_name(text):
     if pd.isna(text): return ""
@@ -302,9 +357,7 @@ def generate_base_table(disp_df):
     return html
 
 def generate_fusion_multiplied_table(merged_df):
-    # 🎯 初期印と最終印の列位置を入れ替え:
-    # 変更前: [最終印] [馬番] [馬名] [元勝率] [Gemini倍率] [補正後勝率] [初期印] [補正理由]
-    # 変更後: [初期印] [馬番] [馬名] [元勝率] [Gemini倍率] [補正後勝率] [最終印] [補正理由]
+    # 🎯 左端に初期印、計算後に確定した最終印を中央右に配置
     html = "<div class='table-container'><table class='kachi-table'>"
     html += "<tr><th>初期印</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>元勝率</th><th>Gemini倍率</th><th>補正後勝率</th><th>最終印</th><th style='text-align:left; min-width: 420px;'>補正理由 (物理・定性根拠)</th></tr>"
     for _, r in merged_df.iterrows():
@@ -396,7 +449,7 @@ if st.session_state.get('selected_race_id'):
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        if st.button("⚡ Geminiによる動的レバレッジ補正を実行（乗算モデル）", type="primary", use_container_width=True):
+        if st.button("⚡ Geminiによる動的レバレッジ補正を実行（血統・斤量差分モデル）", type="primary", use_container_width=True):
             if not GEMINI_API_KEY:
                 st.error("【設定エラー】GEMINI_API_KEYが設定されていません。")
                 st.stop()
@@ -404,12 +457,30 @@ if st.session_state.get('selected_race_id'):
             is_shinba = "新馬" in display_race_name or res_df['前走着順'].isna().all()
             total_horses = len(res_df)
 
+            weights = res_df['斤量'].astype(float)
+            min_w = float(weights.min())
+            max_w = float(weights.max())
+            avg_w = float(weights.mean())
+            has_weight_gap = (max_w - min_w) >= 0.5
+
             table_summary = []
             for i, (_, r) in enumerate(res_df.iterrows()):
                 m_str = str(r['馬番'])
                 display_m = "未定" if m_str.startswith("90") else f"{int(float(m_str)):02d}"
                 win_val = float(r.get('win_prob', 0)) * 100
                 
+                kinryo_f = float(r.get('斤量', 55.0))
+                past1_w = r.get('前走斤量', None)
+                past2_w = r.get('前々走斤量', None)
+                weight_info = format_weight_analysis(kinryo_f, min_w, max_w, avg_w, has_weight_gap, past1_w, past2_w)
+                jockey_val = str(r.get('騎手', '-'))
+                kyakushitsu_val = str(r.get('推測脚質', '-'))
+                
+                # 🎯 血統情報の抽出と埋め込み
+                sire = str(r.get('父', '不明'))
+                bms = str(r.get('母父', '不明'))
+                blood_info = f"血統: 父[{sire}] 母父[{bms}]"
+
                 chokyo_summary = parse_training_lap_stats(r.get('調教タイム', ''))
                 past_summary = parse_past_race_stats(
                     order_str=r.get('前走着順', '-'),
@@ -422,8 +493,8 @@ if st.session_state.get('selected_race_id'):
                     surface=surface_info
                 )
                 
-                info = (f"馬番:{display_m} | 馬名:{r.get('馬名','')} | Python勝率:{win_val:.1f}% | "
-                        f"脚質:{r.get('推測脚質','-')} | 騎手:{r.get('騎手','-')} | "
+                info = (f"馬番:{display_m} | 馬名:{r.get('馬名','')} | Python勝率:{win_val:.1f}% | {weight_info} | "
+                        f"脚質:{kyakushitsu_val} | 騎手:{jockey_val} | {blood_info} | "
                         f"前走:{past_summary} | 調教評価:{r.get('調教評価','-')} | 調教分析:{chokyo_summary}")
                 table_summary.append(info)
 
@@ -432,12 +503,13 @@ if st.session_state.get('selected_race_id'):
 
 【対象レース】: {r_info['place_name']} {r_info['r_num']}R ({surface_info}{distance_info}m)
 【出走頭数】: {total_horses}頭
+【斤量条件】: {"【全頭同斤量（斤量差なし）】" if not has_weight_gap else f"【斤量差あり（ハンデ/別定）】最軽量:{min_w:.1f}kg 〜 最重量:{max_w:.1f}kg (最大格差:{max_w-min_w:.1f}kg)"}
 
 【出走馬データ一覧】
 {chr(10).join(table_summary)}
 """
 
-            with st.spinner("🧠 Geminiが調教・展開データから各馬の確率補正倍率を精密算出中..."):
+            with st.spinner("🧠 Geminiが調教・展開・血統・斤量差データから各馬の確率補正倍率を精密算出中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY)
                 try:
                     response = client.models.generate_content(

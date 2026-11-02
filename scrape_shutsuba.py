@@ -14,14 +14,9 @@ from selenium.webdriver.support import expected_conditions as EC
 FUTURE_CSV = "future_races.csv"
 
 def get_target_dates():
-    today = datetime.now()
-    dates = []
-    # 🎯 変更点: 今週・来週の週末（土日）を自動取得するように拡張
-    for i in range(8):
-        d = today + timedelta(days=i)
-        if d.weekday() in [5, 6]:  # 5=土曜日, 6=日曜日
-            dates.append(d.strftime("%Y%m%d"))
-    return sorted(list(set(dates)))
+    # 🎯 直近の日曜日を直接指定（例: 2026年11月1日(日)）
+    # 日付を変えたい場合はここの "YYYYMMDD" を変更してください
+    return ["20261101"]
 
 def clean_text(text):
     if not text: return ""
@@ -50,7 +45,7 @@ def setup_driver():
     return driver
 
 def login_netkeiba(driver):
-    login_id = "a.b_c12345@icloud.com"  # 🚨ご自身のアカウントに必ず変更してください
+    login_id = "a.b_c12345@icloud.com"  # 🚨ご自身のアカウントに変更してください
     password = "Uma12345"
     print("🔑 netkeibaにログインしています...")
     try:
@@ -74,13 +69,14 @@ def get_premium_details(driver, race_id):
             premium_data[name] = {
                 "調教タイム": "", "調教評価": "", "推測脚質": "",
                 "父": "", "母父": "", "前走着順": "", "前走頭数": "", "間隔": "",
-                "前走通過順": "", "前走上がり3F": "", "前走上がり順位": ""
+                "前走通過順": "", "前走上がり3F": "", "前走上がり順位": "",
+                "前走斤量": "", "前々走斤量": ""
             }
 
     place_code = int(str(race_id)[4:6])
     domain = "race.netkeiba.com" if place_code <= 10 else "nar.netkeiba.com"
 
-    # 📌 1. 競馬新聞ページ (newspaper.html)
+    # 📌 1. 競馬新聞ページ (前走・前々走の斤量取得を追加)
     try:
         driver.get(f"https://{domain}/race/newspaper.html?race_id={race_id}")
         time.sleep(1.2)
@@ -102,8 +98,11 @@ def get_premium_details(driver, race_id):
 
             past_wrapper = dl.find("dd", class_=re.compile("Past_Wrapper"))
             if past_wrapper:
-                first_past = past_wrapper.find("div", class_=re.compile("PastBox"))
-                if first_past:
+                past_boxes = past_wrapper.find_all("div", class_=re.compile("PastBox"))
+                
+                # 前走データ (past_boxes[0])
+                if len(past_boxes) >= 1:
+                    first_past = past_boxes[0]
                     span_tou = first_past.find("span", class_="Data05")
                     if span_tou and "頭" in span_tou.text:
                         premium_data[h_name]["前走頭数"] = re.sub(r'\D', '', span_tou.text)
@@ -111,17 +110,28 @@ def get_premium_details(driver, race_id):
                         m_tou = re.search(r'(\d+)頭', first_past.get_text(" ", strip=True))
                         if m_tou and not premium_data[h_name]["前走頭数"]:
                             premium_data[h_name]["前走頭数"] = m_tou.group(1)
+                    
+                    # 前走斤量の取得
+                    span_kinryo = first_past.find("span", class_="Data15")
+                    if span_kinryo:
+                        premium_data[h_name]["前走斤量"] = span_kinryo.get_text(strip=True)
+                
+                # 前々走データ (past_boxes[1])
+                if len(past_boxes) >= 2:
+                    second_past = past_boxes[1]
+                    # 前々走斤量の取得
+                    span_kinryo2 = second_past.find("span", class_="Data15")
+                    if span_kinryo2:
+                        premium_data[h_name]["前々走斤量"] = span_kinryo2.get_text(strip=True)
     except Exception as e:
         pass
 
-    # 📌 2. 調教ページ (oikiri.html)
+    # 📌 2. 調教ページ
     try:
         driver.get(f"https://{domain}/race/oikiri.html?race_id={race_id}")
         time.sleep(1.2)
         soup = BeautifulSoup(driver.page_source, "html.parser")
-        
         current_horse = None
-        
         for tr in soup.find_all("tr"):
             name_td = tr.find(class_=re.compile("Horse_Info|Horse_Name|HorseList_Item"))
             if name_td:
@@ -150,9 +160,9 @@ def get_premium_details(driver, race_id):
                     if e_text_clean and not premium_data[current_horse]["調教評価"]:
                         premium_data[current_horse]["調教評価"] = e_text_clean
     except Exception as e:
-        print(f"調教ページ解析エラー: {e}")
+        pass
 
-    # 📌 3. 前走成績の取得 (shutuba_past.html)
+    # 📌 3. 前走成績の取得
     try:
         driver.get(f"https://{domain}/race/shutuba_past.html?race_id={race_id}")
         time.sleep(1.2)
@@ -201,9 +211,9 @@ def get_premium_details(driver, race_id):
                     m_pass = re.search(r'(\d+-\d+(?:-\d+)*)', d6_text)
                     if m_pass: premium_data[h_name]["前走通過順"] = m_pass.group(1)
     except Exception as e:
-        print(f"前走成績解析エラー: {e}")
+        pass
 
-    # 📌 4. 血統データの取得 (bias.html)
+    # 📌 4. 血統データの取得
     try:
         driver.get(f"https://{domain}/race/bias.html?race_id={race_id}")
         time.sleep(1.0)
@@ -229,26 +239,25 @@ def scrape_shutsuba():
     all_race_ids = []
     id_to_date = {}
 
-    print("🌐 ブラウザ（Selenium）をバックグラウンドで起動中...")
+    print("🌐 ブラウザ（Selenium）を起動中...")
     try:
         driver = setup_driver()
         login_netkeiba(driver)
     except Exception as e:
-        print(f"❌ Seleniumの起動またはログインに失敗しました。\n詳細: {e}")
+        print(f"❌ 起動またはログイン失敗: {e}")
         return
 
     try:
         for date_str in target_dates:
-            urls_to_check = [
+            urls = [
                 f"https://race.netkeiba.com/top/race_list_sub.html?kaisai_date={date_str}",
                 f"https://race.netkeiba.com/top/race_list.html?kaisai_date={date_str}"
             ]
-            for url in urls_to_check:
+            for url in urls:
                 try:
                     driver.get(url)
                     time.sleep(1.5)
-                    html = driver.page_source
-                    found_ids = re.findall(r'race_id=["\']?(\d{12})["\']?', html)
+                    found_ids = re.findall(r'race_id=["\']?(\d{12})["\']?', driver.page_source)
                     for rid in found_ids:
                         if rid not in all_race_ids:
                             all_race_ids.append(rid)
@@ -257,20 +266,17 @@ def scrape_shutsuba():
                     pass
 
         if not all_race_ids:
-            print("❌ 対象期間内にレースIDが見つかりませんでした。")
             return
 
         all_race_ids.sort()
-        print(f"\n🎉 合計 {len(all_race_ids)} レースが見つかりました！取得中...")
+        print(f"\n🎉 合計 {len(all_race_ids)} レースを取得中...")
         
         race_data_list = []
         weekdays = ["月", "火", "水", "木", "金", "土", "日"]
         
         for i, race_id in enumerate(all_race_ids):
-            print(f"[{i+1}/{len(all_race_ids)}] 取得中: {race_id}")
-            
+            print(f"[{i+1}/{len(all_race_ids)}] {race_id}")
             p_data_dict = get_premium_details(driver, race_id)
-            
             place_code = int(str(race_id)[4:6])
             domain = "race.netkeiba.com" if place_code <= 10 else "nar.netkeiba.com"
             shutuba_url = f"https://{domain}/race/shutuba.html?race_id={race_id}"
@@ -289,19 +295,15 @@ def scrape_shutsuba():
                 if rn_elem: raw_race_name = clean_text(rn_elem.text)
                 final_race_name = clean_race_name(raw_race_name)
 
-                surface_val = "不明"
-                distance_val = "1600"
+                surface_val, distance_val = "不明", "1600"
                 race_data01 = soup.find(class_="RaceData01")
                 if race_data01:
-                    race_data_text = race_data01.text
-                    m = re.search(r'(芝|ダ|障)[^\d]*(\d+)m', race_data_text)
+                    m = re.search(r'(芝|ダ|障)[^\d]*(\d+)m', race_data01.text)
                     if m:
-                        surface_val = m.group(1)
-                        distance_val = m.group(2)
+                        surface_val, distance_val = m.group(1), m.group(2)
 
                 table = soup.find("table", class_=re.compile("RaceTable01|race_table_01"))
                 if not table: continue
-                
                 headers = [clean_text(th.text) for th in table.find_all("th")]
                 
                 def get_idx(keywords):
@@ -320,11 +322,9 @@ def scrape_shutsuba():
                 idx_weight = get_idx(["馬体重"])
 
                 temp_horse_list = []
-
                 for tr in table.find_all("tr", class_=re.compile("HorseList")):
                     tds = tr.find_all("td")
                     if not tds: continue
-                    
                     try:
                         horse_name = ""
                         if idx_name >= 0 and idx_name < len(tds):
@@ -354,7 +354,8 @@ def scrape_shutsuba():
                         p_data = p_data_dict.get(horse_name, {
                             "調教タイム": "", "調教評価": "", "推測脚質": "",
                             "父": "", "母父": "", "前走着順": "", "前走頭数": "", "間隔": "",
-                            "前走通過順": "", "前走上がり3F": "", "前走上がり順位": ""
+                            "前走通過順": "", "前走上がり3F": "", "前走上がり順位": "",
+                            "前走斤量": "", "前々走斤量": ""
                         })
                         
                         temp_horse_list.append({
@@ -383,6 +384,8 @@ def scrape_shutsuba():
                             "前走通過順": p_data.get("前走通過順", ""),
                             "前走上がり3F": p_data.get("前走上がり3F", ""),
                             "前走上がり順位": p_data.get("前走上がり順位", ""),
+                            "前走斤量": p_data.get("前走斤量", ""),
+                            "前々走斤量": p_data.get("前々走斤量", ""),
                             "調教タイム": p_data["調教タイム"],
                             "調教評価": p_data["調教評価"]
                         })
@@ -398,10 +401,8 @@ def scrape_shutsuba():
                             horse["人気"] = rank
 
                 race_data_list.extend(temp_horse_list)
-                
-            except Exception as e:
-                print(f"  └ 解析エラー: {e}")
-
+            except Exception:
+                pass
     finally:
         driver.quit()
 
@@ -411,11 +412,9 @@ def scrape_shutsuba():
         df_future['人気'] = pd.to_numeric(df_future['人気'], errors='coerce').astype('Int64')
         try:
             df_future.to_csv(FUTURE_CSV, index=False, encoding='utf-8-sig')
-            print(f"\n✅ {len(race_data_list)}頭分の出馬表データを {FUTURE_CSV} に保存完了！")
+            print(f"\n✅ {len(race_data_list)}頭分のデータを保存完了！")
         except PermissionError:
-            print(f"\n❌ 【エラー】ファイル {FUTURE_CSV} を開いたままです。エクセル等を閉じて再実行してください。")
-    else:
-        print("\n❌ データが1件も取得できませんでした。")
+            print("\n❌ エクセル等を閉じて再実行してください。")
 
 if __name__ == "__main__":
     scrape_shutsuba()
