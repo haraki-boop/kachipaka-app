@@ -86,7 +86,7 @@ system_instruction = """
 # 係数付与の基準（0.5 〜 1.6）
 - 1.4 〜 1.6（極大プラス補正）:
   【好走休養明け×究極仕上がり（激走穴馬特注ルール）】:
-  「前走1〜2着」かつ「レース間隔中10週以上の休養明け」で、調教分析に「🔥【究極ギアチェンジ】」またはラスト鋭い加速（坂路12.1秒以下/ウッド11.5秒以下）を記録している馬。
+  「前走1〜2着」かつ「レース間隔中10週以上の休養明け」で、調教分析に「🔥【極限加速】」またはラスト鋭い加速（坂路12.1秒以下/ウッド11.5秒以下）を記録している馬。
   目標レースに向けて極限まで体調が仕上げられた物理的証明（勝負気配の客観的裏付け）であるため、過去の実績不足やPython初期勝率が低くても積極的に【1.35〜1.50倍】のレバレッジをかけて浮上させよ。
   また【明確な斤量恩恵（ハンデ戦等で他馬より2kg〜4kg以上軽い物理的有利）】や【前走からの大幅斤量減（-2kg〜-4kg）】のある馬。
   また【血統適性の爆発】（新馬戦・ダート替わり・芝1400mの先行シルバーステートなど、コース条件にドンピシャで合致する馬）。
@@ -109,10 +109,10 @@ system_instruction = """
 
 # 厳格な鑑定ルール
 1. 【調教減速馬への加点厳禁】: 調教分析に「減速」と明記されている馬に対し、調教を理由として1.0を超えるプラス補正を付与することは【完全厳禁】とする（現状維持1.0、または0.8〜0.95のマイナス補正とせよ）。
-2. 【特大レバレッジ（>1.30）の発動条件】: 1.30倍を超える極大補正は、調教の「🔥【究極ギアチェンジ】」または斤量の「【減量恩恵】」などの確定タグが存在する馬にのみ厳格に限定せよ。
+2. 【特大レバレッジ（>1.30）の発動条件】: 1.30倍を超える極大補正は、調教の「🔥【極限加速】」または斤量の「【減量恩恵】」などの確定タグが存在する馬にのみ厳格に限定せよ。
 3. 【記者コメント・主観マークの完全無視】: 新聞記者の主観ラベルは信用せず、Python側で算出された「調教分析（終い時計・前Fとの差分秒数）」という客観的な物理タイムのみを信じよ。
 4. 【性齢の規定重量への配慮】: 牡馬（58kg）と牝馬（56kg）の差は性別の規定重量差であり、59kg以上の異常な酷量でない限り58kgを嫌って格下げしてはならない。
-5. 【短評に物理根拠を明記】: なぜその係数を付与したのか（特に「好走休養×ギアチェンジ」「斤量減量」「血統コース適合」など）を短評に明確に記述せよ。
+5. 【短評に物理根拠を明記】: なぜその係数を付与したのか（特に「好走休養×極限加速」「斤量減量」「血統コース適合」など）を短評に明確に記述せよ。
 6. 出走全頭に対して必ず1つずつ係数と短評を出力せよ。
 """
 
@@ -150,7 +150,7 @@ def parse_training_lap_stats(t_str):
         elif (not is_hanro) and final_1f <= 11.5 and diff <= -0.5:
             is_gear_change = True
             
-        gear_tag = " 🔥【究極ギアチェンジ】" if is_gear_change else ""
+        gear_tag = " 🔥【極限加速】" if is_gear_change else ""
         status = f"加速({diff:+.1f}s)" if diff <= -0.2 else (f"維持({diff:+.1f}s)" if diff <= 0.3 else f"減速({diff:+.1f}s)")
         
         return f"[{course_type}] 終い:{final_1f:.1f}s (前F:{penultimate_1f:.1f}s, 差:{diff:+.1f}s, {status}){gear_tag}"
@@ -553,7 +553,7 @@ if st.session_state.get('selected_race_id'):
                                 except Exception:
                                     pass
                             
-                            has_special_flag = ("究極ギアチェンジ" in c_tag) or ("減量恩恵" in w_tag) or is_num_weight_bonus
+                            has_special_flag = ("極限加速" in c_tag) or ("減量恩恵" in w_tag) or is_num_weight_bonus
                             is_gensoku = "減速" in c_tag
                             
                             # ガードレール1: 確定フラグを持たない馬の特大レバレッジ暴走を物理カット
@@ -571,15 +571,35 @@ if st.session_state.get('selected_race_id'):
                         merged['final_prob'] = merged['raw_final'] / merged['raw_final'].sum()
                         merged = merged.sort_values(by='final_prob', ascending=False).reset_index(drop=True)
                         
+                        # ==========================================
+                        # 🎯 最終印の決定ロジック（本線5頭 ＋ 圏外極限値・注最大2頭）
+                        # ==========================================
                         marks = ['◎', '◯', '▲', '△', '☆']
-                        final_marks = []
-                        for idx, row_m in merged.iterrows():
-                            if idx < len(marks):
-                                final_marks.append(marks[idx])
-                            elif float(row_m.get('補正係数', 1.0)) >= 1.35:
-                                final_marks.append('注')  # 🎯 地力不足で圏外だが仕上がり超抜の特注穴馬
-                            else:
-                                final_marks.append('消')
+                        final_marks = ['消'] * len(merged)
+
+                        # 1. 補正後勝率の上位5頭に本線印を付与
+                        for idx in range(min(len(marks), len(merged))):
+                            final_marks[idx] = marks[idx]
+
+                        # 2. 6番手以降（圏外）から、倍率1.55以上の真の極限仕上がり馬を抽出
+                        chuu_candidates = []
+                        for idx in range(len(marks), len(merged)):
+                            row_m = merged.iloc[idx]
+                            mult = float(row_m.get('補正係数', 1.0))
+                            if mult >= 1.55:
+                                # タイブレーク用：調教の終い時計（秒数が小さい＝速いほど上位）
+                                t_str = str(row_m.get('調教タイム', ''))
+                                floats = [float(x) for x in re.findall(r'\d+\.?\d*', t_str)]
+                                final_1f = floats[-1] if floats else 99.0
+                                chuu_candidates.append((idx, mult, final_1f))
+
+                        # 3. 補正倍率（降順）➔ 調教終い時計（速い順）で厳格ソート
+                        chuu_candidates.sort(key=lambda x: (-x[1], x[2]))
+
+                        # 4. 最大2頭までを「注」に昇格（1位: ネブラ🥇, 2位: サクラ🥈、3位以下は消去）
+                        for candidate in chuu_candidates[:2]:
+                            final_marks[candidate[0]] = '注'
+
                         merged['最終印'] = final_marks
                         
                         st.markdown(f"""
@@ -589,31 +609,42 @@ if st.session_state.get('selected_race_id'):
                         </div>
                         """, unsafe_allow_html=True)
                         
+                        # ==========================================
+                        # 🎟 推奨買い目の動的生成
+                        # ==========================================
                         h_o = merged.iloc[0]
                         h_m = merged.iloc[1]
-                        
-                        # 🎯 印圏外だがレバレッジ特大（×1.35以上）の特注伏兵を抽出
+
+                        # 圏外から拾われた特注馬（注）
                         chuu_horses = merged[merged['最終印'] == '注']
+
                         chuu_html = ""
                         if not chuu_horses.empty:
                             chuu_list = []
-                            for _, ch in chuu_horses.iterrows():
-                                ch_m = str(ch.get('馬番', ''))
-                                ch_umaban = f"{int(float(ch_m)):02d}" if ch_m and not ch_m.startswith('90') else "-"
-                                chuu_list.append(f"<b>【馬番{ch_umaban} {ch['馬名']}】</b>(倍率 ×{ch['補正係数']:.2f}) : {ch.get('短評', '-')}")
+                            medals = ['🥇', '🥈']
+                            for idx_c, (_, ch) in enumerate(chuu_horses.iterrows()):
+                                m_str = str(ch.get('馬番', ''))
+                                umaban = f"{int(float(m_str)):02d}" if m_str and not m_str.startswith('90') else "-"
+                                medal = medals[idx_c] if idx_c < len(medals) else "・"
+                                chuu_list.append(f"<b>{medal}【馬番{umaban} {ch['馬名']}】</b>(倍率 ×{ch['補正係数']:.2f}) : {ch.get('短評', '-')}")
+                            
                             chuu_html = f"""
                             <div style='margin-top: 12px; padding: 10px 14px; background-color: #fff9e6; border-left: 4px solid #f39c12; border-radius: 4px;'>
-                                <div style='font-weight: bold; color: #d35400; font-size: 15px;'>🔥【仕上がり超抜の特注伏兵（注）】※地力は圏外だが一変警戒</div>
+                                <div style='font-weight: bold; color: #d35400; font-size: 15px;'>🔥【仕上がり超抜の特注伏兵（注）】※物理極限値を突破した厳選穴馬</div>
                                 <div style='font-size: 14px; color: #444; margin-top: 4px; line-height: 1.6;'>{'<br>'.join(chuu_list)}</div>
                             </div>
                             """
+                            aite_label = "◯, ▲, △, ☆, 注"
+                            ticket_count_label = f"計{6 + len(chuu_horses)*4 - (1 if len(chuu_horses)==2 else 0)}点（勝負拡大）"
+                        else:
+                            aite_label = "◯, ▲, △, ☆"
+                            ticket_count_label = "計6点（標準）"
 
-                        aite_labels = "◯, ▲, △, ☆" + (", 注" if not chuu_horses.empty else "")
                         st.markdown(f"""
                         <div class='sense-card'>
                             <div class='sense-title'>🎟 乗算補正後の最終推奨買い目</div>
                             <div style='margin-top: 6px;'><b>【本線単勝・馬連】</b>: ◎ {h_o['馬名']} (新勝率 {h_o['final_prob']*100:.1f}%) ⇄ ◯ {h_m['馬名']}</div>
-                            <div style='margin-top: 4px;'><b>【3連複フォーメーション】</b>: ◎ 1頭軸 ➔ 相手: {aite_labels}</div>
+                            <div style='margin-top: 4px;'><b>【3連複フォーメーション】</b>: ◎ 1頭軸 ➔ 相手: {aite_label} <b>({ticket_count_label})</b></div>
                             {chuu_html}
                         </div>
                         """, unsafe_allow_html=True)
