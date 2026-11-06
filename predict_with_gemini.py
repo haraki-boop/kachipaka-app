@@ -76,7 +76,7 @@ class RaceCoefficientResult(BaseModel):
     )
 
 # ==========================================
-# 🧠 システムプロンプト（乗算レバレッジ完全仕様）
+# 🧠 システムプロンプト（乗算レバレッジ完全仕様＋馬場追加）
 # ==========================================
 system_instruction = """
 # 役割定義
@@ -114,6 +114,9 @@ system_instruction = """
 4. 【性齢の規定重量への配慮】: 牡馬（58kg）と牝馬（56kg）の差は性別の規定重量差であり、59kg以上の異常な酷量でない限り58kgを嫌って格下げしてはならない。
 5. 【短評に物理根拠を明記】: なぜその係数を付与したのか（特に「好走休養×極限加速」「斤量減量」「血統コース適合」など）を短評に明確に記述せよ。
 6. 出走全頭に対して必ず1つずつ係数と短評を出力せよ。
+
+# 🌧 馬場状態の適性補正（追加ルール）
+7. 入力情報で指定される【当日の馬場状態想定（良・稍重・重・不良）】を必ず考慮し、馬場バイアス（時計のかかる馬場への血統適性、道悪巧者、荒れ馬場適性など）を係数および統括見解（summary）に反映させよ。
 """
 
 # ==========================================
@@ -447,7 +450,17 @@ if st.session_state.get('selected_race_id'):
     if res_df is not None:
         st.markdown("<div class='section-header'>📊 1. Pythonベース地力スコア</div>", unsafe_allow_html=True)
         st.markdown(generate_base_table(res_df), unsafe_allow_html=True)
-
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # 🌧 馬場状態の選択UIを追加
+        st.markdown("##### 🌧 当日の馬場状態想定")
+        baba_condition = st.radio(
+            "馬場状態",
+            ["良", "稍重", "重", "不良"],
+            horizontal=True,
+            label_visibility="collapsed"
+        )
         st.markdown("<br>", unsafe_allow_html=True)
 
         if st.button("⚡ Geminiによる動的レバレッジ補正を実行（血統・斤量差分モデル）", type="primary", use_container_width=True):
@@ -503,6 +516,7 @@ if st.session_state.get('selected_race_id'):
 以下の出走馬データに基づき、指示に従って全出走馬の補正係数（0.5〜1.6）と理由を出力してください。
 
 【対象レース】: {r_info['place_name']} {r_info['r_num']}R ({surface_info}{distance_info}m)
+【当日の馬場状態想定】: {baba_condition}
 【出走頭数】: {total_horses}頭
 【斤量条件】: {"【全頭同斤量（斤量差なし）】" if not has_weight_gap else f"【斤量差あり（ハンデ/別定）】最軽量:{min_w:.1f}kg 〜 最重量:{max_w:.1f}kg (最大格差:{max_w-min_w:.1f}kg)"}
 
@@ -511,7 +525,6 @@ if st.session_state.get('selected_race_id'):
 """
 
             with st.spinner("🧠 Geminiが調教・展開・血統・斤量差データから各馬の確率補正倍率を精密算出中..."):
-                # 💡 APIバージョン v1beta を明示的に指定してエラーを回避
                 client = genai.Client(api_key=GEMINI_API_KEY, http_options={"api_version": "v1beta"})
                 try:
                     response = client.models.generate_content(
