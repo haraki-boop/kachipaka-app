@@ -14,9 +14,10 @@ from selenium.webdriver.support import expected_conditions as EC
 FUTURE_CSV = "future_races.csv"
 
 def get_target_dates():
-    # 🎯 直近の日曜日を直接指定（例: 2026年11月1日(日)）
-    # 日付を変えたい場合はここの "YYYYMMDD" を変更してください
-    return ["20261101"]
+    # 🎯 今日から向こう7日（または8日）分をまとめて対象にする
+    # （開催がない平日などは自動的に0件でスキップされるため、祝日・変則日程もこれで全網羅）
+    today = datetime.now()
+    return [(today + timedelta(days=i)).strftime("%Y%m%d") for i in range(8)]
 
 def clean_text(text):
     if not text: return ""
