@@ -511,7 +511,8 @@ if st.session_state.get('selected_race_id'):
 """
 
             with st.spinner("🧠 Geminiが調教・展開・血統・斤量差データから各馬の確率補正倍率を精密算出中..."):
-                client = genai.Client(api_key=GEMINI_API_KEY)
+                # 💡 APIバージョン v1beta を明示的に指定してエラーを回避
+                client = genai.Client(api_key=GEMINI_API_KEY, http_options={"api_version": "v1beta"})
                 try:
                     response = client.models.generate_content(
                         model='gemini-2.5-flash', 
