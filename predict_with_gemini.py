@@ -14,7 +14,7 @@ from typing import List
 # ==========================================
 # 🎨 アプリの基本設定 & スタイル定義
 # ==========================================
-st.set_page_config(page_title="AI予想 勝ちぱかくん (純度100%・物理レバレッジ版)", page_icon="logo.png", layout="wide")
+st.set_page_config(page_title="AI予想 勝ちぱかくん (完全二刀流版)", page_icon="logo.png", layout="wide")
 
 st.markdown("""
 <style>
@@ -45,6 +45,9 @@ st.markdown("""
     .age2-badge { background-color: #16a085; color: white; padding: 3px 8px; border-radius: 4px; font-size: 13px; font-weight: bold; margin-left: 8px; vertical-align: middle; }
     .old-badge { background-color: #2980b9; color: white; padding: 3px 8px; border-radius: 4px; font-size: 13px; font-weight: bold; margin-left: 8px; vertical-align: middle; }
     
+    .strategy-badge-good { background: linear-gradient(135deg, #f39c12 0%, #d35400 100%); color: white; padding: 6px 12px; border-radius: 6px; font-size: 14px; font-weight: bold; display: inline-block; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 10px;}
+    .strategy-badge-wet { background: linear-gradient(135deg, #16a085 0%, #0e6655 100%); color: white; padding: 6px 12px; border-radius: 6px; font-size: 14px; font-weight: bold; display: inline-block; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 10px;}
+
     div.stButton > button { background: linear-gradient(135deg, #3498db 0%, #2980b9 100%); color: white; border: none; border-radius: 6px; padding: 12px 24px; font-weight: bold; font-size: 17px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: all 0.3s ease; }
     div.stButton > button:hover { background: linear-gradient(135deg, #2980b9 0%, #1f618d 100%); box-shadow: 0 6px 8px rgba(0,0,0,0.15); transform: translateY(-2px); }
 </style>
@@ -79,7 +82,7 @@ class RaceCoefficientResult(BaseModel):
     )
 
 # ==========================================
-# 🧠 システムプロンプト（クラス別物理バイアスのみの最高純度版）
+# 🧠 システムプロンプト（完全版の復元：血統加点のみ削除し、斤量等の厳格ルールは維持）
 # ==========================================
 base_system_instruction = """
 # 役割定義
@@ -89,39 +92,46 @@ base_system_instruction = """
 # 厳格な共通鑑定ルール
 1. 【インフレ防止（メリハリの徹底）】: 通常レースにおいて全頭に1.1以上のプラス倍率を乱発してはならない。加点馬と同程度の減点馬（0.75〜0.90）を作り、強弱を明確にせよ。
 2. 【調教減速馬への加点厳禁】: 調教分析に「減速」と記載がある馬には、いかなる理由があっても1.00を超える倍率を付与してはならない（必ず1.00以下とせよ）。
-3. 【主観ノイズの遮断】: 記者コメントや主観的な血統への忖度は完全に排除し、Pythonが算出した「調教ラップ差分」「斤量差分」という物理事実のみを根拠とせよ。
-4. 【出力形式と短評】: 出走全頭分を欠落なく出力し、短評には「なぜその倍率にしたのか」を明記せよ。
+3. 【規定重量・勝利による斤量増の減点禁止】: 牡馬58kg・牝馬56kgはJRAの標準規定重量である。また「前走1〜2着」の好走馬が別定・昇級で斤量が増えるのは実力の証明であり、これを理由に減点してはならない。59kg以上のトップハンデ、または前走3着以下からの急激な重量増（+3.0kg以上）のみ減点対象とせよ。
+4. 【単なる軽ハンデ先行の過剰評価禁止】: 軽ハンデ・先行脚質という理由だけで1.50以上の特大倍率をつけてはならない。1.35以上の高倍率は必ず「🔥【極限加速】」「🔥【着順詐欺判定】」「【減量恩恵】」の物理的裏付けを伴う馬に付与せよ。
+5. 【主観ノイズの遮断】: 記者コメントや主観的な血統への忖度等の主観は排除し、Pythonが算出した「調教ラップ差分」「斤量差分」という物理事実のみを根拠とせよ。
+6. 【出力形式と短評】: 出走全頭分を欠落なく出力し、短評には「なぜその倍率にしたのか（調教ラップ値・斤量など）」の物理根拠を簡潔に明記せよ。
 """
 
 shinba_addon = """
-# 【適用評価モード：新馬戦（過去走なし）】
+# 【特注モード：新馬戦（過去走なし）】
 - Python勝率は完全に無視し、調教ラップの物理時計・加速度のみから、各馬の絶対好走評価値（0.50〜1.60）を単独鑑定せよ。
 - 終いの加速が鋭い馬に1.40〜1.60を与え、仕上がり途上や減速調教の馬は0.50〜0.85として明確に差をつけよ。
 """
 
 age2_addon = """
-# 【適用評価モード：2歳戦（未勝利・1勝クラス）— 成長・一変重視】
+# 【特注モード：2歳戦（未勝利・1勝クラス）— 成長・一変重視】
 2歳戦は馬の完成度が低く、1戦ごとの「急成長・一変」が結果のすべてを決める。以下の基準で倍率を配分せよ：
 - 1.45 〜 1.60（一変・急成長レバレッジ）:
-  調教分析に「🔥【極限加速】」を持ち、前走4〜9着（掲示板前後）から調教ラップの加速度が大きく良化している成長馬。または「🔥【着順詐欺判定】」を持ち調教が加速している馬。
+  調教分析に「🔥【極限加速】」を持ち、前走4〜9着（掲示板前後）から調教ラップの加速度が大きく良化している成長馬。
+  または「🔥【着順詐欺判定】」を持ち、調教が加速している馬。
 - 1.25 〜 1.40（大幅プラス補正）:
   確定タグ（「🔥【極限加速】」「【減量恩恵】」）を持つ馬、または前走4〜8着で調教が前F比-0.5s以上鋭く加速している馬。
-- 1.05 〜 1.20（標準プラス補正）: 調教が「加速」または「維持」で順調な馬（※上限1.30まで）。
+- 1.05 〜 1.20（標準プラス補正）:
+  調教が「加速」または「維持」で順調な馬（※確定タグなしの上限は1.30まで）。
 - 0.95 〜 1.05（中立）: 平均的な内容の馬。
 - 0.70 〜 0.90（マイナス補正）: 調教「減速」の馬。
 """
 
 old_horse_addon = """
-# 【適用評価モード：3歳以上（古馬戦・条件戦・特別・重賞）— 地力・CW切れ味・着順詐欺重視】
+# 【特注モード：3歳以上（古馬戦・条件戦・特別・重賞）— 地力・CW切れ味・着順詐欺重視】
 古馬戦はすでに基礎能力が固まっており、「鋭いギアチェンジ（極限加速）」と「前走の不利・着順詐欺」が最も馬券に直結する。以下の基準で倍率を配分せよ：
 - 1.50 〜 1.60（特注・極限レバレッジ / 1レース最大0〜2頭まで）:
-  調教分析に「🔥【極限加速】」を持ち、さらに「🔥【着順詐欺判定】」「休養明け（中10週以上）の好走歴」のいずれかが噛み合った馬。
+  調教分析に「🔥【極限加速】」を持ち、さらに「🔥【着順詐欺判定】」「休養明け（中10週以上）の好走歴」のいずれかが噛み合った馬。ここに入った馬は圏外から「注」として強制浮上する。
 - 1.35 〜 1.48（大幅プラス補正）:
-  「🔥【極限加速】」「🔥【着順詐欺判定】」「【減量恩恵】」のいずれかの確定タグを持ち、上がり3Fの切れ味が鋭い馬（3〜6番人気帯の伏兵を積極的に拾い上げよ）。
-- 1.10 〜 1.30（標準プラス補正）: 調教が「加速」または「維持」で順調な馬（※上限1.30まで）。
-- 0.95 〜 1.05（中立）: Pythonのベース勝率通りに評価すべき平均的な馬。
-- 0.75 〜 0.90（マイナス補正）: 調教分析で「減速」と判定されている馬。
-- 0.50 〜 0.70（大幅マイナス補正）: 調教で明確な大失速（差:+0.6s以上の減速）、または59.0kg以上の酷量・前走3着以下からの急激な重量増（+3.0kg以上）で物理的負荷が限界を超えている馬。
+  「🔥【極限加速】」「🔥【着順詐欺判定】」「【減量恩恵】」のいずれかの確定タグを持ち、上がり3Fの切れ味や条件好転が顕著な馬（3〜6番人気帯の伏兵を積極的に拾い上げよ）。
+- 1.10 〜 1.30（標準プラス補正）:
+  調教が「加速」または「維持」で順調な馬（※確定タグなしの上限は1.30まで）。
+- 0.95 〜 1.05（中立）: Pythonのベース勝率通りに評価すべき平均的な馬。出走馬の約半数はここに収めよ。
+- 0.75 〜 0.90（マイナス補正）:
+  調教分析で「減速」と判定されている、または展開・トラックバイアスに逆行する極端な脚質の馬。
+- 0.50 〜 0.70（大幅マイナス補正）:
+  調教で明確な大失速（差:+0.6s以上の減速）、または59.0kg以上の酷量・前走3着以下からの急激な重量増（+3.0kg以上）で物理的負荷が限界を超えている馬。
 """
 
 # ==========================================
@@ -509,6 +519,10 @@ if st.session_state.get('selected_race_id'):
         
         st.markdown("<br>", unsafe_allow_html=True)
 
+        # ----------------------------------------------------
+        # UIから馬場選択ラジオボタンと見送りバッジ判定を完全削除
+        # ----------------------------------------------------
+
         btn_label = f"⚡ クラス別物理バイアスのみで精密レバレッジ補正を実行"
         if st.button(btn_label, type="primary", use_container_width=True):
             if not GEMINI_API_KEY:
@@ -517,13 +531,17 @@ if st.session_state.get('selected_race_id'):
 
             total_horses = len(res_df)
             res_df['chokyo_summary'] = res_df['調教タイム'].apply(parse_training_lap_stats)
+            res_df['weight_info'] = [
+                format_weight_analysis(float(r.get('斤量', 55.0)), float(res_df['斤量'].min()), float(res_df['斤量'].max()), float(res_df['斤量'].mean()), (float(res_df['斤量'].max()) - float(res_df['斤量'].min())) >= 0.5, r.get('前走斤量'), r.get('前々走斤量'), r.get('前走着順', ''))
+                for _, r in res_df.iterrows()
+            ]
 
             table_summary = []
             for i, (_, r) in enumerate(res_df.iterrows()):
                 m_str = str(r['馬番'])
                 display_m = "未定" if m_str.startswith("90") else f"{int(float(m_str)):02d}"
                 win_val = float(r.get('win_prob', 0)) * 100
-                kinryo = float(r.get('斤量', 55.0))
+                weight_info = r['weight_info']
                 jockey_val = str(r.get('騎手', '-'))
                 kyakushitsu_val = str(r.get('推測脚質', '-'))
                 chokyo_summary = r['chokyo_summary']
@@ -541,8 +559,8 @@ if st.session_state.get('selected_race_id'):
                 
                 python_prob_str = f"Python勝率:(新馬戦のため無効)" if is_shinba else f"Python勝率:{win_val:.1f}%"
                 
-                # 純粋な物理情報のみ渡す (血統情報は渡さない)
-                info = (f"馬番:{display_m} | 馬名:{r.get('馬名','')} | {python_prob_str} | 斤量:{kinryo}kg | "
+                # 血統情報を除外し、物理情報（斤量・調教・前走）のみ渡す
+                info = (f"馬番:{display_m} | 馬名:{r.get('馬名','')} | {python_prob_str} | {weight_info} | "
                         f"脚質:{kyakushitsu_val} | 騎手:{jockey_val} | "
                         f"前走:{past_summary} | 調教分析:{chokyo_summary}")
                 table_summary.append(info)
@@ -582,13 +600,36 @@ if st.session_state.get('selected_race_id'):
                         merged['補正係数'] = merged['補正係数'].fillna(1.0)
                         merged['短評'] = merged['短評'].fillna('データ保留')
                         
-                        # 防衛的プログラミング（上限・下限クリップ）
+                        # 🛡️ 防衛的プログラミング（上限・下限クリップ・斤量恩恵判定）
                         clipped_coeffs = []
                         for _, r in merged.iterrows():
                             mult = float(r.get('補正係数', 1.0))
                             c_tag = str(r.get('chokyo_summary', ''))
-                            if not is_shinba and "極限加速" not in c_tag and mult > 1.40: mult = 1.40
-                            if "減速" in c_tag and mult > 1.00: mult = 1.00
+                            w_tag = str(r.get('weight_info', ''))
+                            
+                            kinryo_f = float(r.get('斤量', 55.0))
+                            p1_w = r.get('前走斤量')
+                            is_num_weight_bonus = False
+                            if pd.notna(p1_w) and str(p1_w).strip() not in ['', 'nan', 'NaN']:
+                                try:
+                                    if round(kinryo_f - float(p1_w), 1) <= -2.0:
+                                        is_num_weight_bonus = True
+                                except Exception:
+                                    pass
+                            
+                            is_age2_growth = False
+                            if is_age2 and ("加速" in c_tag):
+                                m_diff = re.search(r'差:([+-]?\d+\.\d+)s', c_tag)
+                                if m_diff and float(m_diff.group(1)) <= -1.5:
+                                    is_age2_growth = True
+
+                            has_special_flag = ("極限加速" in c_tag) or ("減量恩恵" in w_tag) or is_num_weight_bonus or is_age2_growth
+                            
+                            if not is_shinba and not has_special_flag and mult > 1.30:
+                                mult = 1.30
+                            if "減速" in c_tag and mult > 1.00:
+                                mult = 1.00
+                                
                             clipped_coeffs.append(mult)
                         merged['補正係数'] = clipped_coeffs
 
@@ -646,7 +687,7 @@ if st.session_state.get('selected_race_id'):
                             aite_label = "◯, ▲, △, ☆"
                             ticket_count = "計6点"
 
-                        # 余計な条件分岐バッジを全て削除し、純粋に2パターンの買い目を併記するだけにする
+                        # 買い目表示（馬場ごとに併記するだけ）
                         st.markdown("<div class='sense-card'>", unsafe_allow_html=True)
                         st.markdown("<div class='sense-title'>🎟 当日の馬場に応じた推奨買い目</div>", unsafe_allow_html=True)
                         
