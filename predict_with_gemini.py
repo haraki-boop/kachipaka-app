@@ -14,7 +14,7 @@ from typing import List
 # ==========================================
 # 🎨 アプリの基本設定 & スタイル定義
 # ==========================================
-st.set_page_config(page_title="AI予想 勝ちぱかくん (乗算補正版)", page_icon="logo.png", layout="wide")
+st.set_page_config(page_title="AI予想 勝ちぱかくん (クラス別分岐・完全版)", page_icon="logo.png", layout="wide")
 
 st.markdown("""
 <style>
@@ -43,6 +43,8 @@ st.markdown("""
     .gemini-view-text { font-size: 15px; color: #333; line-height: 1.6; margin: 0; }
     
     .shinba-badge { background-color: #e67e22; color: white; padding: 3px 8px; border-radius: 4px; font-size: 13px; font-weight: bold; margin-left: 8px; vertical-align: middle; }
+    .age2-badge { background-color: #16a085; color: white; padding: 3px 8px; border-radius: 4px; font-size: 13px; font-weight: bold; margin-left: 8px; vertical-align: middle; }
+    .old-badge { background-color: #2980b9; color: white; padding: 3px 8px; border-radius: 4px; font-size: 13px; font-weight: bold; margin-left: 8px; vertical-align: middle; }
 
     div.stButton > button { background: linear-gradient(135deg, #3498db 0%, #2980b9 100%); color: white; border: none; border-radius: 6px; padding: 10px 24px; font-weight: bold; font-size: 16px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: all 0.3s ease; }
     div.stButton > button:hover { background: linear-gradient(135deg, #2980b9 0%, #1f618d 100%); box-shadow: 0 6px 8px rgba(0,0,0,0.15); transform: translateY(-2px); }
@@ -63,7 +65,7 @@ class HorseCoefficient(BaseModel):
     馬名: str = Field(description="評価対象の馬名（データと完全一致）")
     補正係数: float = Field(
         ge=0.5, le=1.6,
-        description="好走確率評価。通常レースでは確率補正倍率（0.5〜1.6）。新馬戦ではPython勝率を参照せず調教・血統による絶対好走評価スコア（0.5〜1.6）。"
+        description="好走確率評価。通常レースでは確率補正倍率（0.50〜1.60）。新馬戦ではPython勝率を参照せず調教・血統による絶対好走評価スコア（0.50〜1.60）。"
     )
     短評: str = Field(
         description="なぜその数値を付与したかの物理的・定性的理由（調教ラップ、斤量差分、血統適性、コース脚質適合度など）"
@@ -71,56 +73,70 @@ class HorseCoefficient(BaseModel):
 
 class RaceCoefficientResult(BaseModel):
     summary: str = Field(
-        description="レース全体の物理バイアス（展開ペース、馬場、斤量・血統傾向）と重要補正馬の統括見解（300文字以内）"
+        description="レース全体の物理バイアス（展開ペース、馬場、クラス特性、斤量・血統傾向）と重要補正馬の統括見解（300文字以内）"
     )
     coefficients: List[HorseCoefficient] = Field(
         description="出走全頭分の補正係数リスト（全頭必須・欠落厳禁）"
     )
 
 # ==========================================
-# 🧠 システムプロンプト（メリハリ強化・インフレ防止版）
+# 🧠 システムプロンプト（共通ベース＋クラス別分岐アドオン）
 # ==========================================
-system_instruction = """
+base_system_instruction = """
 # 役割定義
 あなたは統計モデル（Python）が算出したベース勝率に対し、直前の物理・定性データから乗算補正倍率を付与する「精密レバレッジ鑑定AI」です。
 印を決める必要はありません。通常レースではレース全体の平均倍率が【1.00前後】に収束するようメリハリをつけ、各馬の好走確率を何倍にすべきか【0.50 〜 1.60】の補正倍率を客観的根拠のみで精密に鑑定してください。
-※ただし【新馬戦】と指定されたレースでは、Python勝率を完全に無視し、調教ラップの物理時計と血統コース適性のみから、各馬の絶対的な好走評価値（0.50〜1.60）を単独鑑定せよ。
 
-# 補正倍率の基準と分布バランス（0.50 〜 1.60）
-- 1.55 〜 1.60（特注・極限レバレッジ / 1レース最大0〜2頭まで）:
-  【物理的異常値×好走条件の合致】:
-  調教分析に「🔥【極限加速】」または斤量の「【減量恩恵】」の確定タグを持ち、さらに「休養明け（中10週以上）の好走歴」「当日の馬場状態・コースへの高い血統適性」「前残り馬場での逃げ・先行脚質」のいずれかが明確に噛み合った馬のみに付与せよ。ここに入った馬は圏外から「注」として強制浮上する。
-
-- 1.35 〜 1.50（大幅プラス補正）:
-  「🔥【極限加速】」または「【減量恩恵】」の確定タグを持ち、仕上がりや条件好転が顕著な馬。
-  または新馬戦において、調教終いの鋭い加速とコース・馬場適性が抜けて高い馬。
-
-- 1.10 〜 1.30（標準プラス補正）:
-  調教が「加速」または「維持」で順調、かつ当日の馬場状態（良〜不良）・コース形態・脚質バイアスに合致している馬。
-  ※確定タグ（「🔥【極限加速】」「【減量恩恵】」）がない馬の上限は【1.30】までとする（新馬戦を除く）。
-
-- 0.95 〜 1.05（中立・データ通り）:
-  調教・血統・馬場適性ともに平均的で、Pythonのベース勝率通りに評価すべき馬。通常レース出走馬の約半数はこのレンジに収めよ。
-
-- 0.75 〜 0.90（マイナス補正）:
-  以下のいずれかに該当する馬は遠慮なく減点せよ：
-  1. 調教分析で「減速」と判定されている（状態落ち・仕上げ途上）。
-  2. 当日の馬場状態（道悪・高速馬場）やコース形態に対して血統・脚質の適性が低い。
-  3. 展開・トラックバイアスに逆行する脚質（前残り馬場での極端な追込など）。
-
-- 0.50 〜 0.70（大幅マイナス補正）:
-  調教で明確な大失速（差:+0.6s以上の減速）、またはハンデ戦での59.0kg以上の酷量・前走比+3.0kg以上の急激な重量増により、物理的に好走が極めて困難な馬。
-
-# 厳格な鑑定ルール
+# 厳格な共通鑑定ルール
 1. 【インフレ防止（メリハリの徹底）】: 通常レースにおいて全頭に1.1以上のプラス倍率を乱発してはならない。加点馬と同程度の減点馬（0.75〜0.90）を作り、強弱を明確にせよ。
 2. 【調教減速馬への加点厳禁】: 調教分析に「減速」と記載がある馬には、いかなる理由があっても1.00を超える倍率を付与してはならない（必ず1.00以下とせよ）。
-3. 【規定重量の減点禁止】: 牡馬58kg・牝馬56kgはJRAの標準規定重量である。59kg以上のトップハンデでない限り、斤量だけを理由に減点してはならない。
-4. 【主観ノイズの遮断】: 記者コメント等の主観は排除し、Pythonが算出した「調教ラップ差分」「斤量差分」「血統」「当日の馬場状態」という物理事実のみを根拠とせよ。
-5. 【出力形式と短評】: 出走全頭分を欠落なく出力し、短評には「なぜその倍率にしたのか（調教ラップ値・馬場適性・脚質など）」の物理根拠を簡潔に明記せよ。
+3. 【規定重量・勝利による斤量増の減点禁止】: 牡馬58kg・牝馬56kgはJRAの標準規定重量である。また「前走1〜2着」の好走馬が別定・昇級で斤量が増えるのは実力の証明であり、これを理由に減点してはならない。59kg以上のトップハンデ、または前走3着以下からの急激な重量増（+3.0kg以上）のみ減点対象とせよ。
+4. 【単なる軽ハンデ先行の過剰評価禁止】: 軽ハンデ・先行脚質という理由だけで1.50以上の特大倍率をつけてはならない。1.35以上の高倍率は必ず「🔥【極限加速】」「🔥【着順詐欺判定】」「【減量恩恵】」の物理的裏付けを伴う馬に付与せよ。
+5. 【主観ノイズの遮断】: 記者コメント等の主観は排除し、Pythonが算出した「調教ラップ差分」「斤量差分」「血統」「当日の馬場状態」という物理事実のみを根拠とせよ。
+6. 【出力形式と短評】: 出走全頭分を欠落なく出力し、短評には「なぜその倍率にしたのか（調教ラップ値・馬場適性・脚質など）」の物理根拠を簡潔に明記せよ。
+"""
+
+# クラス別分岐プロンプト（2歳戦 vs 3歳以上古馬戦 vs 新馬戦）
+shinba_addon = """
+# 【特注モード：新馬戦（過去走なし）】
+- Python勝率は完全に無視し、調教ラップの物理時計・加速度と血統コース適性・当日の馬場状態のみから、各馬の絶対好走評価値（0.50〜1.60）を単独鑑定せよ。
+- 終いの加速が鋭く血統・馬場適性が合致する馬に1.40〜1.60を与え、仕上がり途上や減速調教の馬は0.50〜0.85として明確に差をつけよ。
+"""
+
+age2_addon = """
+# 【特注モード：2歳戦（未勝利・1勝クラス）— 成長・一変重視】
+2歳戦は馬の完成度が低く、1戦ごとの「急成長・一変」が結果のすべてを決める。以下の基準で倍率を配分せよ：
+- 1.45 〜 1.60（一変・急成長レバレッジ）:
+  調教分析に「🔥【極限加速】」を持ち、前走4〜9着（掲示板前後）から調教ラップの加速度が大きく良化している成長馬。
+  または「🔥【着順詐欺判定】」を持ち、調教が加速している馬。
+- 1.25 〜 1.40（大幅プラス補正）:
+  確定タグ（「🔥【極限加速】」「【減量恩恵】」）を持つ馬、または前走4〜8着で調教が前F比-0.5s以上鋭く加速しており、血統・馬場適性が高い馬。
+- 1.05 〜 1.20（標準プラス補正）:
+  調教が「加速」または「維持」で順調、かつコース・馬場適性に合致する馬（※確定タグなしの上限は1.30まで）。
+- 0.95 〜 1.05（中立）: 平均的な内容の馬。
+- 0.70 〜 0.90（マイナス補正）: 調教「減速」、または道悪・高速馬場への血統適性が低い馬。
+"""
+
+old_horse_addon = """
+# 【特注モード：3歳以上（古馬戦・条件戦・特別・重賞）— 地力・CW切れ味・着順詐欺重視】
+古馬戦はすでに基礎能力が固まっており、「鋭いギアチェンジ（極限加速）」と「前走の不利・着順詐欺」が最も馬券に直結する。以下の基準で倍率を配分せよ：
+- 1.50 〜 1.60（特注・極限レバレッジ / 1レース最大0〜2頭まで）:
+  調教分析に「🔥【極限加速】」を持ち、さらに「🔥【着順詐欺判定】」「休養明け（中10週以上）の好走歴」「当日の馬場状態・コースへの高い血統適性」のいずれかが噛み合った馬。ここに入った馬は圏外から「注」として強制浮上する。
+- 1.35 〜 1.48（大幅プラス補正）:
+  「🔥【極限加速】」「🔥【着順詐欺判定】」「【減量恩恵】」のいずれかの確定タグを持ち、上がり3Fの切れ味や条件好転が顕著な馬（3〜6番人気帯の伏兵を積極的に拾い上げよ）。
+- 1.10 〜 1.30（標準プラス補正）:
+  調教が「加速」または「維持」で順調、かつ当日の馬場状態（良〜不良）・コース形態・脚質バイアスに合致している馬（※確定タグなしの上限は1.30まで）。
+- 0.95 〜 1.05（中立）: Pythonのベース勝率通りに評価すべき平均的な馬。出走馬の約半数はここに収めよ。
+- 0.75 〜 0.90（マイナス補正）:
+  1. 調教分析で「減速」と判定されている（状態落ち・仕上げ途上）。
+  2. 当日の馬場状態（道悪・高速馬場）やコース形態に対して血統・脚質の適性が低い。
+  3. 展開・トラックバイアスに逆行する極端な脚質。
+- 0.50 〜 0.70（大幅マイナス補正）:
+  調教で明確な大失速（差:+0.6s以上の減速）、または59.0kg以上の酷量・前走3着以下からの急激な重量増（+3.0kg以上）で物理的負荷が限界を超えている馬。
 """
 
 # ==========================================
-# 🔧 前処理ヘルパー関数
+# 🔧 前処理ヘルパー関数（CW極限加速の閾値を実戦仕様に最適化）
 # ==========================================
 def parse_training_lap_stats(t_str):
     if not t_str or pd.isna(t_str) or str(t_str).strip() in ['-', 'nan', 'NaN', '']:
@@ -148,10 +164,14 @@ def parse_training_lap_stats(t_str):
         diff = round(final_1f - penultimate_1f, 1)
         
         is_gear_change = False
-        if is_hanro and final_1f <= 12.1 and diff <= -0.5:
-            is_gear_change = True
-        elif (not is_hanro) and final_1f <= 11.5 and diff <= -0.5:
-            is_gear_change = True
+        if is_hanro:
+            # 坂路：終い12.1s以下 かつ 前F比-0.5s以上
+            if final_1f <= 12.1 and diff <= -0.5:
+                is_gear_change = True
+        else:
+            # ウッド/CW：終い11.5s以下(-0.5s以上) または 終い11.9s以下かつ猛加速(-1.8s以上)
+            if (final_1f <= 11.5 and diff <= -0.5) or (final_1f <= 11.9 and diff <= -1.8):
+                is_gear_change = True
             
         gear_tag = " 🔥【極限加速】" if is_gear_change else ""
         status = f"加速({diff:+.1f}s)" if diff <= -0.2 else (f"維持({diff:+.1f}s)" if diff <= 0.3 else f"減速({diff:+.1f}s)")
@@ -187,7 +207,7 @@ def parse_past_race_stats(order_str, passage_str, agari_str, agari_rank=None, pa
 
     tag = ""
     is_rear = (corner_last is not None) and (corner_last >= 10 or corner_last >= tousuu_val * 0.7)
-    is_top_agari = (rank_val is not None) and (rank_val <= 3)
+    is_top_agari = (rank_val is not None) and (1 <= rank_val <= 3)
     is_front = (corner_last is not None) and (corner_last <= 3)
     is_slow_agari = (rank_val is not None) and (rank_val >= 7)
 
@@ -199,15 +219,18 @@ def parse_past_race_stats(order_str, passage_str, agari_str, agari_rank=None, pa
     interval_info = f"[{interval_str}] " if interval_str and str(interval_str) not in ['nan', 'NaN', ''] else ""
     return f"{interval_info}着順:{order_str} ({tousuu_text}通過:{passage_str} / 上がり3F:{agari_str}{rank_text}){tag}"
 
-def format_weight_analysis(kinryo_val, min_w, max_w, avg_w, has_weight_gap, past1_w=None, past2_w=None):
+def format_weight_analysis(kinryo_val, min_w, max_w, avg_w, has_weight_gap, past1_w=None, past2_w=None, order_str=""):
     tags = []
+    is_good_prev = str(order_str).strip() in ['1着', '2着']
     try:
         if past1_w and str(past1_w).strip() not in ["", "nan", "NaN"]:
             diff_p1 = round(kinryo_val - float(past1_w), 1)
             if diff_p1 <= -2.0:
                 tags.append(f"【前走比 {diff_p1:+.1f}kg: 減量恩恵】")
-            elif diff_p1 >= 3.0:
+            elif diff_p1 >= 3.0 and not is_good_prev:
                 tags.append(f"【前走比 {diff_p1:+.1f}kg: 急な重量増に注意】")
+            elif diff_p1 >= 3.0 and is_good_prev:
+                tags.append(f"[前走比 {diff_p1:+.1f}kg: 好走による別定増]")
             else:
                 tags.append(f"[前走比 {diff_p1:+.1f}kg]")
     except Exception:
@@ -461,15 +484,28 @@ if st.session_state.get('selected_race_id'):
     
     res_df, pat, rec_ticket, buy_detail, race_day = render_race_predictions(t_id)
     
-    # 💡 新馬戦の判定（レース名または全頭前走欠落）
+    # 💡 クラス判定（新馬戦 / 2歳戦 / 3歳以上古馬戦）
     is_shinba = "新馬" in str(display_race_name) or (res_df['前走着順'].isna().all() if res_df is not None and '前走着順' in res_df.columns else False)
-    shinba_badge_html = "<span class='shinba-badge'>🐴 新馬戦 (Gemini単独評価対象)</span>" if is_shinba else ""
+    is_age2 = (not is_shinba) and ("2歳" in str(display_race_name) or (res_df['age'].max() == 2 if res_df is not None and 'age' in res_df.columns else False))
 
-    st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{display_race_name}】 {shinba_badge_html} <span style='font-size:18px; color:#7f8c8d;'>({surface_info}{distance_info}m / 開催{race_day}日目)</span></h2>", unsafe_allow_html=True)
+    if is_shinba:
+        mode_badge_html = "<span class='shinba-badge'>🐴 新馬戦 (Gemini単独評価)</span>"
+        active_system_instruction = base_system_instruction + "\n" + shinba_addon
+        mode_label = "新馬戦モード"
+    elif is_age2:
+        mode_badge_html = "<span class='age2-badge'>🌱 2歳戦モード (成長・一変重視)</span>"
+        active_system_instruction = base_system_instruction + "\n" + age2_addon
+        mode_label = "2歳戦モード（成長・一変重視）"
+    else:
+        mode_badge_html = "<span class='old-badge'>🔥 3歳以上・古馬戦モード (CW切れ味・着順詐欺重視)</span>"
+        active_system_instruction = base_system_instruction + "\n" + old_horse_addon
+        mode_label = "3歳以上・古馬戦モード（地力・切れ味重視）"
+
+    st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{display_race_name}】 {mode_badge_html} <span style='font-size:18px; color:#7f8c8d;'>({surface_info}{distance_info}m / 開催{race_day}日目)</span></h2>", unsafe_allow_html=True)
     
     if res_df is not None:
         if is_shinba:
-            st.info("💡【新馬戦モード】過去走データが存在しないため、Pythonの初期勝率・買い目は無効化されています。下のGemini補正を実行することで、調教時計と血統からGeminiが単独で印（◎〜☆）を直接決定します。")
+            st.info("💡【新馬戦モード】過去走データが存在しないため、Pythonの初期勝率は無効化されています。調教時計と血統からGeminiが単独で印を決定します（原則見送り推奨）。")
             st.markdown("<div class='section-header'>📊 1. 出走馬一覧（過去走データなし）</div>", unsafe_allow_html=True)
             st.markdown(generate_base_table(res_df, is_shinba=True), unsafe_allow_html=True)
         else:
@@ -488,7 +524,7 @@ if st.session_state.get('selected_race_id'):
         )
         st.markdown("<br>", unsafe_allow_html=True)
 
-        btn_label = "⚡ Geminiによる単独定性評価を実行（新馬戦：調教×血統モデル）" if is_shinba else "⚡ Geminiによる動的レバレッジ補正を実行（血統・斤量差分モデル）"
+        btn_label = f"⚡ Geminiによる精密レバレッジ補正を実行（{mode_label}）"
         if st.button(btn_label, type="primary", use_container_width=True):
             if not GEMINI_API_KEY:
                 st.error("【設定エラー】GEMINI_API_KEYが設定されていません。")
@@ -504,7 +540,7 @@ if st.session_state.get('selected_race_id'):
 
             res_df['chokyo_summary'] = res_df['調教タイム'].apply(parse_training_lap_stats)
             res_df['weight_info'] = [
-                format_weight_analysis(float(r.get('斤量', 55.0)), min_w, max_w, avg_w, has_weight_gap, r.get('前走斤量'), r.get('前々走斤量'))
+                format_weight_analysis(float(r.get('斤量', 55.0)), min_w, max_w, avg_w, has_weight_gap, r.get('前走斤量'), r.get('前々走斤量'), r.get('前走着順', ''))
                 for _, r in res_df.iterrows()
             ]
 
@@ -538,18 +574,11 @@ if st.session_state.get('selected_race_id'):
                         f"前走:{past_summary} | 調教分析:{chokyo_summary}")
                 table_summary.append(info)
 
-            # 新馬戦専用プロンプト指示の分岐アドオン
-            shinba_prompt_instruction = """
-【重要：新馬戦特注評価モード】
-このレースは【新馬戦】です。出走全頭に過去走データが一切なく、Python統計モデルの勝率は適当（無効）です。
-Pythonの勝率は完全に無視し、あなたの調教分析（終い時計・前F差の物理加速）と血統コース適性、および当日の馬場状態のみから、各馬の絶対好走スコア（0.50〜1.60）を単独鑑定して全頭出力せよ。
-最も仕上がりが抜けており血統適性がある馬に1.40〜1.60を与え、仕上がり途上や減速調教の馬は0.50〜0.90として差を明確につけよ。
-""" if is_shinba else ""
-
             prompt = f"""
-以下の出走馬データに基づき、指示に従って全出走馬の補正係数（0.5〜1.6）と理由を出力してください。
-{shinba_prompt_instruction}
-【対象レース】: {r_info['place_name']} {r_info['r_num']}R ({surface_info}{distance_info}m)
+以下の出走馬データに基づき、指示に従って全出走馬の補正係数（0.50〜1.60）と理由を出力してください。
+
+【適用評価モード】: {mode_label}
+【対象レース】: {r_info['place_name']} {r_info['r_num']}R 【{display_race_name}】 ({surface_info}{distance_info}m)
 【当日の馬場状態想定】: {baba_condition}
 【出走頭数】: {total_horses}頭
 【斤量条件】: {"【全頭同斤量（斤量差なし）】" if not has_weight_gap else f"【斤量差あり（ハンデ/別定）】最軽量:{min_w:.1f}kg 〜 最重量:{max_w:.1f}kg (最大格差:{max_w-min_w:.1f}kg)"}
@@ -558,14 +587,14 @@ Pythonの勝率は完全に無視し、あなたの調教分析（終い時計�
 {chr(10).join(table_summary)}
 """
 
-            with st.spinner("🧠 Geminiが調教・血統・馬場想定データから各馬を精密鑑定中..."):
+            with st.spinner(f"🧠 Geminiが【{mode_label}】で各馬の調教・血統・馬場適性を精密鑑定中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY, http_options={"api_version": "v1beta"})
                 try:
                     response = client.models.generate_content(
                         model='gemini-2.5-flash', 
                         contents=prompt, 
                         config=types.GenerateContentConfig(
-                            system_instruction=system_instruction, 
+                            system_instruction=active_system_instruction, 
                             temperature=0.1, 
                             response_mime_type="application/json",
                             response_schema=RaceCoefficientResult,
@@ -589,6 +618,7 @@ Pythonの勝率は完全に無視し、あなたの調教分析（終い時計�
                             mult = float(r.get('補正係数', 1.0))
                             c_tag = str(r.get('chokyo_summary', ''))
                             w_tag = str(r.get('weight_info', ''))
+                            p_tag = str(r.get('前走着順', ''))
                             
                             kinryo_f = float(r.get('斤量', 55.0))
                             p1_w = r.get('前走斤量')
@@ -600,13 +630,18 @@ Pythonの勝率は完全に無視し、あなたの調教分析（終い時計�
                                 except Exception:
                                     pass
                             
-                            has_special_flag = ("極限加速" in c_tag) or ("減量恩恵" in w_tag) or is_num_weight_bonus
+                            # 2歳戦は前走4〜9着＋調教加速(-1.5s以上)でも上限緩和を許容
+                            is_age2_growth = False
+                            if is_age2 and ("加速" in c_tag):
+                                m_diff = re.search(r'差:([+-]?\d+\.\d+)s', c_tag)
+                                if m_diff and float(m_diff.group(1)) <= -1.5:
+                                    is_age2_growth = True
+
+                            has_special_flag = ("極限加速" in c_tag) or ("減量恩恵" in w_tag) or is_num_weight_bonus or is_age2_growth
                             is_gensoku = "減速" in c_tag
                             
-                            # 新馬戦では調教終い加速の馬も特大評価を許容、通常戦はタグ必須
                             if not is_shinba and not has_special_flag and mult > 1.30:
                                 mult = 1.30
-                            # ガードレール2: 調教減速馬の不当加点は新馬戦でも完全カット
                             if is_gensoku and mult > 1.00:
                                 mult = 1.00
                                 
@@ -615,44 +650,38 @@ Pythonの勝率は完全に無視し、あなたの調教分析（終い時計�
 
                         # 🎯 新馬戦と通常戦で勝率計算・ソートを分岐
                         if is_shinba:
-                            # 🐴 新馬戦：Python勝率は完全無視し、Geminiのスコア単体で正規化してソート
                             merged['raw_final'] = merged['補正係数']
                             merged['final_prob'] = merged['raw_final'] / merged['raw_final'].sum()
                             merged = merged.sort_values(by='final_prob', ascending=False).reset_index(drop=True)
                         else:
-                            # 🏁 通常戦：Python地力 × Gemini倍率による乗算融合
                             merged['raw_final'] = merged['win_prob'] * merged['補正係数']
                             merged['final_prob'] = merged['raw_final'] / merged['raw_final'].sum()
                             merged = merged.sort_values(by='final_prob', ascending=False).reset_index(drop=True)
                         
                         # ==========================================
-                        # 🎯 最終印の決定ロジック（本線5頭 ＋ 圏外極限値・注最大2頭）
+                        # 🎯 最終印の決定ロジック（本線5頭 ＋ 圏外極限加速・注最大2頭）
                         # ==========================================
                         marks = ['◎', '◯', '▲', '△', '☆']
                         final_marks = ['消'] * len(merged)
 
-                        # 1. 補正後勝率の上位5頭に本線印を付与
                         for idx in range(min(len(marks), len(merged))):
                             final_marks[idx] = marks[idx]
 
-                        # 2. 6番手以降（圏外）から、「🔥【極限加速】」または「倍率1.55以上」の馬を抽出
+                        # 6番手以降（圏外）から「🔥【極限加速】」または「倍率1.50以上」の馬を抽出
                         chuu_candidates = []
                         for idx in range(len(marks), len(merged)):
                             row_m = merged.iloc[idx]
                             mult = float(row_m.get('補正係数', 1.0))
                             c_tag = str(row_m.get('chokyo_summary', ''))
                             
-                            # 条件：印外に「🔥【極限加速】」がある、または倍率1.55以上の特注馬[cite: 3]
-                            if ("極限加速" in c_tag) or (mult >= 1.55):
+                            if ("極限加速" in c_tag) or (mult >= 1.50):
                                 t_str = str(row_m.get('調教タイム', ''))
                                 floats = [float(x) for x in re.findall(r'\d+\.?\d*', t_str)]
                                 final_1f = floats[-1] if floats else 99.0
                                 chuu_candidates.append((idx, mult, final_1f))
 
-                        # 3. 補正倍率（降順）➔ 調教終い時計（速い順）で厳格ソート
                         chuu_candidates.sort(key=lambda x: (-x[1], x[2]))
 
-                        # 4. 最大2頭までを「注」に昇格
                         for candidate in chuu_candidates[:2]:
                             final_marks[candidate[0]] = '注'
 
@@ -660,7 +689,7 @@ Pythonの勝率は完全に無視し、あなたの調教分析（終い時計�
                         
                         st.markdown(f"""
                         <div class='gemini-view-card'>
-                            <div class='gemini-view-title'>📝 トラックマンGeminiのレース物理バイアス統括 {"(新馬戦・調教血統単独評価)" if is_shinba else ""}</div>
+                            <div class='gemini-view-title'>📝 トラックマンGeminiのレース物理バイアス統括 ({mode_label})</div>
                             <p class='gemini-view-text'>{result.summary}</p>
                         </div>
                         """, unsafe_allow_html=True)
@@ -696,7 +725,7 @@ Pythonの勝率は完全に無視し、あなたの調教分析（終い時計�
                             aite_label = "◯, ▲, △, ☆"
                             ticket_count_label = "計6点（標準）"
 
-                        title_prefix = "🎟 Gemini単独定性評価による新馬戦推奨買い目" if is_shinba else "🎟 乗算補正後の最終推奨買い目"
+                        title_prefix = "🎟 Gemini単独定性評価による新馬戦推奨買い目" if is_shinba else f"🎟 乗算補正後の最終推奨買い目（{mode_label}）"
                         st.markdown(f"""
                         <div class='sense-card'>
                             <div class='sense-title'>{title_prefix}</div>
@@ -706,7 +735,7 @@ Pythonの勝率は完全に無視し、あなたの調教分析（終い時計�
                         </div>
                         """, unsafe_allow_html=True)
                         
-                        section2_header = "🔥 2. Gemini単独評価結果（調教ラップ×血統適性ソート）" if is_shinba else "🔥 2. 数学融合結果（Python地力 × Gemini倍率）"
+                        section2_header = "🔥 2. Gemini単独評価結果（調教ラップ×血統適性ソート）" if is_shinba else f"🔥 2. 数学融合結果（Python地力 × Gemini倍率 / {mode_label}）"
                         st.markdown(f"<div class='section-header'>{section2_header}</div>", unsafe_allow_html=True)
                         st.markdown(generate_fusion_multiplied_table(merged, is_shinba=is_shinba), unsafe_allow_html=True)
                 
