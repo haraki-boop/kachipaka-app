@@ -14,7 +14,7 @@ from typing import List
 # ==========================================
 # 🎨 アプリの基本設定 & スタイル定義
 # ==========================================
-st.set_page_config(page_title="AI予想 勝ちぱかくん (完全二刀流版)", page_icon="logo.png", layout="wide")
+st.set_page_config(page_title="AI予想 勝ちぱかくん (クラス別分岐・完全版)", page_icon="logo.png", layout="wide")
 
 st.markdown("""
 <style>
@@ -34,9 +34,8 @@ st.markdown("""
     .multiplier-down { color: #3498db; font-weight: bold; }
     .multiplier-flat { color: #7f8c8d; }
 
-    .sense-card { background-color: #ffffff; border-left: 6px solid #2980b9; padding: 16px 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
-    .sense-title { font-size: 1.3rem; font-weight: bold; color: #2c3e50; border-bottom: 2px solid #ecf0f1; padding-bottom: 8px; margin-bottom: 12px; }
-    
+    .sense-card { background-color: #ffffff; border-left: 6px solid #8e44ad; padding: 16px 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+    .sense-title { font-size: 1.2rem; font-weight: bold; color: #8e44ad; }
     .ticket-badge { font-size: 1.1rem; font-weight: bold; color: #d35400; background: #fef5e7; padding: 4px 10px; border-radius: 4px; display: inline-block; }
     
     .gemini-view-card { background-color: #f0f8ff; border-left: 5px solid #3498db; padding: 16px 20px; border-radius: 5px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
@@ -46,12 +45,11 @@ st.markdown("""
     .shinba-badge { background-color: #e67e22; color: white; padding: 3px 8px; border-radius: 4px; font-size: 13px; font-weight: bold; margin-left: 8px; vertical-align: middle; }
     .age2-badge { background-color: #16a085; color: white; padding: 3px 8px; border-radius: 4px; font-size: 13px; font-weight: bold; margin-left: 8px; vertical-align: middle; }
     .old-badge { background-color: #2980b9; color: white; padding: 3px 8px; border-radius: 4px; font-size: 13px; font-weight: bold; margin-left: 8px; vertical-align: middle; }
-    
-    .strategy-badge-good { background: linear-gradient(135deg, #f39c12 0%, #d35400 100%); color: white; padding: 6px 12px; border-radius: 6px; font-size: 14px; font-weight: bold; display: inline-block; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 10px;}
-    .strategy-badge-wet { background: linear-gradient(135deg, #16a085 0%, #0e6655 100%); color: white; padding: 6px 12px; border-radius: 6px; font-size: 14px; font-weight: bold; display: inline-block; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 10px;}
-    .strategy-badge-skip { background: linear-gradient(135deg, #95a5a6 0%, #7f8c8d 100%); color: white; padding: 6px 12px; border-radius: 6px; font-size: 14px; font-weight: bold; display: inline-block; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 10px;}
 
-    div.stButton > button { background: linear-gradient(135deg, #3498db 0%, #2980b9 100%); color: white; border: none; border-radius: 6px; padding: 12px 24px; font-weight: bold; font-size: 17px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: all 0.3s ease; }
+    .strategy-badge-good { background: linear-gradient(135deg, #f39c12 0%, #d35400 100%); color: white; padding: 4px 10px; border-radius: 5px; font-size: 13px; font-weight: bold; display: inline-block; margin-right: 6px; }
+    .strategy-badge-wet { background: linear-gradient(135deg, #16a085 0%, #0e6655 100%); color: white; padding: 4px 10px; border-radius: 5px; font-size: 13px; font-weight: bold; display: inline-block; margin-right: 6px; }
+
+    div.stButton > button { background: linear-gradient(135deg, #3498db 0%, #2980b9 100%); color: white; border: none; border-radius: 6px; padding: 10px 24px; font-weight: bold; font-size: 16px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: all 0.3s ease; }
     div.stButton > button:hover { background: linear-gradient(135deg, #2980b9 0%, #1f618d 100%); box-shadow: 0 6px 8px rgba(0,0,0,0.15); transform: translateY(-2px); }
 </style>
 """, unsafe_allow_html=True)
@@ -70,15 +68,15 @@ class HorseCoefficient(BaseModel):
     馬名: str = Field(description="評価対象の馬名（データと完全一致）")
     補正係数: float = Field(
         ge=0.5, le=1.6,
-        description="好走確率評価。通常レースでは確率補正倍率（0.50〜1.60）。新馬戦では絶対好走評価スコア（0.50〜1.60）。"
+        description="好走確率評価。通常レースでは確率補正倍率（0.50〜1.60）。新馬戦ではPython勝率を参照せず調教・血統による絶対好走評価スコア（0.50〜1.60）。"
     )
     短評: str = Field(
-        description="なぜその数値を付与したかの物理的・定性的理由（調教ラップ、斤量差分、コース適合度など）"
+        description="なぜその数値を付与したかの物理的・定性的理由（調教ラップ、斤量差分、血統適性、コース脚質適合度など）"
     )
 
 class RaceCoefficientResult(BaseModel):
     summary: str = Field(
-        description="レース全体の物理バイアス（展開ペース、クラス特性、斤量傾向）と重要補正馬の統括見解（300文字以内）"
+        description="レース全体の物理バイアス（展開ペース、馬場、クラス特性、斤量・血統傾向）と重要補正馬の統括見解（300文字以内）"
     )
     coefficients: List[HorseCoefficient] = Field(
         description="出走全頭分の補正係数リスト（全頭必須・欠落厳禁）"
@@ -97,47 +95,51 @@ base_system_instruction = """
 2. 【調教減速馬への加点厳禁】: 調教分析に「減速」と記載がある馬には、いかなる理由があっても1.00を超える倍率を付与してはならない（必ず1.00以下とせよ）。
 3. 【規定重量・勝利による斤量増の減点禁止】: 牡馬58kg・牝馬56kgはJRAの標準規定重量である。また「前走1〜2着」の好走馬が別定・昇級で斤量が増えるのは実力の証明であり、これを理由に減点してはならない。59kg以上のトップハンデ、または前走3着以下からの急激な重量増（+3.0kg以上）のみ減点対象とせよ。
 4. 【単なる軽ハンデ先行の過剰評価禁止】: 軽ハンデ・先行脚質という理由だけで1.50以上の特大倍率をつけてはならない。1.35以上の高倍率は必ず「🔥【極限加速】」「🔥【着順詐欺判定】」「【減量恩恵】」の物理的裏付けを伴う馬に付与せよ。
-5. 【主観ノイズの遮断】: 記者コメント等の主観は排除し、Pythonが算出した「調教ラップ差分」「斤量差分」「血統適性」という物理事実のみを根拠とせよ。
-6. 【出力形式と短評】: 出走全頭分を欠落なく出力し、短評には「なぜその倍率にしたのか（調教ラップ値・脚質など）」の物理根拠を簡潔に明記せよ。
+5. 【主観ノイズの遮断】: 記者コメント等の主観は排除し、Pythonが算出した「調教ラップ差分」「斤量差分」「血統」「当日の馬場状態」という物理事実のみを根拠とせよ。
+6. 【出力形式と短評】: 出走全頭分を欠落なく出力し、短評には「なぜその倍率にしたのか（調教ラップ値・馬場適性・脚質など）」の物理根拠を簡潔に明記せよ。
 """
 
+# クラス別分岐プロンプト（2歳戦 vs 3歳以上古馬戦 vs 新馬戦）
 shinba_addon = """
 # 【特注モード：新馬戦（過去走なし）】
-- Python勝率は完全に無視し、調教ラップの物理時計・加速度と血統コース適性のみから、各馬の絶対好走評価値（0.50〜1.60）を単独鑑定せよ。
-- 終いの加速が鋭く適性が合致する馬に1.40〜1.60を与え、仕上がり途上や減速調教の馬は0.50〜0.85として明確に差をつけよ。
+- Python勝率は完全に無視し、調教ラップの物理時計・加速度と血統コース適性・当日の馬場状態のみから、各馬の絶対好走評価値（0.50〜1.60）を単独鑑定せよ。
+- 終いの加速が鋭く血統・馬場適性が合致する馬に1.40〜1.60を与え、仕上がり途上や減速調教の馬は0.50〜0.85として明確に差をつけよ。
 """
 
 age2_addon = """
 # 【特注モード：2歳戦（未勝利・1勝クラス）— 成長・一変重視】
 2歳戦は馬の完成度が低く、1戦ごとの「急成長・一変」が結果のすべてを決める。以下の基準で倍率を配分せよ：
 - 1.45 〜 1.60（一変・急成長レバレッジ）:
-  調教分析に「🔥【極限加速】」を持ち、前走4〜9着（掲示板前後）から調教ラップの加速度が大きく良化している成長馬。または「🔥【着順詐欺判定】」を持ち調教が加速している馬。
+  調教分析に「🔥【極限加速】」を持ち、前走4〜9着（掲示板前後）から調教ラップの加速度が大きく良化している成長馬。
+  または「🔥【着順詐欺判定】」を持ち、調教が加速している馬。
 - 1.25 〜 1.40（大幅プラス補正）:
-  確定タグ（「🔥【極限加速】」「【減量恩恵】」）を持つ馬、または前走4〜8着で調教が前F比-0.5s以上鋭く加速している馬。
+  確定タグ（「🔥【極限加速】」「【減量恩恵】」）を持つ馬、または前走4〜8着で調教が前F比-0.5s以上鋭く加速しており、血統・馬場適性が高い馬。
 - 1.05 〜 1.20（標準プラス補正）:
-  調教が「加速」または「維持」で順調な馬（※確定タグなしの上限は1.30まで）。
+  調教が「加速」または「維持」で順調、かつコース・馬場適性に合致する馬（※確定タグなしの上限は1.30まで）。
 - 0.95 〜 1.05（中立）: 平均的な内容の馬。
-- 0.70 〜 0.90（マイナス補正）: 調教「減速」の馬。
+- 0.70 〜 0.90（マイナス補正）: 調教「減速」、または道悪・高速馬場への血統適性が低い馬。
 """
 
 old_horse_addon = """
 # 【特注モード：3歳以上（古馬戦・条件戦・特別・重賞）— 地力・CW切れ味・着順詐欺重視】
 古馬戦はすでに基礎能力が固まっており、「鋭いギアチェンジ（極限加速）」と「前走の不利・着順詐欺」が最も馬券に直結する。以下の基準で倍率を配分せよ：
 - 1.50 〜 1.60（特注・極限レバレッジ / 1レース最大0〜2頭まで）:
-  調教分析に「🔥【極限加速】」を持ち、さらに「🔥【着順詐欺判定】」「休養明け（中10週以上）の好走歴」「高い血統適性」のいずれかが噛み合った馬。
+  調教分析に「🔥【極限加速】」を持ち、さらに「🔥【着順詐欺判定】」「休養明け（中10週以上）の好走歴」「当日の馬場状態・コースへの高い血統適性」のいずれかが噛み合った馬。ここに入った馬は圏外から「注」として強制浮上する。
 - 1.35 〜 1.48（大幅プラス補正）:
   「🔥【極限加速】」「🔥【着順詐欺判定】」「【減量恩恵】」のいずれかの確定タグを持ち、上がり3Fの切れ味や条件好転が顕著な馬（3〜6番人気帯の伏兵を積極的に拾い上げよ）。
 - 1.10 〜 1.30（標準プラス補正）:
-  調教が「加速」または「維持」で順調な馬（※確定タグなしの上限は1.30まで）。
+  調教が「加速」または「維持」で順調、かつ当日の馬場状態（良〜不良）・コース形態・脚質バイアスに合致している馬（※確定タグなしの上限は1.30まで）。
 - 0.95 〜 1.05（中立）: Pythonのベース勝率通りに評価すべき平均的な馬。出走馬の約半数はここに収めよ。
 - 0.75 〜 0.90（マイナス補正）:
-  調教分析で「減速」と判定されている、または展開・トラックバイアスに逆行する極端な脚質の馬。
+  1. 調教分析で「減速」と判定されている（状態落ち・仕上げ途上）。
+  2. 当日の馬場状態（道悪・高速馬場）やコース形態に対して血統・脚質の適性が低い。
+  3. 展開・トラックバイアスに逆行する極端な脚質。
 - 0.50 〜 0.70（大幅マイナス補正）:
   調教で明確な大失速（差:+0.6s以上の減速）、または59.0kg以上の酷量・前走3着以下からの急激な重量増（+3.0kg以上）で物理的負荷が限界を超えている馬。
 """
 
 # ==========================================
-# 🔧 前処理ヘルパー関数
+# 🔧 前処理ヘルパー関数（CW極限加速の閾値を実戦仕様に最適化）
 # ==========================================
 def parse_training_lap_stats(t_str):
     if not t_str or pd.isna(t_str) or str(t_str).strip() in ['-', 'nan', 'NaN', '']:
@@ -166,9 +168,11 @@ def parse_training_lap_stats(t_str):
         
         is_gear_change = False
         if is_hanro:
+            # 坂路：終い12.1s以下 かつ 前F比-0.5s以上
             if final_1f <= 12.1 and diff <= -0.5:
                 is_gear_change = True
         else:
+            # ウッド/CW：終い11.5s以下(-0.5s以上) または 終い11.9s以下かつ猛加速(-1.8s以上)
             if (final_1f <= 11.5 and diff <= -0.5) or (final_1f <= 11.9 and diff <= -1.8):
                 is_gear_change = True
             
@@ -367,7 +371,7 @@ def generate_base_table(disp_df, is_shinba=False):
     html = "<div class='table-container'><table class='kachi-table'>"
     init_prob_header = "Python参考値" if is_shinba else "Python勝率"
     init_mark_header = "初期印(参考外)" if is_shinba else "初期印"
-    html += f"<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>人気(前日)</th><th>オッズ</th><th>斤量</th><th>騎手</th><th>{init_prob_header}</th><th>{init_mark_header}</th></tr>"
+    html += f"<tr><th>枠番</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>人気</th><th>オッズ</th><th>斤量</th><th>騎手</th><th>{init_prob_header}</th><th>{init_mark_header}</th></tr>"
     for _, r in disp_df.iterrows():
         w_num = str(r.get('枠番', ''))
         display_waku = w_num if w_num and w_num != 'nan' and not w_num.startswith("90") else "-"
@@ -377,7 +381,7 @@ def generate_base_table(disp_df, is_shinba=False):
         kinryo_val = float(r.get('斤量', 55.0))
         mark = r.get('初期印', '消')
         
-        ninki_disp = int(float(r['人気'])) if pd.notna(r.get('人気')) else "-"
+        ninki_disp = f"{int(float(r['人気']))}番人気" if pd.notna(r.get('人気')) else "-"
         odds_disp = f"{float(r['オッズ']):.1f}" if pd.notna(r.get('オッズ')) else "-"
         
         prob_disp = f"<span style='color:#7f8c8d;'>({win_val:.1f}%)</span>" if is_shinba else f"<b>{win_val:.1f}%</b>"
@@ -392,9 +396,9 @@ def generate_base_table(disp_df, is_shinba=False):
 def generate_fusion_multiplied_table(merged_df, is_shinba=False):
     html = "<div class='table-container'><table class='kachi-table'>"
     if is_shinba:
-        html += "<tr><th>馬番</th><th style='text-align:left;'>馬名</th><th>人気(前日)</th><th>Gemini評価値</th><th>最終印</th><th style='text-align:left; min-width: 420px;'>Gemini単独評価根拠 (調教・血統・厩舎バイアス)</th></tr>"
+        html += "<tr><th>馬番</th><th style='text-align:left;'>馬名</th><th>人気</th><th>Gemini評価値</th><th>最終印</th><th style='text-align:left; min-width: 420px;'>Gemini単独評価根拠 (調教・血統・馬場適性)</th></tr>"
     else:
-        html += "<tr><th>初期印</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>人気(前日)</th><th>元勝率</th><th>Gemini倍率</th><th>補正後勝率</th><th>最終印</th><th style='text-align:left; min-width: 420px;'>補正理由 (物理・定性根拠)</th></tr>"
+        html += "<tr><th>初期印</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>人気</th><th>元勝率</th><th>Gemini倍率</th><th>補正後勝率</th><th>最終印</th><th style='text-align:left; min-width: 420px;'>補正理由 (物理・定性根拠)</th></tr>"
         
     for _, r in merged_df.iterrows():
         m_num = str(r.get('馬番', ''))
@@ -408,7 +412,7 @@ def generate_fusion_multiplied_table(merged_df, is_shinba=False):
         
         ninki_val = int(float(r['人気'])) if pd.notna(r.get('人気')) else 99
         odds_val = float(r['オッズ']) if pd.notna(r.get('オッズ')) else 99.9
-        ninki_disp = f"{ninki_val} ({odds_val:.1f}倍)" if ninki_val != 99 else "-"
+        ninki_disp = f"{ninki_val}番人気 ({odds_val:.1f}倍)" if ninki_val != 99 else "-"
         
         if mult >= 1.2:
             mult_str = f"<span class='multiplier-up'>×{mult:.2f} ⬆</span>" if not is_shinba else f"<span class='multiplier-up'>★ {mult:.2f}</span>"
@@ -508,11 +512,11 @@ if st.session_state.get('selected_race_id'):
         active_system_instruction = base_system_instruction + "\n" + old_horse_addon
         mode_label = "3歳以上・古馬戦モード"
 
-    st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{display_race_name}】 {mode_badge_html} <span style='font-size:18px; color:#7f8c8d;'>({surface_info}{distance_info}m)</span></h2>", unsafe_allow_html=True)
+    st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{display_race_name}】 {mode_badge_html} <span style='font-size:18px; color:#7f8c8d;'>({surface_info}{distance_info}m / 開催{race_day}日目)</span></h2>", unsafe_allow_html=True)
     
     if res_df is not None:
         if is_shinba:
-            st.info("💡【新馬戦モード】過去走データが存在しないため、Pythonの初期勝率は無効化されています。")
+            st.info("💡【新馬戦モード】過去走データが存在しないため、Pythonの初期勝率は無効化されています。調教時計と血統からGeminiが単独で印を決定します（原則見送り推奨）。")
             st.markdown("<div class='section-header'>📊 1. 出走馬一覧（過去走データなし）</div>", unsafe_allow_html=True)
             st.markdown(generate_base_table(res_df, is_shinba=True), unsafe_allow_html=True)
         else:
@@ -684,26 +688,31 @@ if st.session_state.get('selected_race_id'):
                         </div>
                         """, unsafe_allow_html=True)
                         
+                        # ==========================================
+                        # 🎟 最終買い目判定（完全二刀流 実戦ルール）
+                        # ==========================================
                         h_o = merged.iloc[0]
                         h_m = merged.iloc[1]
                         
                         chuu_horses = merged[merged['最終印'] == '注']
                         chuu_html = ""
+                        chuu_list_text = []
                         if not chuu_horses.empty:
-                            chuu_list_text = [f"<b>【馬番{str(ch.get('馬番',''))} {ch['馬名']}】</b>(倍率 ×{ch['補正係数']:.2f}) : {ch.get('短評', '-')}" for _, ch in chuu_horses.iterrows()]
-                            chuu_html = f"""
-                            <div style='margin-top: 12px; padding: 10px 14px; background-color: #fff9e6; border-left: 4px solid #f39c12; border-radius: 4px;'>
-                                <div style='font-weight: bold; color: #d35400; font-size: 15px;'>🔥【仕上がり超抜の特注伏兵（注）】</div>
-                                <div style='font-size: 14px; color: #444; margin-top: 4px; line-height: 1.6;'>{'<br>'.join(chuu_list_text)}</div>
-                            </div>
-                            """
+                            medals = ['🥇', '🥈']
+                            for idx_c, (_, ch) in enumerate(chuu_horses.iterrows()):
+                                m_str = str(ch.get('馬番', ''))
+                                umaban = f"{int(float(m_str)):02d}" if m_str and not m_str.startswith('90') else "-"
+                                medal = medals[idx_c] if idx_c < len(medals) else "・"
+                                score_label = f"スコア {ch['補正係数']:.2f}" if is_shinba else f"倍率 ×{ch['補正係数']:.2f}"
+                                chuu_list_text.append(f"<b>{medal}【馬番{umaban} {ch['馬名']}】</b>({score_label}) : {ch.get('短評', '-')}")
+                            
+                            chuu_html = f"<div style='margin-top: 12px; padding: 10px 14px; background-color: #fff9e6; border-left: 4px solid #f39c12; border-radius: 4px;'><div style='font-weight: bold; color: #d35400; font-size: 15px;'>🔥【仕上がり超抜の特注伏兵（注）】</div><div style='font-size: 14px; color: #444; margin-top: 4px; line-height: 1.6;'>{'<br>'.join(chuu_list_text)}</div></div>" 
                             aite_label = "◯, ▲, △, ☆, 注"
-                            ticket_count = f"計{6 + len(chuu_horses)*4 - (1 if len(chuu_horses)==2 else 0)}点"
+                            ticket_count_label = f"計{6 + len(chuu_horses)*4 - (1 if len(chuu_horses)==2 else 0)}点"
                         else:
                             aite_label = "◯, ▲, △, ☆"
-                            ticket_count = "計6点"
+                            ticket_count_label = "計6点"
 
-                        # 余計な条件分岐バッジを全て削除し、純粋に2パターンの買い目を併記するだけにする
                         st.markdown("<div class='sense-card'>", unsafe_allow_html=True)
                         st.markdown("<div class='sense-title'>🎟 当日の馬場に応じた推奨買い目</div>", unsafe_allow_html=True)
                         
@@ -712,20 +721,21 @@ if st.session_state.get('selected_race_id'):
                             当日の実際の天候・馬場に合わせて、以下のどちらかの買い目を選択してください。
                         </div>
                         <ul style='margin-top: 5px; margin-bottom: 10px; font-size: 15px; color: #333;'>
-                            <li><span class='strategy-badge-good' style='margin-bottom: 4px;'>☀️【良馬場なら】</span> <b>三連複 ◎1頭軸流し</b> ➔ 相手: {aite_label} ({ticket_count})</li>
+                            <li><span class='strategy-badge-good' style='margin-bottom: 4px;'>☀️【良馬場なら】</span> <b>三連複 ◎1頭軸流し</b> ➔ 相手: {aite_label} ({ticket_count_label})</li>
                             <li style='margin-top: 10px;'><span class='strategy-badge-wet' style='margin-bottom: 4px;'>🌧【稍重・重・不良なら】</span> <b>◎ {h_o['馬名']}</b> の単勝500円 ＋ 複勝500円（計1000円）</li>
                         </ul>
                         """, unsafe_allow_html=True)
                             
                         st.markdown(f"""
-                            <div style='margin-top: 15px; border-top: 1px dashed #ccc; padding-top: 10px;'>
-                                <b>【本線単勝・馬連】</b>: ◎ {h_o['馬名']} (推定勝率 {h_o['final_prob']*100:.1f}%) ⇄ ◯ {h_m['馬名']}
-                            </div>
-                            {chuu_html}
-                        </div>
-                        """, unsafe_allow_html=True)
+<div style='margin-top: 15px; border-top: 1px dashed #ccc; padding-top: 10px;'>
+    <b>【本線単勝・馬連】</b>: ◎ {h_o['馬名']} (推定勝率 {h_o['final_prob']*100:.1f}%) ⇄ ◯ {h_m['馬名']}
+</div>
+{chuu_html}
+</div>
+""", unsafe_allow_html=True)
                         
-                        st.markdown(f"<div class='section-header'>🔥 2. 数学融合結果（Python地力 × Gemini倍率）</div>", unsafe_allow_html=True)
+                        section2_header = "🔥 2. Gemini単独評価結果（調教ラップ×血統適性ソート）" if is_shinba else f"🔥 2. 数学融合結果（Python地力 × Gemini倍率 / {mode_label}）"
+                        st.markdown(f"<div class='section-header'>{section2_header}</div>", unsafe_allow_html=True)
                         st.markdown(generate_fusion_multiplied_table(merged, is_shinba=is_shinba), unsafe_allow_html=True)
                 
                 except Exception as e:
