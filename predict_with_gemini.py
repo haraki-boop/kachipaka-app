@@ -381,7 +381,7 @@ def generate_base_table(disp_df, is_shinba=False):
         kinryo_val = float(r.get('斤量', 55.0))
         mark = r.get('初期印', '消')
         
-        ninki_disp = f"{int(float(r['人気']))}番人気" if pd.notna(r.get('人気')) else "-"
+        ninki_disp = f"{int(float(r['人気']))}人気" if pd.notna(r.get('人気')) else "-"
         odds_disp = f"{float(r['オッズ']):.1f}" if pd.notna(r.get('オッズ')) else "-"
         
         prob_disp = f"<span style='color:#7f8c8d;'>({win_val:.1f}%)</span>" if is_shinba else f"<b>{win_val:.1f}%</b>"
@@ -412,7 +412,7 @@ def generate_fusion_multiplied_table(merged_df, is_shinba=False):
         
         ninki_val = int(float(r['人気'])) if pd.notna(r.get('人気')) else 99
         odds_val = float(r['オッズ']) if pd.notna(r.get('オッズ')) else 99.9
-        ninki_disp = f"{ninki_val}番人気 ({odds_val:.1f}倍)" if ninki_val != 99 else "-"
+        ninki_disp = f"{ninki_val}人気 ({odds_val:.1f}倍)" if ninki_val != 99 else "-"
         
         if mult >= 1.2:
             mult_str = f"<span class='multiplier-up'>×{mult:.2f} ⬆</span>" if not is_shinba else f"<span class='multiplier-up'>★ {mult:.2f}</span>"
