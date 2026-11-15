@@ -37,6 +37,8 @@ st.markdown("""
     .sense-card { background-color: #ffffff; border-left: 6px solid #2980b9; padding: 16px 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
     .sense-title { font-size: 1.3rem; font-weight: bold; color: #2c3e50; border-bottom: 2px solid #ecf0f1; padding-bottom: 8px; margin-bottom: 12px; }
     
+    .ticket-badge { font-size: 1.1rem; font-weight: bold; color: #d35400; background: #fef5e7; padding: 4px 10px; border-radius: 4px; display: inline-block; }
+    
     .gemini-view-card { background-color: #f0f8ff; border-left: 5px solid #3498db; padding: 16px 20px; border-radius: 5px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
     .gemini-view-title { color: #2980b9; font-size: 1.2rem; font-weight: bold; margin-bottom: 8px; }
     .gemini-view-text { font-size: 15px; color: #333; line-height: 1.6; margin: 0; }
@@ -47,6 +49,7 @@ st.markdown("""
     
     .strategy-badge-good { background: linear-gradient(135deg, #f39c12 0%, #d35400 100%); color: white; padding: 6px 12px; border-radius: 6px; font-size: 14px; font-weight: bold; display: inline-block; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 10px;}
     .strategy-badge-wet { background: linear-gradient(135deg, #16a085 0%, #0e6655 100%); color: white; padding: 6px 12px; border-radius: 6px; font-size: 14px; font-weight: bold; display: inline-block; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 10px;}
+    .strategy-badge-skip { background: linear-gradient(135deg, #95a5a6 0%, #7f8c8d 100%); color: white; padding: 6px 12px; border-radius: 6px; font-size: 14px; font-weight: bold; display: inline-block; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 10px;}
 
     div.stButton > button { background: linear-gradient(135deg, #3498db 0%, #2980b9 100%); color: white; border: none; border-radius: 6px; padding: 12px 24px; font-weight: bold; font-size: 17px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: all 0.3s ease; }
     div.stButton > button:hover { background: linear-gradient(135deg, #2980b9 0%, #1f618d 100%); box-shadow: 0 6px 8px rgba(0,0,0,0.15); transform: translateY(-2px); }
@@ -70,7 +73,7 @@ class HorseCoefficient(BaseModel):
         description="好走確率評価。通常レースでは確率補正倍率（0.50〜1.60）。新馬戦では絶対好走評価スコア（0.50〜1.60）。"
     )
     短評: str = Field(
-        description="なぜその数値を付与したかの物理的理由（調教ラップ、斤量差分など）"
+        description="なぜその数値を付与したかの物理的・定性的理由（調教ラップ、斤量差分、コース適合度など）"
     )
 
 class RaceCoefficientResult(BaseModel):
@@ -82,11 +85,11 @@ class RaceCoefficientResult(BaseModel):
     )
 
 # ==========================================
-# 🧠 システムプロンプト（完全版の復元：血統加点のみ削除し、斤量等の厳格ルールは維持）
+# 🧠 システムプロンプト（共通ベース＋クラス別分岐アドオン）
 # ==========================================
 base_system_instruction = """
 # 役割定義
-あなたは統計モデル（Python）が算出したベース勝率に対し、直前の物理データから乗算補正倍率を付与する「精密レバレッジ鑑定AI」です。
+あなたは統計モデル（Python）が算出したベース勝率に対し、直前の物理・定性データから乗算補正倍率を付与する「精密レバレッジ鑑定AI」です。
 印を決める必要はありません。通常レースではレース全体の平均倍率が【1.00前後】に収束するようメリハリをつけ、各馬の好走確率を何倍にすべきか【0.50 〜 1.60】の補正倍率を客観的根拠のみで精密に鑑定してください。
 
 # 厳格な共通鑑定ルール
@@ -94,22 +97,21 @@ base_system_instruction = """
 2. 【調教減速馬への加点厳禁】: 調教分析に「減速」と記載がある馬には、いかなる理由があっても1.00を超える倍率を付与してはならない（必ず1.00以下とせよ）。
 3. 【規定重量・勝利による斤量増の減点禁止】: 牡馬58kg・牝馬56kgはJRAの標準規定重量である。また「前走1〜2着」の好走馬が別定・昇級で斤量が増えるのは実力の証明であり、これを理由に減点してはならない。59kg以上のトップハンデ、または前走3着以下からの急激な重量増（+3.0kg以上）のみ減点対象とせよ。
 4. 【単なる軽ハンデ先行の過剰評価禁止】: 軽ハンデ・先行脚質という理由だけで1.50以上の特大倍率をつけてはならない。1.35以上の高倍率は必ず「🔥【極限加速】」「🔥【着順詐欺判定】」「【減量恩恵】」の物理的裏付けを伴う馬に付与せよ。
-5. 【主観ノイズの遮断】: 記者コメントや主観的な血統への忖度等の主観は排除し、Pythonが算出した「調教ラップ差分」「斤量差分」という物理事実のみを根拠とせよ。
-6. 【出力形式と短評】: 出走全頭分を欠落なく出力し、短評には「なぜその倍率にしたのか（調教ラップ値・斤量など）」の物理根拠を簡潔に明記せよ。
+5. 【主観ノイズの遮断】: 記者コメント等の主観は排除し、Pythonが算出した「調教ラップ差分」「斤量差分」「血統適性」という物理事実のみを根拠とせよ。
+6. 【出力形式と短評】: 出走全頭分を欠落なく出力し、短評には「なぜその倍率にしたのか（調教ラップ値・脚質など）」の物理根拠を簡潔に明記せよ。
 """
 
 shinba_addon = """
 # 【特注モード：新馬戦（過去走なし）】
-- Python勝率は完全に無視し、調教ラップの物理時計・加速度のみから、各馬の絶対好走評価値（0.50〜1.60）を単独鑑定せよ。
-- 終いの加速が鋭い馬に1.40〜1.60を与え、仕上がり途上や減速調教の馬は0.50〜0.85として明確に差をつけよ。
+- Python勝率は完全に無視し、調教ラップの物理時計・加速度と血統コース適性のみから、各馬の絶対好走評価値（0.50〜1.60）を単独鑑定せよ。
+- 終いの加速が鋭く適性が合致する馬に1.40〜1.60を与え、仕上がり途上や減速調教の馬は0.50〜0.85として明確に差をつけよ。
 """
 
 age2_addon = """
 # 【特注モード：2歳戦（未勝利・1勝クラス）— 成長・一変重視】
 2歳戦は馬の完成度が低く、1戦ごとの「急成長・一変」が結果のすべてを決める。以下の基準で倍率を配分せよ：
 - 1.45 〜 1.60（一変・急成長レバレッジ）:
-  調教分析に「🔥【極限加速】」を持ち、前走4〜9着（掲示板前後）から調教ラップの加速度が大きく良化している成長馬。
-  または「🔥【着順詐欺判定】」を持ち、調教が加速している馬。
+  調教分析に「🔥【極限加速】」を持ち、前走4〜9着（掲示板前後）から調教ラップの加速度が大きく良化している成長馬。または「🔥【着順詐欺判定】」を持ち調教が加速している馬。
 - 1.25 〜 1.40（大幅プラス補正）:
   確定タグ（「🔥【極限加速】」「【減量恩恵】」）を持つ馬、または前走4〜8着で調教が前F比-0.5s以上鋭く加速している馬。
 - 1.05 〜 1.20（標準プラス補正）:
@@ -122,7 +124,7 @@ old_horse_addon = """
 # 【特注モード：3歳以上（古馬戦・条件戦・特別・重賞）— 地力・CW切れ味・着順詐欺重視】
 古馬戦はすでに基礎能力が固まっており、「鋭いギアチェンジ（極限加速）」と「前走の不利・着順詐欺」が最も馬券に直結する。以下の基準で倍率を配分せよ：
 - 1.50 〜 1.60（特注・極限レバレッジ / 1レース最大0〜2頭まで）:
-  調教分析に「🔥【極限加速】」を持ち、さらに「🔥【着順詐欺判定】」「休養明け（中10週以上）の好走歴」のいずれかが噛み合った馬。ここに入った馬は圏外から「注」として強制浮上する。
+  調教分析に「🔥【極限加速】」を持ち、さらに「🔥【着順詐欺判定】」「休養明け（中10週以上）の好走歴」「高い血統適性」のいずれかが噛み合った馬。
 - 1.35 〜 1.48（大幅プラス補正）:
   「🔥【極限加速】」「🔥【着順詐欺判定】」「【減量恩恵】」のいずれかの確定タグを持ち、上がり3Fの切れ味や条件好転が顕著な馬（3〜6番人気帯の伏兵を積極的に拾い上げよ）。
 - 1.10 〜 1.30（標準プラス補正）:
@@ -390,9 +392,9 @@ def generate_base_table(disp_df, is_shinba=False):
 def generate_fusion_multiplied_table(merged_df, is_shinba=False):
     html = "<div class='table-container'><table class='kachi-table'>"
     if is_shinba:
-        html += "<tr><th>馬番</th><th style='text-align:left;'>馬名</th><th>人気(前日)</th><th>Gemini評価値</th><th>最終印</th><th style='text-align:left; min-width: 420px;'>Gemini単独評価根拠 (調教・物理バイアス)</th></tr>"
+        html += "<tr><th>馬番</th><th style='text-align:left;'>馬名</th><th>人気(前日)</th><th>Gemini評価値</th><th>最終印</th><th style='text-align:left; min-width: 420px;'>Gemini単独評価根拠 (調教・血統・厩舎バイアス)</th></tr>"
     else:
-        html += "<tr><th>初期印</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>人気(前日)</th><th>元勝率</th><th>Gemini倍率</th><th>補正後勝率</th><th>最終印</th><th style='text-align:left; min-width: 420px;'>補正理由 (物理根拠のみ)</th></tr>"
+        html += "<tr><th>初期印</th><th>馬番</th><th style='text-align:left;'>馬名</th><th>人気(前日)</th><th>元勝率</th><th>Gemini倍率</th><th>補正後勝率</th><th>最終印</th><th style='text-align:left; min-width: 420px;'>補正理由 (物理・定性根拠)</th></tr>"
         
     for _, r in merged_df.iterrows():
         m_num = str(r.get('馬番', ''))
@@ -489,6 +491,7 @@ if st.session_state.get('selected_race_id'):
     
     res_df, pat, rec_ticket, buy_detail, race_day = render_race_predictions(t_id)
     
+    # 💡 クラス判定（新馬戦 / 2歳戦 / 3歳以上古馬戦）
     is_shinba = "新馬" in str(display_race_name) or (res_df['前走着順'].isna().all() if res_df is not None and '前走着順' in res_df.columns else False)
     is_age2 = (not is_shinba) and ("2歳" in str(display_race_name) or (res_df['age'].max() == 2 if res_df is not None and 'age' in res_df.columns else False))
 
@@ -505,7 +508,6 @@ if st.session_state.get('selected_race_id'):
         active_system_instruction = base_system_instruction + "\n" + old_horse_addon
         mode_label = "3歳以上・古馬戦モード"
 
-
     st.markdown(f"<h2>🚀 {r_info['place_name']} {r_info['r_num']}R 【{display_race_name}】 {mode_badge_html} <span style='font-size:18px; color:#7f8c8d;'>({surface_info}{distance_info}m)</span></h2>", unsafe_allow_html=True)
     
     if res_df is not None:
@@ -519,20 +521,23 @@ if st.session_state.get('selected_race_id'):
         
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # ----------------------------------------------------
-        # UIから馬場選択ラジオボタンと見送りバッジ判定を完全削除
-        # ----------------------------------------------------
-
-        btn_label = f"⚡ クラス別物理バイアスのみで精密レバレッジ補正を実行"
+        btn_label = f"⚡ Geminiによる精密レバレッジ補正を実行（{mode_label}）"
         if st.button(btn_label, type="primary", use_container_width=True):
             if not GEMINI_API_KEY:
                 st.error("【設定エラー】GEMINI_API_KEYが設定されていません。")
                 st.stop()
 
             total_horses = len(res_df)
+
+            weights = res_df['斤量'].astype(float)
+            min_w = float(weights.min())
+            max_w = float(weights.max())
+            avg_w = float(weights.mean())
+            has_weight_gap = (max_w - min_w) >= 0.5
+
             res_df['chokyo_summary'] = res_df['調教タイム'].apply(parse_training_lap_stats)
             res_df['weight_info'] = [
-                format_weight_analysis(float(r.get('斤量', 55.0)), float(res_df['斤量'].min()), float(res_df['斤量'].max()), float(res_df['斤量'].mean()), (float(res_df['斤量'].max()) - float(res_df['斤量'].min())) >= 0.5, r.get('前走斤量'), r.get('前々走斤量'), r.get('前走着順', ''))
+                format_weight_analysis(float(r.get('斤量', 55.0)), min_w, max_w, avg_w, has_weight_gap, r.get('前走斤量'), r.get('前々走斤量'), r.get('前走着順', ''))
                 for _, r in res_df.iterrows()
             ]
 
@@ -544,6 +549,9 @@ if st.session_state.get('selected_race_id'):
                 weight_info = r['weight_info']
                 jockey_val = str(r.get('騎手', '-'))
                 kyakushitsu_val = str(r.get('推測脚質', '-'))
+                sire = str(r.get('父', '不明'))
+                bms = str(r.get('母父', '不明'))
+                blood_info = f"血統: 父[{sire}] 母父[{bms}]"
                 chokyo_summary = r['chokyo_summary']
                 
                 past_summary = parse_past_race_stats(
@@ -558,24 +566,24 @@ if st.session_state.get('selected_race_id'):
                 )
                 
                 python_prob_str = f"Python勝率:(新馬戦のため無効)" if is_shinba else f"Python勝率:{win_val:.1f}%"
-                
-                # 血統情報を除外し、物理情報（斤量・調教・前走）のみ渡す
                 info = (f"馬番:{display_m} | 馬名:{r.get('馬名','')} | {python_prob_str} | {weight_info} | "
-                        f"脚質:{kyakushitsu_val} | 騎手:{jockey_val} | "
+                        f"脚質:{kyakushitsu_val} | 騎手:{jockey_val} | {blood_info} | "
                         f"前走:{past_summary} | 調教分析:{chokyo_summary}")
                 table_summary.append(info)
 
             prompt = f"""
 以下の出走馬データに基づき、指示に従って全出走馬の補正係数（0.50〜1.60）と理由を出力してください。
 
+【適用評価モード】: {mode_label}
 【対象レース】: {r_info['place_name']} {r_info['r_num']}R 【{display_race_name}】 ({surface_info}{distance_info}m)
 【出走頭数】: {total_horses}頭
+【斤量条件】: {"【全頭同斤量（斤量差なし）】" if not has_weight_gap else f"【斤量差あり（ハンデ/別定）】最軽量:{min_w:.1f}kg 〜 最重量:{max_w:.1f}kg (最大格差:{max_w-min_w:.1f}kg)"}
 
 【出走馬データ一覧】
 {chr(10).join(table_summary)}
 """
 
-            with st.spinner(f"🧠 Geminiが【{mode_label}】の物理バイアスのみで精密鑑定中..."):
+            with st.spinner(f"🧠 Geminiが【{mode_label}】で各馬の調教・血統適性を精密鑑定中..."):
                 client = genai.Client(api_key=GEMINI_API_KEY, http_options={"api_version": "v1beta"})
                 try:
                     response = client.models.generate_content(
@@ -600,7 +608,7 @@ if st.session_state.get('selected_race_id'):
                         merged['補正係数'] = merged['補正係数'].fillna(1.0)
                         merged['短評'] = merged['短評'].fillna('データ保留')
                         
-                        # 🛡️ 防衛的プログラミング（上限・下限クリップ・斤量恩恵判定）
+                        # 🛡️ Pythonバックエンド防衛的プログラミング
                         clipped_coeffs = []
                         for _, r in merged.iterrows():
                             mult = float(r.get('補正係数', 1.0))
@@ -624,10 +632,11 @@ if st.session_state.get('selected_race_id'):
                                     is_age2_growth = True
 
                             has_special_flag = ("極限加速" in c_tag) or ("減量恩恵" in w_tag) or is_num_weight_bonus or is_age2_growth
+                            is_gensoku = "減速" in c_tag
                             
                             if not is_shinba and not has_special_flag and mult > 1.30:
                                 mult = 1.30
-                            if "減速" in c_tag and mult > 1.00:
+                            if is_gensoku and mult > 1.00:
                                 mult = 1.00
                                 
                             clipped_coeffs.append(mult)
@@ -642,28 +651,35 @@ if st.session_state.get('selected_race_id'):
                             merged['final_prob'] = merged['raw_final'] / merged['raw_final'].sum()
                             merged = merged.sort_values(by='final_prob', ascending=False).reset_index(drop=True)
                         
-                        # 印の付与
+                        # 🎯 最終印の決定（本線5頭 ＋ 圏外極限加速・注最大2頭）
                         marks = ['◎', '◯', '▲', '△', '☆']
                         final_marks = ['消'] * len(merged)
+
                         for idx in range(min(len(marks), len(merged))):
                             final_marks[idx] = marks[idx]
 
-                        # 注の付与（極限加速 or 1.50以上）
                         chuu_candidates = []
                         for idx in range(len(marks), len(merged)):
                             row_m = merged.iloc[idx]
                             mult = float(row_m.get('補正係数', 1.0))
                             c_tag = str(row_m.get('chokyo_summary', ''))
+                            
                             if ("極限加速" in c_tag) or (mult >= 1.50):
-                                chuu_candidates.append((idx, mult))
-                        chuu_candidates.sort(key=lambda x: -x[1])
+                                t_str = str(row_m.get('調教タイム', ''))
+                                floats = [float(x) for x in re.findall(r'\d+\.?\d*', t_str)]
+                                final_1f = floats[-1] if floats else 99.0
+                                chuu_candidates.append((idx, mult, final_1f))
+
+                        chuu_candidates.sort(key=lambda x: (-x[1], x[2]))
+
                         for candidate in chuu_candidates[:2]:
                             final_marks[candidate[0]] = '注'
+
                         merged['最終印'] = final_marks
                         
                         st.markdown(f"""
                         <div class='gemini-view-card'>
-                            <div class='gemini-view-title'>📝 トラックマンGeminiのレース見解 ({mode_label})</div>
+                            <div class='gemini-view-title'>📝 トラックマンGeminiのレース物理バイアス統括 ({mode_label})</div>
                             <p class='gemini-view-text'>{result.summary}</p>
                         </div>
                         """, unsafe_allow_html=True)
@@ -687,7 +703,7 @@ if st.session_state.get('selected_race_id'):
                             aite_label = "◯, ▲, △, ☆"
                             ticket_count = "計6点"
 
-                        # 買い目表示（馬場ごとに併記するだけ）
+                        # 余計な条件分岐バッジを全て削除し、純粋に2パターンの買い目を併記するだけにする
                         st.markdown("<div class='sense-card'>", unsafe_allow_html=True)
                         st.markdown("<div class='sense-title'>🎟 当日の馬場に応じた推奨買い目</div>", unsafe_allow_html=True)
                         
